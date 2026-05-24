@@ -119,6 +119,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mode = 'desktop' }) => {
   }, []);
 
   useEffect(() => {
+    if (!isAdmin) return;
     const loadQuotas = async () => {
       const data = await fetchQuotaCheckers();
       setDisplayNameMap(new Map(data.knownTypes.map((t) => [t.type, t.displayName])));
@@ -127,7 +128,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mode = 'desktop' }) => {
     loadQuotas();
     const interval = setInterval(loadQuotas, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isAdmin]);
 
   const parseVersionTag = (tag: string): [number, number, number, number] | null => {
     const calverMatch = tag.match(/^(\d{4})\.(\d{2})\.(\d{2})\.(\d+)$/);

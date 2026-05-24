@@ -5,6 +5,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Logs } from './pages/Logs';
 import { Providers } from './pages/Providers';
 import { Models } from './pages/Models';
+import { ModelInsights } from './pages/ModelInsights';
 import { Keys } from './pages/Keys';
 import { Config } from './pages/Config';
 import { SystemLogs } from './pages/SystemLogs';
@@ -74,6 +75,14 @@ const AppRoutes = () => {
                   element={
                     <ProtectedRoute requireAdmin>
                       <Models />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/models/:modelId/insights"
+                  element={
+                    <ProtectedRoute requireAdmin>
+                      <ModelInsights />
                     </ProtectedRoute>
                   }
                 />

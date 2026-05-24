@@ -1,10 +1,12 @@
 import React from 'react';
-import { Trash2, Loader2, CheckCircle, AlertTriangle, Play } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Trash2, Loader2, CheckCircle, AlertTriangle, Play, BarChart3 } from 'lucide-react';
 import { CopyButton } from '../ui/CopyButton';
 import { Button } from '../ui/Button';
 import { Switch } from '../ui/Switch';
 import { ModelTypeBadge } from './ModelTypeBadge';
 import type { Alias, Provider, Cooldown } from '../../lib/api';
+import { modelInsightsPath } from '../../lib/model-insights';
 
 interface Props {
   alias: Alias;
@@ -43,12 +45,36 @@ export const AliasMobileCard: React.FC<Props> = ({
   return (
     <article key={alias.id} className="rounded-md border border-border-glass bg-bg-subtle p-3">
       <div className="flex items-start justify-between gap-3">
-        <button type="button" onClick={() => onEdit(alias)} className="min-w-0 flex-1 text-left">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <div className="truncate font-heading text-sm font-semibold text-text">{alias.id}</div>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => onEdit(alias)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onEdit(alias);
+                }
+              }}
+              className="truncate font-heading text-sm font-semibold text-text cursor-pointer"
+            >
+              {alias.id}
+            </div>
             <CopyButton value={alias.id} size="sm" />
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => onEdit(alias)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onEdit(alias);
+              }
+            }}
+            className="mt-1 flex flex-wrap items-center gap-2 cursor-pointer"
+          >
             <ModelTypeBadge type={alias.type} />
             {alias.metadata && (
               <span className="inline-flex rounded border border-border-glass px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
@@ -56,7 +82,7 @@ export const AliasMobileCard: React.FC<Props> = ({
               </span>
             )}
           </div>
-        </button>
+        </div>
         <Button
           variant="ghost"
           size="icon"
@@ -66,6 +92,14 @@ export const AliasMobileCard: React.FC<Props> = ({
         >
           <Trash2 size={14} />
         </Button>
+        <Link
+          to={modelInsightsPath(alias.id)}
+          className="flex items-center justify-center h-8 w-8 rounded text-primary no-underline transition-colors hover:bg-bg-hover"
+          title={`View insights for ${alias.id}`}
+          aria-label={`View insights for ${alias.id}`}
+        >
+          <BarChart3 size={14} />
+        </Link>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs">

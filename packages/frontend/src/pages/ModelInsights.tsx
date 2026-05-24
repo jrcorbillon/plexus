@@ -298,11 +298,11 @@ export const ModelInsights: React.FC = () => {
           setIsModelConfigured(allIds.has(aliasForThisCall));
         }
       } catch {
-        // If alias check fails, allow the page to continue;
-        // the insights API will still work for configured models
+        // If alias check fails, proceed with insights fetch anyway.
+        // Treat as configured so we don't block on null (which means "pending").
         if (!cancelled && decodedModelIdRef.current === aliasForThisCall) {
           setConfigAlias(aliasForThisCall);
-          setIsModelConfigured(null);
+          setIsModelConfigured(true);
         }
       }
     })();

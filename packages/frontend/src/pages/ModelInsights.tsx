@@ -778,6 +778,90 @@ export const ModelInsights: React.FC = () => {
                       </ChartResponsiveContainer>
                     </ChartPanel>
                   </Card>
+
+                  {/* E2E TPS chart */}
+                  <Card title="E2E TPS over Time">
+                    <ChartPanel>
+                      <ChartResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={chartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-glass)" />
+                          <XAxis
+                            dataKey="label"
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <YAxis
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                            tickFormatter={(v: number) => `${formatTPS(v)} tok/s`}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip
+                            content={
+                              <BucketTooltip
+                                formatters={{
+                                  avgE2eTps: (v) => [`${formatTPS(v)} tok/s`, 'E2E TPS'],
+                                }}
+                              />
+                            }
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="avgE2eTps"
+                            stroke={CHART_COLORS.throughput}
+                            fill={CHART_COLORS.throughput}
+                            fillOpacity={0.15}
+                            name="E2E TPS"
+                          />
+                        </AreaChart>
+                      </ChartResponsiveContainer>
+                    </ChartPanel>
+                  </Card>
+
+                  {/* Cache Hit Rate chart */}
+                  <Card title="Cache Hit Rate over Time">
+                    <ChartPanel>
+                      <ChartResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={chartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-glass)" />
+                          <XAxis
+                            dataKey="label"
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <YAxis
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                            tickFormatter={(v: number) => formatPercent(v * 100)}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip
+                            content={
+                              <BucketTooltip
+                                formatters={{
+                                  cacheHitRate: (v) => [formatPercent(v * 100), 'Cache Hit Rate'],
+                                }}
+                              />
+                            }
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="cacheHitRate"
+                            stroke={CHART_COLORS.cachedTokens}
+                            fill={CHART_COLORS.cachedTokens}
+                            fillOpacity={0.15}
+                            name="Cache Hit Rate"
+                          />
+                        </AreaChart>
+                      </ChartResponsiveContainer>
+                    </ChartPanel>
+                  </Card>
                 </div>
               )}
 

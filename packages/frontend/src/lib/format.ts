@@ -46,11 +46,19 @@ export function formatTimeAgo(seconds: number): string {
 /**
  * Format large numbers with K, M, B suffixes (e.g., "1.3k", "2.5M")
  */
+const NUMBER_SCALE = new humanFormat.Scale({
+  'K': 1e3,
+  'M': 1e6,
+  'B': 1e9,
+  'T': 1e12,
+});
+
 export function formatNumber(num: number, decimals: number = 1): string {
   if (num === 0) return '0';
   return humanFormat(num, {
     maxDecimals: decimals,
     separator: '',
+    scale: NUMBER_SCALE,
   });
 }
 

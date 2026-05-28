@@ -37,11 +37,14 @@ import {
 import { api } from '../lib/api';
 import {
   formatNumber,
+  formatInteger,
   formatCost,
   formatMs,
   formatPercent,
   formatTPS,
   formatDateTimeLabel,
+  niceCountAxisMax,
+  niceCountAxisTicks,
 } from '../lib/format';
 
 // ---------------------------------------------------------------------------
@@ -408,6 +411,11 @@ export const ModelInsights: React.FC = () => {
     }));
   }, [dataForCurrentAlias]);
 
+  const requestsChartAxis = useMemo(() => {
+    const max = chartData.reduce((m, d) => Math.max(m, d.requests), 0);
+    return { max: niceCountAxisMax(max), ticks: niceCountAxisTicks(max) };
+  }, [chartData]);
+
   return (
     <div className="flex flex-col min-h-full">
       <PageHeader
@@ -526,7 +534,7 @@ export const ModelInsights: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                 <HeroMetric
                   label="Requests"
-                  value={formatNumber(dataForCurrentAlias.metrics.requests, 0)}
+                  value={formatInteger(dataForCurrentAlias.metrics.requests)}
                   accentColor="var(--color-primary)"
                 />
                 <HeroMetric
@@ -593,14 +601,17 @@ export const ModelInsights: React.FC = () => {
                           <YAxis
                             stroke="var(--color-text-secondary)"
                             tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                            tickFormatter={(v: number) => formatNumber(v, 0)}
+                            domain={[0, requestsChartAxis.max]}
+                            ticks={requestsChartAxis.ticks}
+                            allowDecimals={false}
+                            tickFormatter={(v: number) => formatInteger(v)}
                             axisLine={false}
                             tickLine={false}
                           />
                           <Tooltip
                             content={
                               <BucketTooltip
-                                formatters={{ requests: (v) => [formatNumber(v, 0), 'Requests'] }}
+                                formatters={{ requests: (v) => [formatInteger(v), 'Requests'] }}
                               />
                             }
                           />
@@ -795,7 +806,7 @@ export const ModelInsights: React.FC = () => {
                           <YAxis
                             stroke="var(--color-text-secondary)"
                             tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                            tickFormatter={(v: number) => `${formatTPS(v)} tok/s`}
+                            tickFormatter={(v: number) => formatTPS(v)}
                             axisLine={false}
                             tickLine={false}
                           />

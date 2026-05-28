@@ -63,6 +63,46 @@ export function formatNumber(num: number, decimals: number = 1): string {
 }
 
 /**
+ * Format a count with full precision and locale grouping (e.g. 3000 -> "3,000").
+ * Use for hero metrics and chart axes where abbreviated K/M labels are misleading.
+ */
+export function formatInteger(num: number): string {
+  if (!Number.isFinite(num)) return '0';
+  return Math.round(num).toLocaleString();
+}
+
+/** Pick a human-friendly step for count charts (1, 2, 5, 10, 20, 50, 100, …). */
+export function niceCountStep(maxValue: number, targetTicks = 5): number {
+  if (maxValue <= 0) return 1;
+  const rough = maxValue / targetTicks;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
+  const normalized = rough / magnitude;
+  let niceNormalized: number;
+  if (normalized <= 1) niceNormalized = 1;
+  else if (normalized <= 2) niceNormalized = 2;
+  else if (normalized <= 5) niceNormalized = 5;
+  else niceNormalized = 10;
+  return niceNormalized * magnitude;
+}
+
+/** Upper bound for a count chart Y-axis aligned to nice tick steps. */
+export function niceCountAxisMax(maxValue: number, targetTicks = 5): number {
+  const step = niceCountStep(maxValue, targetTicks);
+  return Math.max(step, Math.ceil(maxValue / step) * step);
+}
+
+/** Tick values from 0 through a nice upper bound for count charts. */
+export function niceCountAxisTicks(maxValue: number, targetTicks = 5): number[] {
+  const step = niceCountStep(maxValue, targetTicks);
+  const axisMax = niceCountAxisMax(maxValue, targetTicks);
+  const ticks: number[] = [];
+  for (let v = 0; v <= axisMax; v += step) {
+    ticks.push(v);
+  }
+  return ticks;
+}
+
+/**
  * Format token counts (same as formatNumber but specifically for tokens)
  */
 export function formatTokens(tokens: number): string {

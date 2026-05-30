@@ -1,7 +1,9 @@
-import { Edit2, Trash2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Edit2, Trash2, BarChart3 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Switch } from '../ui/Switch';
 import type { Provider } from '../../lib/api';
+import { providerInsightsPath } from '../../lib/provider-insights';
 
 interface Props {
   providers: Provider[];
@@ -45,6 +47,15 @@ export function ProviderList({
                   <div className="flex items-center gap-2">
                     <Edit2 size={12} className="shrink-0 text-text-muted" />
                     <h3 className="truncate text-sm font-semibold text-text">{p.id}</h3>
+                    <Link
+                      to={providerInsightsPath(p.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="bg-none border-none cursor-pointer p-1 rounded text-primary opacity-60 transition-opacity hover:opacity-100 no-underline"
+                      title={`View insights for ${p.id}`}
+                      aria-label={`View insights for ${p.id}`}
+                    >
+                      <BarChart3 size={14} />
+                    </Link>
                   </div>
                   <p className="mt-0.5 truncate text-xs text-text-secondary">{p.name}</p>
                 </div>
@@ -132,6 +143,15 @@ export function ProviderList({
                     <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>
                       ( {p.name} )
                     </div>
+                    <Link
+                      to={providerInsightsPath(p.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="bg-none border-none cursor-pointer p-1 rounded text-primary opacity-60 transition-opacity hover:opacity-100 no-underline"
+                      title={`View insights for ${p.id}`}
+                      aria-label={`View insights for ${p.id}`}
+                    >
+                      <BarChart3 size={14} />
+                    </Link>
                   </div>
                 </td>
                 <td className="px-4 py-3 text-left border-b border-border-glass text-text">

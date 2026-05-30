@@ -1830,7 +1830,7 @@ describe('GET /v0/management/model-insights', () => {
     const body = res.json();
     const providers = body.providers;
 
-    // Should have 3 provider groups: provider-a, provider-b, (unknown)
+    // Should have 3 provider groups: provider-a, provider-b, null
     expect(providers.length).toBe(3);
 
     // provider-a should have 2 model sub-groups
@@ -1845,10 +1845,10 @@ describe('GET /v0/management/model-insights', () => {
     expect(providerB.metrics.requests).toBe(1);
     expect(providerB.models.length).toBe(1);
 
-    // unknown provider
-    const unknownProvider = providers.find((p: any) => p.provider === '(unknown)');
-    expect(unknownProvider).toBeDefined();
-    expect(unknownProvider.metrics.requests).toBe(1);
+    // null provider
+    const nullProvider = providers.find((p: any) => p.provider === null);
+    expect(nullProvider).toBeDefined();
+    expect(nullProvider.metrics.requests).toBe(1);
   });
 
   // =========================================================================

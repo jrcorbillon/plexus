@@ -20,14 +20,15 @@ import {
 import { HeroMetric, SectionMetric, LoadingSkeleton } from '../components/insights/insights-metrics';
 import { useInsightsPage } from '../hooks/useInsightsPage';
 import {
-  fetchModelInsights,
+  fetchProviderInsights,
   TIMELINE_OPTIONS,
   DEFAULT_RANGE_KEY,
-  type ModelInsightSeriesBucket,
-  type ModelInsightsResponse,
-  type ModelInsightProvider,
-  type ModelInsightProviderModel,
-} from '../lib/model-insights';
+  modelDisplayName,
+  type ProviderInsightSeriesBucket,
+  type ProviderInsightsResponse,
+  type ProviderInsightModel,
+  type ProviderInsightModelAlias,
+} from '../lib/provider-insights';
 import { api } from '../lib/api';
 import {
   formatNumber,
@@ -40,61 +41,52 @@ import {
   niceCountAxisTicks,
 } from '../lib/format';
 
-export const ModelInsights: React.FC = () => {
-  const { modelId } = useParams<{ modelId: string }>();
+export const ProviderInsights: React.FC = () => {
+  const { providerId } = useParams<{ providerId: string }>();
   const navigate = useNavigate();
 
-  const decodedModelId = modelId ?? '';
+  const decodedProviderId = providerId ?? '';
 
-  const checkIsConfigured = useCallback(async (alias: string) => {
-    const aliases = await api.getAliases();
-    const allIds = new Set<string>();
-    for (const a of aliases) {
-      allIds.add(a.id);
-      if (a.aliases) {
-        for (const alt of a.aliases) {
-          if (alt) allIds.add(alt);
-        }
-      }
-    }
-    return allIds.has(alias);
+  const checkIsConfigured = useCallback(async (id: string) => {
+    const providers = await api.getProviders();
+    return new Set(providers.map((p) => p.id)).has(id);
   }, []);
 
   const fetchInsights = useCallback(
-    (alias: string, range: Parameters<typeof fetchModelInsights>[1]) =>
-      fetchModelInsights(alias, range),
+    (id: string, range: Parameters<typeof fetchProviderInsights>[1]) =>
+      fetchProviderInsights(id, range),
     []
   );
 
   const {
     activeRange,
     handleRangeSelect,
-    isConfiguredForCurrentEntity: isConfiguredForCurrentAlias,
-    isLoadingCurrentEntity: isLoadingCurrentAlias,
-    errorForCurrentEntity: errorForCurrentAlias,
-    dataForCurrentEntity: dataForCurrentAlias,
+    isConfiguredForCurrentEntity: isConfiguredForCurrentProvider,
+    isLoadingCurrentEntity: isLoadingCurrentProvider,
+    errorForCurrentEntity: errorForCurrentProvider,
+    dataForCurrentEntity: dataForCurrentProvider,
     handleRetry,
-  } = useInsightsPage<ModelInsightsResponse>({
-    entityId: decodedModelId,
+  } = useInsightsPage<ProviderInsightsResponse>({
+    entityId: decodedProviderId,
     defaultRangeKey: DEFAULT_RANGE_KEY,
     checkIsConfigured,
     fetchInsights,
   });
 
-  const handleBackToModels = () => {
-    navigate('/models');
+  const handleBackToProviders = () => {
+    navigate('/providers');
   };
 
   const isEmpty =
-    dataForCurrentAlias !== null &&
-    dataForCurrentAlias.metrics.requests === 0 &&
-    dataForCurrentAlias.providers.length === 0;
+    dataForCurrentProvider !== null &&
+    dataForCurrentProvider.metrics.requests === 0 &&
+    dataForCurrentProvider.models.length === 0;
 
   const chartData = useMemo(() => {
-    if (!dataForCurrentAlias || !dataForCurrentAlias.series.length) return [];
-    return dataForCurrentAlias.series.map((bucket: ModelInsightSeriesBucket) => ({
+    if (!dataForCurrentProvider || !dataForCurrentProvider.series.length) return [];
+    return dataForCurrentProvider.series.map((bucket: ProviderInsightSeriesBucket) => ({
       bucketStartMs: bucket.bucketStartMs,
-      label: formatBucketLabel(bucket.bucketStartMs, dataForCurrentAlias.range.key),
+      label: formatBucketLabel(bucket.bucketStartMs, dataForCurrentProvider.range.key),
       requests: bucket.metrics.requests,
       totalTokens: bucket.metrics.totalTokens,
       inputTokens: bucket.metrics.inputTokens,
@@ -108,7 +100,7 @@ export const ModelInsights: React.FC = () => {
       avgE2eTps: bucket.metrics.avgE2eTps,
       cacheHitRate: bucket.metrics.cacheHitRate,
     }));
-  }, [dataForCurrentAlias]);
+  }, [dataForCurrentProvider]);
 
   const requestsChartAxis = useMemo(() => {
     const max = chartData.reduce((m, d) => Math.max(m, d.requests), 0);
@@ -121,22 +113,22 @@ export const ModelInsights: React.FC = () => {
         title={
           <div className="flex items-center gap-2">
             <BarChart3 size={20} className="text-primary" />
-            <span>Model Insights</span>
+            <span>Provider Insights</span>
           </div>
         }
-        subtitle={decodedModelId}
+        subtitle={decodedProviderId}
         actions={
           <Button
             variant="ghost"
             size="sm"
             leftIcon={<ArrowLeft size={14} />}
-            onClick={handleBackToModels}
+            onClick={handleBackToProviders}
           >
-            Models
+            Providers
           </Button>
         }
       >
-        {isConfiguredForCurrentAlias === true && (
+        {isConfiguredForCurrentProvider === true && (
           <div className="flex flex-wrap items-center gap-1.5">
             {TIMELINE_OPTIONS.map((opt) => (
               <button
@@ -158,33 +150,33 @@ export const ModelInsights: React.FC = () => {
       </PageHeader>
 
       <PageContainer>
-        {isLoadingCurrentAlias && <LoadingSkeleton />}
+        {isLoadingCurrentProvider && <LoadingSkeleton />}
 
-        {!isLoadingCurrentAlias && isConfiguredForCurrentAlias === false && (
+        {!isLoadingCurrentProvider && isConfiguredForCurrentProvider === false && (
           <Card className="mb-6">
             <div className="flex flex-col items-center justify-center py-16 gap-4">
               <AlertTriangle size={32} className="text-warning opacity-60" />
               <div className="text-sm text-text-secondary text-center max-w-md">
-                <strong className="text-text">{decodedModelId}</strong> is not currently configured
-                as a model alias. It may have been removed or the URL may be incorrect.
+                <strong className="text-text">{decodedProviderId}</strong> is not currently configured
+                as a provider. It may have been removed or the URL may be incorrect.
               </div>
               <Link
-                to="/models"
+                to="/providers"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-primary/20 text-primary border border-primary/30 hover:bg-primary/30 transition-colors duration-150"
               >
                 <ArrowLeft size={14} />
-                Back to Models
+                Back to Providers
               </Link>
             </div>
           </Card>
         )}
 
-        {!isLoadingCurrentAlias && errorForCurrentAlias && isConfiguredForCurrentAlias === true && (
+        {!isLoadingCurrentProvider && errorForCurrentProvider && isConfiguredForCurrentProvider === true && (
           <Card className="mb-6">
             <div className="flex flex-col items-center justify-center py-16 gap-4">
               <Activity size={32} className="text-danger opacity-60" />
               <div className="text-sm text-text-secondary text-center max-w-md">
-                {errorForCurrentAlias}
+                {errorForCurrentProvider}
               </div>
               <Button
                 variant="secondary"
@@ -198,76 +190,79 @@ export const ModelInsights: React.FC = () => {
           </Card>
         )}
 
-        {!isLoadingCurrentAlias &&
-          !errorForCurrentAlias &&
-          isConfiguredForCurrentAlias === true &&
+        {!isLoadingCurrentProvider &&
+          !errorForCurrentProvider &&
+          isConfiguredForCurrentProvider === true &&
           isEmpty && (
             <Card className="mb-6">
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <BarChart3 size={32} className="text-text-muted opacity-40" />
                 <div className="text-sm text-text-muted text-center">
-                  No usage data found for <strong className="text-text">{decodedModelId}</strong> in
+                  No usage data found for <strong className="text-text">{decodedProviderId}</strong> in
                   the selected time range.
                 </div>
                 <div className="text-xs text-text-muted">
-                  Try selecting a different time range, or check back after this model has been
+                  Try selecting a different time range, or check back after this provider has been
                   used.
                 </div>
               </div>
             </Card>
           )}
 
-        {!isLoadingCurrentAlias &&
-          !errorForCurrentAlias &&
-          dataForCurrentAlias &&
+        {!isLoadingCurrentProvider &&
+          !errorForCurrentProvider &&
+          dataForCurrentProvider &&
           !isEmpty &&
-          isConfiguredForCurrentAlias === true && (
+          isConfiguredForCurrentProvider === true && (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                 <HeroMetric
                   label="Requests"
-                  value={formatInteger(dataForCurrentAlias.metrics.requests)}
+                  value={formatInteger(dataForCurrentProvider.metrics.requests)}
                   accentColor="var(--color-primary)"
                 />
                 <HeroMetric
                   label="Total Cost"
-                  value={formatCost(dataForCurrentAlias.metrics.totalCost)}
+                  value={formatCost(dataForCurrentProvider.metrics.totalCost)}
                   accentColor="var(--color-success)"
                 />
                 <HeroMetric
-                  label="Avg Latency"
-                  value={formatMs(dataForCurrentAlias.metrics.avgLatencyMs)}
+                  label="Success Rate"
+                  value={formatPercent(dataForCurrentProvider.metrics.successRate * 100)}
                   accentColor="var(--color-info)"
                 />
               </div>
 
               <Card title="Performance" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Success Rate" value={formatPercent(dataForCurrentAlias.metrics.successRate * 100)} />
-                  <SectionMetric label="Avg TTFT" value={formatMs(dataForCurrentAlias.metrics.avgTtftMs)} />
-                  <SectionMetric label="Throughput" value={`${formatTPS(dataForCurrentAlias.metrics.avgThroughputTps)} tok/s`} />
-                  <SectionMetric label="E2E TPS" value={`${formatTPS(dataForCurrentAlias.metrics.avgE2eTps)} tok/s`} />
-                  <SectionMetric label="Cache Hit Rate" value={formatPercent(dataForCurrentAlias.metrics.cacheHitRate * 100)} />
+                  <SectionMetric label="Avg Latency" value={formatMs(dataForCurrentProvider.metrics.avgLatencyMs)} />
+                  <SectionMetric label="Avg TTFT" value={formatMs(dataForCurrentProvider.metrics.avgTtftMs)} />
+                  <SectionMetric label="Throughput" value={`${formatTPS(dataForCurrentProvider.metrics.avgThroughputTps)} tok/s`} />
+                  <SectionMetric label="E2E TPS" value={`${formatTPS(dataForCurrentProvider.metrics.avgE2eTps)} tok/s`} />
+                  <SectionMetric label="Cache Hit Rate" value={formatPercent(dataForCurrentProvider.metrics.cacheHitRate * 100)} />
                 </div>
               </Card>
 
               <Card title="Tokens" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Total" value={formatNumber(dataForCurrentAlias.metrics.totalTokens, 1)} />
-                  <SectionMetric label="Input" value={formatNumber(dataForCurrentAlias.metrics.inputTokens, 1)} />
-                  <SectionMetric label="Output" value={formatNumber(dataForCurrentAlias.metrics.outputTokens, 1)} />
-                  <SectionMetric label="Reasoning" value={formatNumber(dataForCurrentAlias.metrics.reasoningTokens, 1)} />
-                  <SectionMetric label="Cached" value={formatNumber(dataForCurrentAlias.metrics.cachedTokens, 1)} />
-                  <SectionMetric label="Cache Write" value={formatNumber(dataForCurrentAlias.metrics.cacheWriteTokens, 1)} />
+                  <SectionMetric label="Total" value={formatNumber(dataForCurrentProvider.metrics.totalTokens, 1)} />
+                  <SectionMetric label="Input" value={formatNumber(dataForCurrentProvider.metrics.inputTokens, 1)} />
+                  <SectionMetric label="Output" value={formatNumber(dataForCurrentProvider.metrics.outputTokens, 1)} />
+                  <SectionMetric label="Reasoning" value={formatNumber(dataForCurrentProvider.metrics.reasoningTokens, 1)} />
+                  <SectionMetric label="Cached" value={formatNumber(dataForCurrentProvider.metrics.cachedTokens, 1)} />
+                  <SectionMetric label="Cache Write" value={formatNumber(dataForCurrentProvider.metrics.cacheWriteTokens, 1)} />
                 </div>
               </Card>
 
               <Card title="Cost Details" className="mb-6" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Cost per Request" value={formatCost(dataForCurrentAlias.metrics.costPerRequest)} />
-                  <SectionMetric label="Cost per 1M Tokens" value={formatCost(dataForCurrentAlias.metrics.costPerMillionTokens)} />
-                  <SectionMetric label="Streamed Requests" value={formatNumber(dataForCurrentAlias.metrics.streamedRequests, 0)} />
-                  <SectionMetric label="Non-Streamed" value={formatNumber(dataForCurrentAlias.metrics.nonStreamedRequests, 0)} />
+                  <SectionMetric label="Cost per Request" value={formatCost(dataForCurrentProvider.metrics.costPerRequest)} />
+                  <SectionMetric label="Cost per 1M Tokens" value={formatCost(dataForCurrentProvider.metrics.costPerMillionTokens)} />
+                  <SectionMetric label="Provider-Reported Cost" value={formatCost(dataForCurrentProvider.metrics.providerReportedCost)} />
+                  <SectionMetric label="Calculated Cost" value={formatCost(dataForCurrentProvider.metrics.calculatedCost)} />
+                  <SectionMetric label="Failover Requests" value={formatInteger(dataForCurrentProvider.metrics.failoverRequests)} />
+                  <SectionMetric label="Streamed Requests" value={formatNumber(dataForCurrentProvider.metrics.streamedRequests, 0)} />
+                  <SectionMetric label="Non-Streamed" value={formatNumber(dataForCurrentProvider.metrics.nonStreamedRequests, 0)} />
                 </div>
               </Card>
 
@@ -275,17 +270,17 @@ export const ModelInsights: React.FC = () => {
                 <InsightsTimeSeriesCharts
                   chartData={chartData}
                   requestsChartAxis={requestsChartAxis}
-                  rangeKey={dataForCurrentAlias.range.key}
+                  rangeKey={dataForCurrentProvider.range.key}
                 />
               )}
 
-              {dataForCurrentAlias.providers.length > 0 && (
+              {dataForCurrentProvider.models.length > 0 && (
                 <div className="space-y-3 mb-6">
-                  <h3 className="font-heading text-sm font-semibold text-text px-1">Providers</h3>
-                  {dataForCurrentAlias.providers.map((provider, pIdx) => (
-                    <ProviderSection
-                      key={`${provider.provider}:${pIdx}`}
-                      provider={provider}
+                  <h3 className="font-heading text-sm font-semibold text-text px-1">Models</h3>
+                  {dataForCurrentProvider.models.map((model, mIdx) => (
+                    <ModelSection
+                      key={`${model.canonicalModelName ?? ''}:${model.selectedModelName ?? ''}:${mIdx}`}
+                      model={model}
                     />
                   ))}
                 </div>
@@ -297,23 +292,19 @@ export const ModelInsights: React.FC = () => {
   );
 };
 
-function providerDisplayName(provider: string | null): string {
-  return provider ?? '(unknown)';
-}
-
-const ProviderSection: React.FC<{
-  provider: ModelInsightProvider;
-}> = ({ provider }) => {
-  const displayName = providerDisplayName(provider.provider);
+const ModelSection: React.FC<{
+  model: ProviderInsightModel;
+}> = ({ model }) => {
+  const displayName = modelDisplayName(model.canonicalModelName, model.selectedModelName);
   const summaryText = [
-    `${formatInteger(provider.metrics.requests)} requests`,
-    `${formatNumber(provider.metrics.totalTokens, 1)} tokens`,
-    formatCost(provider.metrics.totalCost),
+    `${formatInteger(model.metrics.requests)} requests`,
+    `${formatNumber(model.metrics.totalTokens, 1)} tokens`,
+    formatCost(model.metrics.totalCost),
   ].join(' \u00b7 ');
 
   const extra = (
     <span className="text-xs text-text-muted">
-      {formatPercent(provider.metrics.successRate * 100)} success
+      {formatPercent(model.metrics.successRate * 100)} success
     </span>
   );
 
@@ -329,28 +320,23 @@ const ProviderSection: React.FC<{
       defaultOpen={false}
     >
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
-        <ProviderMetric label="Requests" value={formatInteger(provider.metrics.requests)} />
-        <ProviderMetric
-          label="Total Tokens"
-          value={formatNumber(provider.metrics.totalTokens, 1)}
-        />
-        <ProviderMetric label="Cost" value={formatCost(provider.metrics.totalCost)} />
-        <ProviderMetric label="Avg TTFT" value={formatMs(provider.metrics.avgTtftMs)} />
-        <ProviderMetric
+        <ModelMetric label="Requests" value={formatInteger(model.metrics.requests)} />
+        <ModelMetric label="Total Tokens" value={formatNumber(model.metrics.totalTokens, 1)} />
+        <ModelMetric label="Cost" value={formatCost(model.metrics.totalCost)} />
+        <ModelMetric label="Avg TTFT" value={formatMs(model.metrics.avgTtftMs)} />
+        <ModelMetric
           label="Throughput"
-          value={`${formatTPS(provider.metrics.avgThroughputTps)} tok/s`}
+          value={`${formatTPS(model.metrics.avgThroughputTps)} tok/s`}
         />
-        <ProviderMetric label="E2E TPS" value={`${formatTPS(provider.metrics.avgE2eTps)} tok/s`} />
+        <ModelMetric label="E2E TPS" value={`${formatTPS(model.metrics.avgE2eTps)} tok/s`} />
       </div>
 
-      {provider.models.length > 0 && (
-        <ProviderModelTable models={provider.models} providerName={displayName} />
-      )}
+      {model.aliases.length > 0 && <ModelAliasTable aliases={model.aliases} />}
     </Disclosure>
   );
 };
 
-const ProviderMetric: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+const ModelMetric: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div>
     <div className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-0.5">
       {label}
@@ -361,50 +347,18 @@ const ProviderMetric: React.FC<{ label: string; value: string }> = ({ label, val
   </div>
 );
 
-const ProviderModelTable: React.FC<{
-  models: ModelInsightProviderModel[];
-  providerName: string;
-}> = ({ models, providerName }) => {
-  const columns: ResponsiveTableColumn<ModelInsightProviderModel>[] = useMemo(
+const ModelAliasTable: React.FC<{
+  aliases: ProviderInsightModelAlias[];
+}> = ({ aliases }) => {
+  const columns: ResponsiveTableColumn<ProviderInsightModelAlias>[] = useMemo(
     () => [
       {
-        key: 'provider',
-        header: 'Provider',
+        key: 'alias',
+        header: 'Incoming Alias',
         mobileTitle: true,
         priority: 'high',
         render: (row) => {
-          const display = row.finalAttemptProvider ?? providerName;
-          return (
-            <span className="truncate max-w-[200px] inline-block" title={display}>
-              {display}
-            </span>
-          );
-        },
-      },
-      {
-        key: 'model',
-        header: 'Model',
-        priority: 'high',
-        render: (row) => {
-          const displayName = row.canonicalModelName ?? row.selectedModelName ?? 'Unknown';
-          const titleParts = [displayName];
-          if (row.finalAttemptModel) titleParts.push(`(${row.finalAttemptModel})`);
-          return (
-            <span className="truncate max-w-[200px] inline-block" title={titleParts.join(' ')}>
-              {displayName}
-            </span>
-          );
-        },
-      },
-      {
-        key: 'upstream',
-        header: 'Upstream',
-        priority: 'high',
-        render: (row) => {
-          const parts: string[] = [];
-          if (row.finalAttemptProvider) parts.push(row.finalAttemptProvider);
-          if (row.finalAttemptModel) parts.push(row.finalAttemptModel);
-          const display = parts.length > 0 ? parts.join(' / ') : '—';
+          const display = row.incomingModelAlias ?? '—';
           return (
             <span className="truncate max-w-[200px] inline-block" title={display}>
               {display}
@@ -476,16 +430,14 @@ const ProviderModelTable: React.FC<{
         render: (row) => formatPercent(row.metrics.cacheHitRate * 100),
       },
     ],
-    [providerName]
+    []
   );
 
   return (
     <ResponsiveTable
       columns={columns}
-      data={models}
-      getRowKey={(row, idx) =>
-        `${row.finalAttemptProvider ?? ''}:${row.finalAttemptModel ?? ''}:${row.canonicalModelName ?? ''}:${row.selectedModelName ?? ''}:${idx}`
-      }
+      data={aliases}
+      getRowKey={(row, idx) => `${row.incomingModelAlias ?? ''}:${idx}`}
     />
   );
 };

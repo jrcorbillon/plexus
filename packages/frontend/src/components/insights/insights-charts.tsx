@@ -252,10 +252,10 @@ export const InsightsTimeSeriesCharts: React.FC<{
               content={
                 <BucketTooltip
                   formatters={{
-                    inputTokens: (v) => [formatNumber(v, 0), 'Input'],
-                    outputTokens: (v) => [formatNumber(v, 0), 'Output'],
-                    cachedTokens: (v) => [formatNumber(v, 0), 'Cached'],
-                    cacheWriteTokens: (v) => [formatNumber(v, 0), 'Cache Write'],
+                    inputTokens: (v) => [formatInteger(v), 'Input'],
+                    outputTokens: (v) => [formatInteger(v), 'Output'],
+                    cachedTokens: (v) => [formatInteger(v), 'Cached'],
+                    cacheWriteTokens: (v) => [formatInteger(v), 'Cache Write'],
                   }}
                 />
               }

@@ -384,8 +384,6 @@ export function computeMetrics(rows: RawRow[]): ModelInsightMetrics {
   const ttfts: number[] = [];
   const tpsValues: number[] = [];
   const e2eTpsValues: number[] = [];
-  let successfulMeasured = 0;
-  let successfulWithCached = 0;
   let providerReportedCostSum = 0;
   let calculatedCostSum = 0;
   let providerReportedCount = 0;
@@ -398,10 +396,6 @@ export function computeMetrics(rows: RawRow[]): ModelInsightMetrics {
 
     if (isSuccess) {
       m.successfulRequests++;
-      successfulMeasured++;
-      if (toNum(row.tokensCached) > 0) {
-        successfulWithCached++;
-      }
     } else if (isPending) {
       m.pendingRequests++;
     } else if (isError) {
@@ -410,11 +404,15 @@ export function computeMetrics(rows: RawRow[]): ModelInsightMetrics {
       m.otherRequests++;
     }
 
-    m.inputTokens += toNum(row.tokensInput);
-    m.outputTokens += toNum(row.tokensOutput);
-    m.reasoningTokens += toNum(row.tokensReasoning);
-    m.cachedTokens += toNum(row.tokensCached);
-    m.cacheWriteTokens += toNum(row.tokensCacheWrite);
+    // Token counts (and the cache hit rate derived from them) only reflect
+    // successful requests; non-success rows have unreliable/partial token usage.
+    if (isSuccess) {
+      m.inputTokens += toNum(row.tokensInput);
+      m.outputTokens += toNum(row.tokensOutput);
+      m.reasoningTokens += toNum(row.tokensReasoning);
+      m.cachedTokens += toNum(row.tokensCached);
+      m.cacheWriteTokens += toNum(row.tokensCacheWrite);
+    }
 
     m.totalCost += toNum(row.costTotal);
     m.inputCost += toNum(row.costInput);
@@ -492,7 +490,8 @@ export function computeMetrics(rows: RawRow[]): ModelInsightMetrics {
     other: m.otherRequests,
   };
 
-  m.cacheHitRate = successfulMeasured > 0 ? successfulWithCached / successfulMeasured : 0;
+  const cacheableInputTokens = m.inputTokens + m.cachedTokens;
+  m.cacheHitRate = cacheableInputTokens > 0 ? m.cachedTokens / cacheableInputTokens : 0;
 
   m.costPerRequest = m.requests > 0 ? m.totalCost / m.requests : 0;
   m.costPerMillionTokens = m.totalTokens > 0 ? (m.totalCost / m.totalTokens) * 1_000_000 : 0;

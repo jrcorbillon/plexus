@@ -245,12 +245,12 @@ export const ProviderInsights: React.FC = () => {
 
               <Card title="Tokens" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Total" value={formatNumber(dataForCurrentProvider.metrics.totalTokens, 1)} />
-                  <SectionMetric label="Input" value={formatNumber(dataForCurrentProvider.metrics.inputTokens, 1)} />
-                  <SectionMetric label="Output" value={formatNumber(dataForCurrentProvider.metrics.outputTokens, 1)} />
-                  <SectionMetric label="Reasoning" value={formatNumber(dataForCurrentProvider.metrics.reasoningTokens, 1)} />
-                  <SectionMetric label="Cached" value={formatNumber(dataForCurrentProvider.metrics.cachedTokens, 1)} />
-                  <SectionMetric label="Cache Write" value={formatNumber(dataForCurrentProvider.metrics.cacheWriteTokens, 1)} />
+                  <SectionMetric label="Total" value={formatInteger(dataForCurrentProvider.metrics.totalTokens)} />
+                  <SectionMetric label="Input" value={formatInteger(dataForCurrentProvider.metrics.inputTokens)} />
+                  <SectionMetric label="Output" value={formatInteger(dataForCurrentProvider.metrics.outputTokens)} />
+                  <SectionMetric label="Reasoning" value={formatInteger(dataForCurrentProvider.metrics.reasoningTokens)} />
+                  <SectionMetric label="Cached" value={formatInteger(dataForCurrentProvider.metrics.cachedTokens)} />
+                  <SectionMetric label="Cache Write" value={formatInteger(dataForCurrentProvider.metrics.cacheWriteTokens)} />
                 </div>
               </Card>
 
@@ -298,7 +298,7 @@ const ModelSection: React.FC<{
   const displayName = modelDisplayName(model.canonicalModelName, model.selectedModelName);
   const summaryText = [
     `${formatInteger(model.metrics.requests)} requests`,
-    `${formatNumber(model.metrics.totalTokens, 1)} tokens`,
+    `${formatInteger(model.metrics.totalTokens)} tokens`,
     formatCost(model.metrics.totalCost),
   ].join(' \u00b7 ');
 
@@ -321,7 +321,7 @@ const ModelSection: React.FC<{
     >
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
         <ModelMetric label="Requests" value={formatInteger(model.metrics.requests)} />
-        <ModelMetric label="Total Tokens" value={formatNumber(model.metrics.totalTokens, 1)} />
+        <ModelMetric label="Total Tokens" value={formatInteger(model.metrics.totalTokens)} />
         <ModelMetric label="Cost" value={formatCost(model.metrics.totalCost)} />
         <ModelMetric label="Avg TTFT" value={formatMs(model.metrics.avgTtftMs)} />
         <ModelMetric

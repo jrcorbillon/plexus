@@ -1672,42 +1672,28 @@ describe('GET /v0/management/model-insights', () => {
   });
 
   // =========================================================================
-  // VAL-API-025: Cache hit rate uses cached-token requests over successful measured requests
+  // VAL-API-025: Cache hit rate is cached tokens over cacheable input tokens
   // =========================================================================
-  it('computes cacheHitRate as successful with cached / successful measured', async () => {
+  it('computes cacheHitRate as cachedTokens / (inputTokens + cachedTokens)', async () => {
     const now = Date.now();
     await db.insert(schema.requestUsage).values([
-      // 4 successful, 2 with cached tokens
       makeRow({
         startTime: now - 1000,
         incomingModelAlias: 'insight-alias',
-        responseStatus: 'success',
+        tokensInput: 300,
         tokensCached: 100,
       }),
       makeRow({
         startTime: now - 2000,
         incomingModelAlias: 'insight-alias',
-        responseStatus: 'success',
+        tokensInput: 100,
         tokensCached: 50,
       }),
       makeRow({
         startTime: now - 3000,
         incomingModelAlias: 'insight-alias',
-        responseStatus: 'success',
+        tokensInput: 50,
         tokensCached: 0,
-      }),
-      makeRow({
-        startTime: now - 4000,
-        incomingModelAlias: 'insight-alias',
-        responseStatus: 'success',
-        tokensCached: null,
-      }),
-      // 1 error with cached tokens - should NOT count
-      makeRow({
-        startTime: now - 5000,
-        incomingModelAlias: 'insight-alias',
-        responseStatus: 'error',
-        tokensCached: 200,
       }),
     ]);
 
@@ -1719,8 +1705,8 @@ describe('GET /v0/management/model-insights', () => {
 
     expect(res.statusCode).toBe(200);
     const m = res.json().metrics;
-    // 2 successful with cached > 0, 4 successful total
-    expect(m.cacheHitRate).toBeCloseTo(2 / 4);
+    // cached = 150, input = 450 -> 150 / (450 + 150)
+    expect(m.cacheHitRate).toBeCloseTo(150 / 600);
   });
 
   // =========================================================================
@@ -4047,8 +4033,9 @@ describe('GET /v0/management/model-insights', () => {
 
       // Top-level checks
       expect(body.metrics.requests).toBe(4);
-      expect(body.metrics.inputTokens).toBe(750);
-      expect(body.metrics.outputTokens).toBe(310);
+      // Token counts are success-only: the 150/60 error row is excluded
+      expect(body.metrics.inputTokens).toBe(600);
+      expect(body.metrics.outputTokens).toBe(250);
       expect(body.metrics.totalCost).toBeCloseTo(0.075, 6);
       expect(body.metrics.successfulRequests).toBe(3);
       expect(body.metrics.errorRequests).toBe(1);

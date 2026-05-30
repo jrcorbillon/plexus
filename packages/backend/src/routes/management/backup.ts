@@ -49,7 +49,11 @@ export async function registerBackupRoutes(fastify: FastifyInstance) {
    *
    * This is a destructive operation — all existing data is replaced.
    */
-  fastify.post('/v0/management/restore', async (request, reply) => {
+  fastify.post('/v0/management/restore', {
+    // Full backups bundle operational data (request logs, usage, etc.) and can
+    // far exceed the global 30MB limit, so allow a much larger restore payload.
+    bodyLimit: 1024 * 1024 * 1024, // 1GB
+  }, async (request, reply) => {
     try {
       const contentType = request.headers['content-type'] || '';
       let result;

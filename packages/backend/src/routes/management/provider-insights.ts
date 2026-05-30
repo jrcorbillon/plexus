@@ -3,10 +3,9 @@ import { and, eq, gte, lte } from 'drizzle-orm';
 import { getSchema } from '../../db/client';
 import { UsageStorageService } from '../../services/usage-storage';
 import {
-  buildSeries,
-  computeMetrics,
+  buildInsightsResponse,
   groupByModel,
-  resolveInsightRange,
+  parseInsightsQuery,
   type RawRow,
 } from './insights-shared';
 
@@ -15,61 +14,15 @@ export async function registerProviderInsightsRoutes(
   usageStorage: UsageStorageService
 ) {
   fastify.get('/v0/management/provider-insights', async (request, reply) => {
-    const query = request.query as Record<string, string | string[] | undefined>;
-
-    if (Array.isArray(query.provider)) {
-      return reply.code(400).send({
-        error: {
-          message: 'Duplicate "provider" parameter is not allowed',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
-    if (Array.isArray(query.range)) {
-      return reply.code(400).send({
-        error: {
-          message: 'Duplicate "range" parameter is not allowed',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
+    const parsed = parseInsightsQuery(
+      request.query as Record<string, string | string[] | undefined>,
+      'provider'
+    );
+    if (!parsed.ok) {
+      return reply.code(400).send({ error: parsed.error });
     }
 
-    const provider = query.provider;
-    const rangeKey = query.range ?? '24h';
-
-    if (!provider || provider.trim() === '') {
-      return reply.code(400).send({
-        error: {
-          message: 'The "provider" query parameter is required and must be non-empty',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
-
-    if (provider !== provider.trim()) {
-      return reply.code(400).send({
-        error: {
-          message:
-            'The "provider" query parameter must not contain leading or trailing whitespace',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
-
-    const rangeResult = resolveInsightRange(rangeKey);
-    if ('error' in rangeResult) {
-      return reply.code(400).send({
-        error: {
-          message: rangeResult.error,
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
+    const { filterValue: provider, rangeResult } = parsed;
 
     const db = usageStorage.getDb();
     const schema = getSchema();
@@ -85,13 +38,7 @@ export async function registerProviderInsightsRoutes(
         )
       )) as RawRow[];
 
-    const metrics = computeMetrics(rows);
-    const series = buildSeries(
-      rows,
-      rangeResult.startTimeMs,
-      rangeResult.endTimeMs,
-      rangeResult.bucketSizeMs
-    );
+    const { metrics, series } = buildInsightsResponse(rows, rangeResult);
     const models = groupByModel(rows);
 
     return reply.send({

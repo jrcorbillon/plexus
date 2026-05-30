@@ -7,7 +7,7 @@ import { Dispatcher } from '../../../services/dispatcher';
 import { ProbeService } from '../../../services/probe-service';
 import { closeDatabase, getDatabase, getSchema, initializeDatabase } from '../../../db/client';
 import { runMigrations } from '../../../db/migrate';
-import { groupByModel, computeMetrics, type RawRow } from '../insights-shared';
+import { groupByModel, groupByProvider, computeMetrics, type RawRow } from '../insights-shared';
 
 const ADMIN_KEY = 'test-admin-key';
 
@@ -159,6 +159,51 @@ describe('groupByModel', () => {
     const models = groupByModel(rows);
     expect(models[0]!.canonicalModelName).toBe('big');
     expect(models[0]!.metrics.requests).toBe(2);
+  });
+
+  it('keeps null alias separate from literal "(unknown)" alias', () => {
+    const rows: RawRow[] = [
+      makeRawRow({
+        requestId: 'r1',
+        incomingModelAlias: null,
+        canonicalModelName: 'gpt-4',
+      }),
+      makeRawRow({
+        requestId: 'r2',
+        incomingModelAlias: '(unknown)',
+        canonicalModelName: 'gpt-4',
+      }),
+    ];
+
+    const models = groupByModel(rows);
+    expect(models).toHaveLength(1);
+    expect(models[0]!.aliases).toHaveLength(2);
+
+    const nullAlias = models[0]!.aliases.find((a) => a.incomingModelAlias === null);
+    const literalAlias = models[0]!.aliases.find((a) => a.incomingModelAlias === '(unknown)');
+    expect(nullAlias).toBeDefined();
+    expect(literalAlias).toBeDefined();
+    expect(nullAlias!.metrics.requests).toBe(1);
+    expect(literalAlias!.metrics.requests).toBe(1);
+  });
+});
+
+describe('groupByProvider', () => {
+  it('keeps null provider separate from literal "(unknown)" provider', () => {
+    const rows: RawRow[] = [
+      makeRawRow({ requestId: 'r1', provider: null, canonicalModelName: 'gpt-4' }),
+      makeRawRow({ requestId: 'r2', provider: '(unknown)', canonicalModelName: 'gpt-4' }),
+    ];
+
+    const providers = groupByProvider(rows);
+    expect(providers).toHaveLength(2);
+
+    const nullProvider = providers.find((p) => p.provider === null);
+    const literalProvider = providers.find((p) => p.provider === '(unknown)');
+    expect(nullProvider).toBeDefined();
+    expect(literalProvider).toBeDefined();
+    expect(nullProvider!.metrics.requests).toBe(1);
+    expect(literalProvider!.metrics.requests).toBe(1);
   });
 });
 

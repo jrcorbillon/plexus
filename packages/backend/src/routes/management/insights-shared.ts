@@ -38,6 +38,105 @@ export interface InsightRangeMeta {
   bucketSizeMs: number;
 }
 
+export type InsightsFilterParam = 'model' | 'provider';
+
+export interface InsightsValidationError {
+  message: string;
+  type: 'validation_error';
+  code: 400;
+}
+
+export type ParseInsightsQueryResult =
+  | { ok: true; filterValue: string; rangeResult: InsightRangeMeta }
+  | { ok: false; error: InsightsValidationError };
+
+export function parseInsightsQuery(
+  query: Record<string, string | string[] | undefined>,
+  filterParam: InsightsFilterParam
+): ParseInsightsQueryResult {
+  if (Array.isArray(query[filterParam])) {
+    return {
+      ok: false,
+      error: {
+        message: `Duplicate "${filterParam}" parameter is not allowed`,
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
+  if (Array.isArray(query.range)) {
+    return {
+      ok: false,
+      error: {
+        message: 'Duplicate "range" parameter is not allowed',
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
+
+  const filterValue = query[filterParam];
+  const rangeKey = query.range ?? '24h';
+
+  if (!filterValue || filterValue.trim() === '') {
+    return {
+      ok: false,
+      error: {
+        message: `The "${filterParam}" query parameter is required and must be non-empty`,
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
+
+  if (filterValue !== filterValue.trim()) {
+    return {
+      ok: false,
+      error: {
+        message: `The "${filterParam}" query parameter must not contain leading or trailing whitespace`,
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
+
+  const rangeResult = resolveInsightRange(rangeKey);
+  if ('error' in rangeResult) {
+    return {
+      ok: false,
+      error: {
+        message: rangeResult.error,
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
+
+  return { ok: true, filterValue, rangeResult };
+}
+
+export interface InsightsResponseBody {
+  range: InsightRangeMeta;
+  metrics: ModelInsightMetrics;
+  series: SeriesBucket[];
+}
+
+export function buildInsightsResponse(
+  rows: RawRow[],
+  rangeResult: InsightRangeMeta
+): InsightsResponseBody {
+  return {
+    range: rangeResult,
+    metrics: computeMetrics(rows),
+    series: buildSeries(
+      rows,
+      rangeResult.startTimeMs,
+      rangeResult.endTimeMs,
+      rangeResult.bucketSizeMs
+    ),
+  };
+}
+
 export function resolveInsightRange(rangeKey: string): InsightRangeMeta | { error: string } {
   if (!SUPPORTED_RANGE_KEYS.has(rangeKey)) {
     return {
@@ -466,8 +565,20 @@ export function buildSeries(
   return buckets;
 }
 
+const MISSING_STRING_SENTINEL = Symbol('missing-string-value');
+
+type StringMapKey = string | typeof MISSING_STRING_SENTINEL;
+
+function toStringMapKey(value: string | null | undefined): StringMapKey {
+  return value ?? MISSING_STRING_SENTINEL;
+}
+
+function fromStringMapKey(key: StringMapKey): string | null {
+  return key === MISSING_STRING_SENTINEL ? null : key;
+}
+
 export interface ProviderModelGroup {
-  provider: string;
+  provider: string | null;
   metrics: ModelInsightMetrics;
   models: Array<{
     canonicalModelName: string | null;
@@ -479,10 +590,10 @@ export interface ProviderModelGroup {
 }
 
 export function groupByProvider(rows: RawRow[]): ProviderModelGroup[] {
-  const providerMap = new Map<string, { rows: RawRow[]; models: Map<string, RawRow[]> }>();
+  const providerMap = new Map<StringMapKey, { rows: RawRow[]; models: Map<string, RawRow[]> }>();
 
   for (const row of rows) {
-    const providerKey = row.provider ?? '(unknown)';
+    const providerKey = toStringMapKey(row.provider);
     if (!providerMap.has(providerKey)) {
       providerMap.set(providerKey, { rows: [], models: new Map() });
     }
@@ -516,7 +627,7 @@ export function groupByProvider(rows: RawRow[]): ProviderModelGroup[] {
     });
 
     providers.push({
-      provider: providerKey,
+      provider: fromStringMapKey(providerKey),
       metrics: computeMetrics(group.rows),
       models: modelEntries,
     });
@@ -525,7 +636,7 @@ export function groupByProvider(rows: RawRow[]): ProviderModelGroup[] {
   providers.sort((a, b) => {
     const reqDiff = b.metrics.requests - a.metrics.requests;
     if (reqDiff !== 0) return reqDiff;
-    return a.provider.localeCompare(b.provider);
+    return (a.provider ?? '').localeCompare(b.provider ?? '');
   });
 
   return providers;
@@ -541,13 +652,13 @@ export interface ProviderInsightModelGroup {
   }>;
 }
 
-function modelGroupKey(row: RawRow): string {
+function modelGroupKey(row: RawRow): StringMapKey {
   const canonical = row.canonicalModelName ?? '';
   const selected = row.selectedModelName ?? '';
   if (canonical || selected) {
     return `${canonical}\0${selected}`;
   }
-  return row.finalAttemptModel ?? '(unknown)';
+  return toStringMapKey(row.finalAttemptModel);
 }
 
 function modelDisplayName(canonical: string | null, selected: string | null): string {
@@ -555,7 +666,10 @@ function modelDisplayName(canonical: string | null, selected: string | null): st
 }
 
 export function groupByModel(rows: RawRow[]): ProviderInsightModelGroup[] {
-  const modelMap = new Map<string, { rows: RawRow[]; aliases: Map<string, RawRow[]> }>();
+  const modelMap = new Map<
+    StringMapKey,
+    { rows: RawRow[]; aliases: Map<StringMapKey, RawRow[]> }
+  >();
 
   for (const row of rows) {
     const modelKey = modelGroupKey(row);
@@ -565,7 +679,7 @@ export function groupByModel(rows: RawRow[]): ProviderInsightModelGroup[] {
     const mGroup = modelMap.get(modelKey)!;
     mGroup.rows.push(row);
 
-    const aliasKey = row.incomingModelAlias ?? '(unknown)';
+    const aliasKey = toStringMapKey(row.incomingModelAlias);
     if (!mGroup.aliases.has(aliasKey)) {
       mGroup.aliases.set(aliasKey, []);
     }
@@ -578,7 +692,7 @@ export function groupByModel(rows: RawRow[]): ProviderInsightModelGroup[] {
     const aliasEntries: ProviderInsightModelGroup['aliases'] = [];
     for (const [aliasKey, aliasRows] of group.aliases) {
       aliasEntries.push({
-        incomingModelAlias: aliasKey === '(unknown)' ? null : aliasKey,
+        incomingModelAlias: fromStringMapKey(aliasKey),
         metrics: computeMetrics(aliasRows),
       });
     }

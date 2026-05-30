@@ -3,10 +3,9 @@ import { and, eq, gte, lte } from 'drizzle-orm';
 import { getSchema } from '../../db/client';
 import { UsageStorageService } from '../../services/usage-storage';
 import {
-  buildSeries,
-  computeMetrics,
+  buildInsightsResponse,
   groupByProvider,
-  resolveInsightRange,
+  parseInsightsQuery,
   type RawRow,
 } from './insights-shared';
 
@@ -23,60 +22,15 @@ export async function registerModelInsightsRoutes(
   usageStorage: UsageStorageService
 ) {
   fastify.get('/v0/management/model-insights', async (request, reply) => {
-    const query = request.query as Record<string, string | string[] | undefined>;
-
-    if (Array.isArray(query.model)) {
-      return reply.code(400).send({
-        error: {
-          message: 'Duplicate "model" parameter is not allowed',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
-    if (Array.isArray(query.range)) {
-      return reply.code(400).send({
-        error: {
-          message: 'Duplicate "range" parameter is not allowed',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
+    const parsed = parseInsightsQuery(
+      request.query as Record<string, string | string[] | undefined>,
+      'model'
+    );
+    if (!parsed.ok) {
+      return reply.code(400).send({ error: parsed.error });
     }
 
-    const model = query.model;
-    const rangeKey = query.range ?? '24h';
-
-    if (!model || model.trim() === '') {
-      return reply.code(400).send({
-        error: {
-          message: 'The "model" query parameter is required and must be non-empty',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
-
-    if (model !== model.trim()) {
-      return reply.code(400).send({
-        error: {
-          message: 'The "model" query parameter must not contain leading or trailing whitespace',
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
-
-    const rangeResult = resolveInsightRange(rangeKey);
-    if ('error' in rangeResult) {
-      return reply.code(400).send({
-        error: {
-          message: rangeResult.error,
-          type: 'validation_error',
-          code: 400,
-        },
-      });
-    }
+    const { filterValue: model, rangeResult } = parsed;
 
     const db = usageStorage.getDb();
     const schema = getSchema();
@@ -92,13 +46,7 @@ export async function registerModelInsightsRoutes(
         )
       )) as RawRow[];
 
-    const metrics = computeMetrics(rows);
-    const series = buildSeries(
-      rows,
-      rangeResult.startTimeMs,
-      rangeResult.endTimeMs,
-      rangeResult.bucketSizeMs
-    );
+    const { metrics, series } = buildInsightsResponse(rows, rangeResult);
     const providers = groupByProvider(rows);
 
     return reply.send({

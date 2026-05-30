@@ -103,7 +103,7 @@ export interface ModelInsightProviderModel {
 }
 
 export interface ModelInsightProvider {
-  provider: string;
+  provider: string | null;
   metrics: ModelInsightMetrics;
   models: ModelInsightProviderModel[];
 }

@@ -977,7 +977,7 @@ const ProviderSection: React.FC<{
   rangeKey: ModelInsightRangeKey;
 }> = ({ provider }) => {
   const summaryText = [
-    `${formatNumber(provider.metrics.requests, 0)} requests`,
+    `${formatInteger(provider.metrics.requests)} requests`,
     `${formatNumber(provider.metrics.totalTokens, 1)} tokens`,
     formatCost(provider.metrics.totalCost),
   ].join(' \u00b7 ');
@@ -1001,7 +1001,7 @@ const ProviderSection: React.FC<{
     >
       {/* Provider summary metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
-        <ProviderMetric label="Requests" value={formatNumber(provider.metrics.requests, 0)} />
+        <ProviderMetric label="Requests" value={formatInteger(provider.metrics.requests)} />
         <ProviderMetric
           label="Total Tokens"
           value={formatNumber(provider.metrics.totalTokens, 1)}
@@ -1092,7 +1092,7 @@ const ProviderModelTable: React.FC<{
         header: 'Requests',
         priority: 'high',
         align: 'right',
-        render: (row) => formatNumber(row.metrics.requests, 0),
+        render: (row) => formatInteger(row.metrics.requests),
       },
       {
         key: 'totalTokens',

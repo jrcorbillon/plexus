@@ -23,6 +23,7 @@ import { registerModelRoutes } from './management/models';
 import { registerBackupRoutes } from './management/backup';
 import { registerConcurrencyRoutes } from './management/concurrency';
 import { registerModelInsightsRoutes } from './management/model-insights';
+import { registerProviderInsightsRoutes } from './management/provider-insights';
 import { Dispatcher } from '../services/dispatcher';
 import { ProbeService } from '../services/probe-service';
 import { QuotaScheduler } from '../services/quota/quota-scheduler';
@@ -123,6 +124,8 @@ export async function registerManagementRoutes(
       await registerConcurrencyRoutes(adminOnly, usageStorage);
       // Model insights (per-alias aggregate endpoint)
       await registerModelInsightsRoutes(adminOnly, usageStorage);
+      // Provider insights (per-provider aggregate endpoint)
+      await registerProviderInsightsRoutes(adminOnly, usageStorage);
     });
   });
 }

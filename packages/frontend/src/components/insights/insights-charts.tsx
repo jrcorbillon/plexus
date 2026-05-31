@@ -10,7 +10,7 @@ import {
   Legend,
 } from 'recharts';
 import { Card } from '../ui/Card';
-import type { ModelInsightRangeKey } from '../../lib/model-insights';
+import type { ModelInsightRangeMetaKey } from '../../lib/model-insights';
 import {
   formatNumber,
   formatInteger,
@@ -97,9 +97,22 @@ const TOOLTIP_STYLE = {
   borderRadius: '8px',
 };
 
-export function formatBucketLabel(bucketStartMs: number, rangeKey: ModelInsightRangeKey): string {
+const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+
+export function formatBucketLabel(
+  bucketStartMs: number,
+  rangeKey: ModelInsightRangeMetaKey,
+  rangeSpanMs?: number
+): string {
   const date = new Date(bucketStartMs);
-  if (rangeKey === '7d' || rangeKey === '30d') {
+  const useDateLabel =
+    rangeKey === '7d' ||
+    rangeKey === '30d' ||
+    (rangeKey === 'custom' &&
+      rangeSpanMs != null &&
+      Number.isFinite(rangeSpanMs) &&
+      rangeSpanMs > TWO_DAYS_MS);
+  if (useDateLabel) {
     return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -186,7 +199,7 @@ export interface InsightsRequestsChartAxis {
 export const InsightsTimeSeriesCharts: React.FC<{
   chartData: InsightsChartDataPoint[];
   requestsChartAxis: InsightsRequestsChartAxis;
-  rangeKey: ModelInsightRangeKey;
+  rangeKey: ModelInsightRangeMetaKey;
 }> = ({ chartData, requestsChartAxis }) => (
   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
     <Card title="Requests over Time">

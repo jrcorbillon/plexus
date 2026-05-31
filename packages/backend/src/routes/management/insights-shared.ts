@@ -30,12 +30,61 @@ export const RANGE_BUCKET_SIZES_MS: Record<InsightRangeKey, number> = {
 
 export const SUPPORTED_RANGE_KEYS = new Set<string>(['1h', '5h', '24h', '7d', '30d']);
 
+export type InsightRangeMetaKey = InsightRangeKey | 'custom';
+
 export interface InsightRangeMeta {
-  key: InsightRangeKey;
+  key: InsightRangeMetaKey;
   label: string;
   startTimeMs: number;
   endTimeMs: number;
   bucketSizeMs: number;
+}
+
+/** Candidate bucket steps (ms), ascending. Smallest step yielding <= 48 buckets is chosen. */
+const BUCKET_SIZE_CANDIDATES_MS = [
+  60 * 1000,
+  5 * 60 * 1000,
+  15 * 60 * 1000,
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+  6 * 60 * 60 * 1000,
+  12 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+] as const;
+
+const MAX_BUCKETS = 48;
+
+export function deriveBucketSizeMs(durationMs: number): number {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return BUCKET_SIZE_CANDIDATES_MS[0]!;
+  }
+  for (const step of BUCKET_SIZE_CANDIDATES_MS) {
+    if (durationMs / step <= MAX_BUCKETS) {
+      return step;
+    }
+  }
+  return BUCKET_SIZE_CANDIDATES_MS[BUCKET_SIZE_CANDIDATES_MS.length - 1]!;
+}
+
+export function resolveCustomRange(
+  startMs: number,
+  endMs: number
+): InsightRangeMeta | { error: string } {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return { error: 'startTime and endTime must be valid numeric timestamps (epoch ms)' };
+  }
+  if (startMs >= endMs) {
+    return { error: 'startTime must be less than endTime' };
+  }
+  const durationMs = endMs - startMs;
+  return {
+    key: 'custom',
+    label: 'Custom',
+    startTimeMs: startMs,
+    endTimeMs: endMs,
+    bucketSizeMs: deriveBucketSizeMs(durationMs),
+  };
 }
 
 export type InsightsFilterParam = 'model' | 'provider';
@@ -74,9 +123,32 @@ export function parseInsightsQuery(
       },
     };
   }
+  if (Array.isArray(query.startTime)) {
+    return {
+      ok: false,
+      error: {
+        message: 'Duplicate "startTime" parameter is not allowed',
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
+  if (Array.isArray(query.endTime)) {
+    return {
+      ok: false,
+      error: {
+        message: 'Duplicate "endTime" parameter is not allowed',
+        type: 'validation_error',
+        code: 400,
+      },
+    };
+  }
 
   const filterValue = query[filterParam];
-  const rangeKey = query.range ?? '24h';
+  const startTimeProvided = typeof query.startTime === 'string';
+  const endTimeProvided = typeof query.endTime === 'string';
+  const startTimeRaw = startTimeProvided ? (query.startTime as string).trim() : '';
+  const endTimeRaw = endTimeProvided ? (query.endTime as string).trim() : '';
 
   if (!filterValue || filterValue.trim() === '') {
     return {
@@ -100,7 +172,37 @@ export function parseInsightsQuery(
     };
   }
 
-  const rangeResult = resolveInsightRange(rangeKey);
+  let rangeResult: InsightRangeMeta | { error: string };
+
+  if (startTimeProvided || endTimeProvided) {
+    if (!startTimeProvided || !endTimeProvided) {
+      return {
+        ok: false,
+        error: {
+          message: 'Both startTime and endTime query parameters are required for a custom range',
+          type: 'validation_error',
+          code: 400,
+        },
+      };
+    }
+    if (startTimeRaw === '' || endTimeRaw === '') {
+      return {
+        ok: false,
+        error: {
+          message: 'startTime and endTime must be valid numeric timestamps (epoch ms)',
+          type: 'validation_error',
+          code: 400,
+        },
+      };
+    }
+    const startMs = Number(startTimeRaw);
+    const endMs = Number(endTimeRaw);
+    rangeResult = resolveCustomRange(startMs, endMs);
+  } else {
+    const rangeKey = query.range ?? '24h';
+    rangeResult = resolveInsightRange(rangeKey);
+  }
+
   if ('error' in rangeResult) {
     return {
       ok: false,

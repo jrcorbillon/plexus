@@ -284,6 +284,43 @@ describe('GET /v0/management/model-insights', () => {
     }
   });
 
+  it('accepts custom startTime and endTime range', async () => {
+    const now = Date.now();
+    const startMs = now - 60 * 60 * 1000;
+    const endMs = now;
+    await db.insert(schema.requestUsage).values(
+      makeRow({
+        startTime: now - 15 * 60 * 1000,
+        incomingModelAlias: 'insight-alias',
+        provider: 'provider-a',
+        canonicalModelName: 'gpt-4',
+      })
+    );
+
+    const res = await fastify.inject({
+      method: 'GET',
+      url: `/v0/management/model-insights?model=insight-alias&startTime=${startMs}&endTime=${endMs}`,
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.range.key).toBe('custom');
+    expect(body.range.startTimeMs).toBe(startMs);
+    expect(body.range.endTimeMs).toBe(endMs);
+    expect(body.metrics.requests).toBe(1);
+  });
+
+  it('returns 400 when only endTime is provided for custom range', async () => {
+    const res = await fastify.inject({
+      method: 'GET',
+      url: '/v0/management/model-insights?model=insight-alias&endTime=2000',
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('startTime and endTime');
+  });
+
   // -------------------------------------------------------------------------
   // VAL-API-010: Model aliases are matched exactly after URL decoding
   // -------------------------------------------------------------------------

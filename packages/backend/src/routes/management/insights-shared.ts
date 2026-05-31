@@ -145,10 +145,10 @@ export function parseInsightsQuery(
   }
 
   const filterValue = query[filterParam];
-  const startTimeRaw = query.startTime;
-  const endTimeRaw = query.endTime;
-  const hasStart = startTimeRaw !== undefined && startTimeRaw !== '';
-  const hasEnd = endTimeRaw !== undefined && endTimeRaw !== '';
+  const startTimeRaw = typeof query.startTime === 'string' ? query.startTime.trim() : '';
+  const endTimeRaw = typeof query.endTime === 'string' ? query.endTime.trim() : '';
+  const hasStart = startTimeRaw !== '';
+  const hasEnd = endTimeRaw !== '';
 
   if (!filterValue || filterValue.trim() === '') {
     return {

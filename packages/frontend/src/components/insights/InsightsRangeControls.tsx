@@ -3,6 +3,7 @@ import { PlayCircle, Circle, X } from 'lucide-react';
 import { DateTimePicker } from '../ui/DateTimePicker';
 import {
   TIMELINE_OPTIONS,
+  DEFAULT_RANGE_KEY,
   type ModelInsightRangeKey,
 } from '../../lib/model-insights';
 
@@ -51,6 +52,11 @@ export const InsightsRangeControls: React.FC<InsightsRangeControlsProps> = ({
   const handleClearDates = () => {
     setStartDate('');
     setEndDate('');
+    // Clearing the inputs must also drop any active custom filter, otherwise the
+    // charts stay filtered by the previously-applied dates while the fields are empty.
+    if (isCustomRangeActive) {
+      onRangeSelect(DEFAULT_RANGE_KEY);
+    }
   };
 
   const presetButtonClass = (pressed: boolean) =>

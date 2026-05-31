@@ -13,7 +13,8 @@ describe('insights custom range', () => {
     expect('error' in result).toBe(false);
     if ('error' in result) return;
     expect(result.key).toBe('custom');
-    expect(result.bucketSizeMs).toBe(6 * 60 * 60 * 1000);
+    // 3 days = 259,200,000 ms; 2h is the smallest step yielding <= 48 buckets (36).
+    expect(result.bucketSizeMs).toBe(2 * 60 * 60 * 1000);
   });
 
   it('deriveBucketSizeMs uses 5m steps for one hour', () => {

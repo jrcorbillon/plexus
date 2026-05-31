@@ -47,6 +47,16 @@ describe('insights custom range', () => {
     expect(parsed.error.message).toContain('startTime and endTime');
   });
 
+  it('parseInsightsQuery rejects whitespace-only custom range instead of falling back to preset', () => {
+    const parsed = parseInsightsQuery(
+      { provider: 'openai', startTime: '   ', endTime: '   ' },
+      'provider'
+    );
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.message).toContain('valid numeric timestamps');
+  });
+
   it('parseInsightsQuery rejects invalid custom range', () => {
     const parsed = parseInsightsQuery(
       { provider: 'openai', startTime: '5000', endTime: '1000' },

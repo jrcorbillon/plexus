@@ -145,10 +145,10 @@ export function parseInsightsQuery(
   }
 
   const filterValue = query[filterParam];
-  const startTimeRaw = typeof query.startTime === 'string' ? query.startTime.trim() : '';
-  const endTimeRaw = typeof query.endTime === 'string' ? query.endTime.trim() : '';
-  const hasStart = startTimeRaw !== '';
-  const hasEnd = endTimeRaw !== '';
+  const startTimeProvided = typeof query.startTime === 'string';
+  const endTimeProvided = typeof query.endTime === 'string';
+  const startTimeRaw = startTimeProvided ? (query.startTime as string).trim() : '';
+  const endTimeRaw = endTimeProvided ? (query.endTime as string).trim() : '';
 
   if (!filterValue || filterValue.trim() === '') {
     return {
@@ -174,12 +174,22 @@ export function parseInsightsQuery(
 
   let rangeResult: InsightRangeMeta | { error: string };
 
-  if (hasStart || hasEnd) {
-    if (!hasStart || !hasEnd) {
+  if (startTimeProvided || endTimeProvided) {
+    if (!startTimeProvided || !endTimeProvided) {
       return {
         ok: false,
         error: {
           message: 'Both startTime and endTime query parameters are required for a custom range',
+          type: 'validation_error',
+          code: 400,
+        },
+      };
+    }
+    if (startTimeRaw === '' || endTimeRaw === '') {
+      return {
+        ok: false,
+        error: {
+          message: 'startTime and endTime must be valid numeric timestamps (epoch ms)',
           type: 'validation_error',
           code: 400,
         },

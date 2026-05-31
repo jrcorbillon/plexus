@@ -12,7 +12,10 @@ import {
   type ModelInsightRangeMeta,
   type ModelInsightMetrics,
   type ModelInsightSeriesBucket,
+  type InsightsRangeSelection,
 } from './model-insights';
+
+export type { InsightsRangeSelection };
 
 export type ProviderInsightRangeKey = ModelInsightRangeKey;
 export { TIMELINE_OPTIONS, DEFAULT_RANGE_KEY };
@@ -44,7 +47,7 @@ const API_BASE = '';
 
 export async function fetchProviderInsights(
   provider: string,
-  range: ProviderInsightRangeKey,
+  selection: InsightsRangeSelection,
   adminKey?: string
 ): Promise<ProviderInsightsResponse> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -53,7 +56,13 @@ export async function fetchProviderInsights(
     headers['x-admin-key'] = key;
   }
 
-  const params = new URLSearchParams({ provider, range });
+  const params = new URLSearchParams({ provider });
+  if (selection.kind === 'preset') {
+    params.set('range', selection.key);
+  } else {
+    params.set('startTime', String(selection.startMs));
+    params.set('endTime', String(selection.endMs));
+  }
   const url = `${API_BASE}/v0/management/provider-insights?${params.toString()}`;
   const res = await fetch(url, { headers });
 

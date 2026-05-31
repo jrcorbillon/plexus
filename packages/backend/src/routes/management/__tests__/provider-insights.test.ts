@@ -7,7 +7,14 @@ import { Dispatcher } from '../../../services/dispatcher';
 import { ProbeService } from '../../../services/probe-service';
 import { closeDatabase, getDatabase, getSchema, initializeDatabase } from '../../../db/client';
 import { runMigrations } from '../../../db/migrate';
-import { groupByModel, groupByProvider, computeMetrics, type RawRow } from '../insights-shared';
+import {
+  groupByModel,
+  groupByProvider,
+  computeMetrics,
+  deriveBucketSizeMs,
+  resolveCustomRange,
+  type RawRow,
+} from '../insights-shared';
 
 const ADMIN_KEY = 'test-admin-key';
 
@@ -108,6 +115,38 @@ function makeRawRow(overrides: Partial<RawRow> = {}): RawRow {
     ...overrides,
   };
 }
+
+describe('resolveCustomRange', () => {
+  it('returns custom range meta with auto-derived bucket size', () => {
+    const startMs = 1_700_000_000_000;
+    const endMs = startMs + 3 * 24 * 60 * 60 * 1000;
+    const result = resolveCustomRange(startMs, endMs);
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+    expect(result.key).toBe('custom');
+    expect(result.label).toBe('Custom');
+    expect(result.startTimeMs).toBe(startMs);
+    expect(result.endTimeMs).toBe(endMs);
+    expect(result.bucketSizeMs).toBe(6 * 60 * 60 * 1000);
+  });
+
+  it('rejects start >= end', () => {
+    const result = resolveCustomRange(1000, 1000);
+    expect('error' in result).toBe(true);
+  });
+
+  it('rejects non-finite timestamps', () => {
+    expect('error' in resolveCustomRange(Number.NaN, 2000)).toBe(true);
+    expect('error' in resolveCustomRange(1000, Number.NaN)).toBe(true);
+  });
+});
+
+describe('deriveBucketSizeMs', () => {
+  it('targets at most 48 buckets for short ranges', () => {
+    const oneHour = 60 * 60 * 1000;
+    expect(deriveBucketSizeMs(oneHour)).toBe(5 * 60 * 1000);
+  });
+});
 
 describe('groupByModel', () => {
   it('groups rows by model with per-alias breakdown', () => {
@@ -363,6 +402,83 @@ describe('GET /v0/management/provider-insights', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json().range.key).toBe(rangeKey);
     }
+  });
+
+  it('accepts custom startTime and endTime range', async () => {
+    const now = Date.now();
+    const startMs = now - 2 * 60 * 60 * 1000;
+    const endMs = now;
+    await db.insert(schema.requestUsage).values(
+      makeRow({
+        startTime: now - 30 * 60 * 1000,
+        provider: 'provider-a',
+        incomingModelAlias: 'alias-one',
+        canonicalModelName: 'gpt-4',
+      })
+    );
+
+    const res = await fastify.inject({
+      method: 'GET',
+      url: `/v0/management/provider-insights?provider=provider-a&startTime=${startMs}&endTime=${endMs}`,
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.range.key).toBe('custom');
+    expect(body.range.startTimeMs).toBe(startMs);
+    expect(body.range.endTimeMs).toBe(endMs);
+    expect(body.metrics.requests).toBe(1);
+  });
+
+  it('returns 400 when only startTime is provided', async () => {
+    const res = await fastify.inject({
+      method: 'GET',
+      url: '/v0/management/provider-insights?provider=provider-a&startTime=1000',
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('startTime and endTime');
+  });
+
+  it('returns 400 when startTime >= endTime', async () => {
+    const res = await fastify.inject({
+      method: 'GET',
+      url: '/v0/management/provider-insights?provider=provider-a&startTime=2000&endTime=1000',
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain('less than');
+  });
+
+  it('filters usage rows by custom start/end window', async () => {
+    const now = Date.now();
+    const startMs = now - 60 * 60 * 1000;
+    const endMs = now;
+    await db.insert(schema.requestUsage).values([
+      makeRow({
+        startTime: now - 30 * 60 * 1000,
+        provider: 'provider-a',
+        incomingModelAlias: 'in-window',
+        canonicalModelName: 'gpt-4',
+      }),
+      makeRow({
+        startTime: now - 3 * 60 * 60 * 1000,
+        provider: 'provider-a',
+        incomingModelAlias: 'out-of-window',
+        canonicalModelName: 'gpt-4',
+      }),
+    ]);
+
+    const res = await fastify.inject({
+      method: 'GET',
+      url: `/v0/management/provider-insights?provider=provider-a&startTime=${startMs}&endTime=${endMs}`,
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().metrics.requests).toBe(1);
+    expect(res.json().models[0].aliases[0].incomingModelAlias).toBe('in-window');
   });
 
   it('aggregates metrics across multiple aliases for same model', async () => {

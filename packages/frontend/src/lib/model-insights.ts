@@ -26,8 +26,14 @@ export const TIMELINE_OPTIONS: ReadonlyArray<{
 
 export const DEFAULT_RANGE_KEY: ModelInsightRangeKey = '24h';
 
+export type ModelInsightRangeMetaKey = ModelInsightRangeKey | 'custom';
+
+export type InsightsRangeSelection =
+  | { kind: 'preset'; key: ModelInsightRangeKey }
+  | { kind: 'custom'; startMs: number; endMs: number };
+
 export interface ModelInsightRangeMeta {
-  key: ModelInsightRangeKey;
+  key: ModelInsightRangeMetaKey;
   label: string;
   startTimeMs: number;
   endTimeMs: number;
@@ -130,7 +136,7 @@ const API_BASE = ''; // Proxied via server.ts
  */
 export async function fetchModelInsights(
   model: string,
-  range: ModelInsightRangeKey,
+  selection: InsightsRangeSelection,
   adminKey?: string,
 ): Promise<ModelInsightsResponse> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -139,10 +145,13 @@ export async function fetchModelInsights(
     headers['x-admin-key'] = key;
   }
 
-  const params = new URLSearchParams({
-    model,
-    range,
-  });
+  const params = new URLSearchParams({ model });
+  if (selection.kind === 'preset') {
+    params.set('range', selection.key);
+  } else {
+    params.set('startTime', String(selection.startMs));
+    params.set('endTime', String(selection.endMs));
+  }
 
   const url = `${API_BASE}/v0/management/model-insights?${params.toString()}`;
   const res = await fetch(url, { headers });

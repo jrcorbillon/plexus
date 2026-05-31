@@ -19,9 +19,9 @@ import {
 } from '../components/insights/insights-charts';
 import { HeroMetric, SectionMetric, LoadingSkeleton } from '../components/insights/insights-metrics';
 import { useInsightsPage } from '../hooks/useInsightsPage';
+import { InsightsRangeControls } from '../components/insights/InsightsRangeControls';
 import {
   fetchModelInsights,
-  TIMELINE_OPTIONS,
   DEFAULT_RANGE_KEY,
   type ModelInsightSeriesBucket,
   type ModelInsightsResponse,
@@ -61,14 +61,16 @@ export const ModelInsights: React.FC = () => {
   }, []);
 
   const fetchInsights = useCallback(
-    (alias: string, range: Parameters<typeof fetchModelInsights>[1]) =>
-      fetchModelInsights(alias, range),
+    (alias: string, selection: Parameters<typeof fetchModelInsights>[1]) =>
+      fetchModelInsights(alias, selection),
     []
   );
 
   const {
     activeRange,
+    isCustomRangeActive,
     handleRangeSelect,
+    handleCustomRangeSelect,
     isConfiguredForCurrentEntity: isConfiguredForCurrentAlias,
     isLoadingCurrentEntity: isLoadingCurrentAlias,
     errorForCurrentEntity: errorForCurrentAlias,
@@ -92,9 +94,10 @@ export const ModelInsights: React.FC = () => {
 
   const chartData = useMemo(() => {
     if (!dataForCurrentAlias || !dataForCurrentAlias.series.length) return [];
+    const rangeSpanMs = dataForCurrentAlias.range.endTimeMs - dataForCurrentAlias.range.startTimeMs;
     return dataForCurrentAlias.series.map((bucket: ModelInsightSeriesBucket) => ({
       bucketStartMs: bucket.bucketStartMs,
-      label: formatBucketLabel(bucket.bucketStartMs, dataForCurrentAlias.range.key),
+      label: formatBucketLabel(bucket.bucketStartMs, dataForCurrentAlias.range.key, rangeSpanMs),
       requests: bucket.metrics.requests,
       totalTokens: bucket.metrics.totalTokens,
       inputTokens: bucket.metrics.inputTokens,
@@ -137,23 +140,12 @@ export const ModelInsights: React.FC = () => {
         }
       >
         {isConfiguredForCurrentAlias === true && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {TIMELINE_OPTIONS.map((opt) => (
-              <button
-                key={opt.key}
-                type="button"
-                onClick={() => handleRangeSelect(opt.key)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors duration-150 ${
-                  activeRange === opt.key
-                    ? 'bg-primary/20 text-primary border border-primary/30'
-                    : 'bg-bg-glass text-text-secondary border border-border-glass hover:bg-bg-hover'
-                }`}
-                aria-pressed={activeRange === opt.key}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          <InsightsRangeControls
+            activeRange={activeRange}
+            isCustomRangeActive={isCustomRangeActive}
+            onRangeSelect={handleRangeSelect}
+            onCustomRangeSelect={handleCustomRangeSelect}
+          />
         )}
       </PageHeader>
 

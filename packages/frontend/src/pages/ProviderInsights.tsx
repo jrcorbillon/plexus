@@ -19,9 +19,9 @@ import {
 } from '../components/insights/insights-charts';
 import { HeroMetric, SectionMetric, LoadingSkeleton } from '../components/insights/insights-metrics';
 import { useInsightsPage } from '../hooks/useInsightsPage';
+import { InsightsRangeControls } from '../components/insights/InsightsRangeControls';
 import {
   fetchProviderInsights,
-  TIMELINE_OPTIONS,
   DEFAULT_RANGE_KEY,
   modelDisplayName,
   type ProviderInsightSeriesBucket,
@@ -53,14 +53,16 @@ export const ProviderInsights: React.FC = () => {
   }, []);
 
   const fetchInsights = useCallback(
-    (id: string, range: Parameters<typeof fetchProviderInsights>[1]) =>
-      fetchProviderInsights(id, range),
+    (id: string, selection: Parameters<typeof fetchProviderInsights>[1]) =>
+      fetchProviderInsights(id, selection),
     []
   );
 
   const {
     activeRange,
+    isCustomRangeActive,
     handleRangeSelect,
+    handleCustomRangeSelect,
     isConfiguredForCurrentEntity: isConfiguredForCurrentProvider,
     isLoadingCurrentEntity: isLoadingCurrentProvider,
     errorForCurrentEntity: errorForCurrentProvider,
@@ -84,9 +86,15 @@ export const ProviderInsights: React.FC = () => {
 
   const chartData = useMemo(() => {
     if (!dataForCurrentProvider || !dataForCurrentProvider.series.length) return [];
+    const rangeSpanMs =
+      dataForCurrentProvider.range.endTimeMs - dataForCurrentProvider.range.startTimeMs;
     return dataForCurrentProvider.series.map((bucket: ProviderInsightSeriesBucket) => ({
       bucketStartMs: bucket.bucketStartMs,
-      label: formatBucketLabel(bucket.bucketStartMs, dataForCurrentProvider.range.key),
+      label: formatBucketLabel(
+        bucket.bucketStartMs,
+        dataForCurrentProvider.range.key,
+        rangeSpanMs
+      ),
       requests: bucket.metrics.requests,
       totalTokens: bucket.metrics.totalTokens,
       inputTokens: bucket.metrics.inputTokens,
@@ -129,23 +137,12 @@ export const ProviderInsights: React.FC = () => {
         }
       >
         {isConfiguredForCurrentProvider === true && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {TIMELINE_OPTIONS.map((opt) => (
-              <button
-                key={opt.key}
-                type="button"
-                onClick={() => handleRangeSelect(opt.key)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors duration-150 ${
-                  activeRange === opt.key
-                    ? 'bg-primary/20 text-primary border border-primary/30'
-                    : 'bg-bg-glass text-text-secondary border border-border-glass hover:bg-bg-hover'
-                }`}
-                aria-pressed={activeRange === opt.key}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          <InsightsRangeControls
+            activeRange={activeRange}
+            isCustomRangeActive={isCustomRangeActive}
+            onRangeSelect={handleRangeSelect}
+            onCustomRangeSelect={handleCustomRangeSelect}
+          />
         )}
       </PageHeader>
 

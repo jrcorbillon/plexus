@@ -1,11 +1,18 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import type { ModelInsightRangeKey } from '../lib/model-insights';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import type { InsightsRangeSelection, ModelInsightRangeKey } from '../lib/model-insights';
 
 export interface UseInsightsPageOptions<TData> {
   entityId: string;
   defaultRangeKey: ModelInsightRangeKey;
   checkIsConfigured: (entityId: string) => Promise<boolean>;
-  fetchInsights: (entityId: string, range: ModelInsightRangeKey) => Promise<TData>;
+  fetchInsights: (entityId: string, selection: InsightsRangeSelection) => Promise<TData>;
+}
+
+function selectionKey(selection: InsightsRangeSelection): string {
+  if (selection.kind === 'preset') {
+    return `preset:${selection.key}`;
+  }
+  return `custom:${selection.startMs}:${selection.endMs}`;
 }
 
 export function useInsightsPage<TData>({
@@ -14,7 +21,10 @@ export function useInsightsPage<TData>({
   checkIsConfigured,
   fetchInsights,
 }: UseInsightsPageOptions<TData>) {
-  const [activeRange, setActiveRange] = useState<ModelInsightRangeKey>(defaultRangeKey);
+  const [activeSelection, setActiveSelection] = useState<InsightsRangeSelection>({
+    kind: 'preset',
+    key: defaultRangeKey,
+  });
 
   const [dataEntityId, setDataEntityId] = useState<string | null>(null);
   const [data, setData] = useState<TData | null>(null);
@@ -29,6 +39,14 @@ export function useInsightsPage<TData>({
 
   const fetchIdRef = useRef(0);
   const entityIdRef = useRef(entityId);
+  const selectionKeyRef = useRef(selectionKey(activeSelection));
+
+  const activeRange =
+    activeSelection.kind === 'preset' ? activeSelection.key : null;
+
+  useEffect(() => {
+    selectionKeyRef.current = selectionKey(activeSelection);
+  }, [activeSelection]);
 
   useEffect(() => {
     entityIdRef.current = entityId;
@@ -59,7 +77,7 @@ export function useInsightsPage<TData>({
   }, [entityId, checkIsConfigured]);
 
   const loadData = useCallback(
-    async (range: ModelInsightRangeKey) => {
+    async (selection: InsightsRangeSelection) => {
       if (!entityId) return;
 
       const fetchId = ++fetchIdRef.current;
@@ -69,7 +87,7 @@ export function useInsightsPage<TData>({
       setError(null);
 
       try {
-        const result = await fetchInsights(entityForThisCall, range);
+        const result = await fetchInsights(entityForThisCall, selection);
         if (fetchId === fetchIdRef.current && entityIdRef.current === entityForThisCall) {
           setDataEntityId(entityForThisCall);
           setData(result);
@@ -96,6 +114,11 @@ export function useInsightsPage<TData>({
   const errorForCurrentEntity = errorEntityId === entityId ? error : null;
   const dataForCurrentEntity = dataEntityId === entityId ? data : null;
 
+  const serializedSelection = useMemo(
+    () => selectionKey(activeSelection),
+    [activeSelection]
+  );
+
   useEffect(() => {
     if (entityIdRef.current !== entityId) return;
 
@@ -108,20 +131,38 @@ export function useInsightsPage<TData>({
       setData(null);
       return;
     }
-    loadData(activeRange);
-  }, [activeRange, loadData, isConfiguredForCurrentEntity, entityId]);
+    loadData(activeSelection);
+  }, [serializedSelection, loadData, isConfiguredForCurrentEntity, entityId, activeSelection]);
 
-  const handleRangeSelect = (key: ModelInsightRangeKey) => {
-    setActiveRange(key);
-  };
+  const handleRangeSelect = useCallback((key: ModelInsightRangeKey) => {
+    setActiveSelection({ kind: 'preset', key });
+  }, []);
 
-  const handleRetry = () => {
-    loadData(activeRange);
-  };
+  const handleCustomRangeSelect = useCallback((startMs: number, endMs: number) => {
+    setActiveSelection((prev) => {
+      if (
+        prev.kind === 'custom' &&
+        prev.startMs === startMs &&
+        prev.endMs === endMs
+      ) {
+        return prev;
+      }
+      return { kind: 'custom', startMs, endMs };
+    });
+  }, []);
+
+  const handleRetry = useCallback(() => {
+    loadData(activeSelection);
+  }, [loadData, activeSelection]);
+
+  const isCustomRangeActive = activeSelection.kind === 'custom';
 
   return {
+    activeSelection,
     activeRange,
+    isCustomRangeActive,
     handleRangeSelect,
+    handleCustomRangeSelect,
     isConfiguredForCurrentEntity,
     isLoadingCurrentEntity,
     errorForCurrentEntity,

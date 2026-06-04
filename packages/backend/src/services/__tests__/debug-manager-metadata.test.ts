@@ -1,5 +1,6 @@
-import { describe, expect, test, beforeEach } from 'vitest';
+import { describe, expect, test, beforeEach, vi } from 'vitest';
 import { DebugManager } from '../debug-manager';
+import * as sanitizeHeadersModule from '../../utils/sanitize-headers';
 
 describe('DebugManager HTTP metadata', () => {
   let debugManager: DebugManager;
@@ -10,16 +11,33 @@ describe('DebugManager HTTP metadata', () => {
     debugManager.resetForTesting?.();
   });
 
-  test('startLog stores requestHeaders in dedicated field', () => {
+  test('startLog stores sanitized requestHeaders in dedicated field', () => {
     const requestId = 'test-req-headers';
-    const headers = { 'content-type': 'application/json', authorization: 'Bea***' };
+    const headers = {
+      'content-type': 'application/json',
+      authorization: 'Bearer supersecrettoken',
+    };
 
     debugManager.startLog(requestId, { model: 'gpt-4' }, headers);
 
     const log = debugManager.getPendingLog?.(requestId);
     expect(log).toBeDefined();
-    expect(log?.requestHeaders).toEqual(headers);
+    expect(log?.requestHeaders).toEqual({
+      'content-type': 'application/json',
+      authorization: 'Bearer supe...oken',
+    });
     expect(log?.rawRequest).toEqual({ model: 'gpt-4' });
+  });
+
+  test('startLog skips header sanitization when capture is disabled', () => {
+    debugManager.setEnabled(false);
+    const sanitizeSpy = vi.spyOn(sanitizeHeadersModule, 'sanitizeHeaders');
+
+    debugManager.startLog('disabled-req', { model: 'gpt-4' }, { authorization: 'secret' });
+
+    expect(sanitizeSpy).not.toHaveBeenCalled();
+    expect(debugManager.getPendingLog?.('disabled-req')).toBeUndefined();
+    sanitizeSpy.mockRestore();
   });
 
   test('startLog works without requestHeaders', () => {

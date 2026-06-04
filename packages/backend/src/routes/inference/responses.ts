@@ -13,7 +13,6 @@ import { checkQuotaMiddleware } from '../../services/quota/quota-middleware';
 import { attachKeyAccessPolicy } from '../../utils/auth';
 import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/timeout';
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
-import { sanitizeHeaders } from '../../utils/sanitize-headers';
 
 export async function registerResponsesRoute(
   fastify: FastifyInstance,
@@ -163,7 +162,7 @@ export async function registerResponsesRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
+      DebugManager.getInstance().startLog(requestId, body, request.headers);
 
       // Check quota before processing
       if (quotaEnforcer) {

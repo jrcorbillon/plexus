@@ -9,7 +9,6 @@ import { calculateCosts } from '../../utils/calculate-costs';
 import { DebugManager } from '../../services/debug-manager';
 import { UnifiedTranscriptionRequest } from '../../types/unified';
 import { attachKeyAccessPolicy } from '../../utils/auth';
-import { sanitizeHeaders } from '../../utils/sanitize-headers';
 
 export async function registerTranscriptionsRoute(
   fastify: FastifyInstance,
@@ -146,7 +145,7 @@ export async function registerTranscriptionsRoute(
           response_format,
           temperature,
         },
-        sanitizeHeaders(request.headers as any)
+        request.headers
       );
 
       // Dispatch

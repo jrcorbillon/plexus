@@ -9,7 +9,6 @@ import { calculateCosts } from '../../utils/calculate-costs';
 import { DebugManager } from '../../services/debug-manager';
 import { UnifiedSpeechRequest } from '../../types/unified';
 import { attachKeyAccessPolicy } from '../../utils/auth';
-import { sanitizeHeaders } from '../../utils/sanitize-headers';
 
 const VALID_VOICES = [
   'alloy',
@@ -101,7 +100,7 @@ export async function registerSpeechRoute(
           stream_format: body.stream_format,
           instructions: body.instructions ? '(provided)' : undefined,
         },
-        sanitizeHeaders(request.headers as any)
+        request.headers
       );
 
       const unifiedResponse = await dispatcher.dispatchSpeech(unifiedRequest);

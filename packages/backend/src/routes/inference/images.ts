@@ -9,7 +9,6 @@ import { calculateCosts } from '../../utils/calculate-costs';
 import { DebugManager } from '../../services/debug-manager';
 import { UnifiedImageGenerationRequest, UnifiedImageEditRequest } from '../../types/unified';
 import { attachKeyAccessPolicy } from '../../utils/auth';
-import { sanitizeHeaders } from '../../utils/sanitize-headers';
 
 export async function registerImagesRoute(
   fastify: FastifyInstance,
@@ -82,7 +81,7 @@ export async function registerImagesRoute(
           size: body.size,
           response_format: body.response_format,
         },
-        sanitizeHeaders(request.headers as any)
+        request.headers
       );
 
       const unifiedResponse = await dispatcher.dispatchImageGenerations(unifiedRequest);
@@ -256,7 +255,7 @@ export async function registerImagesRoute(
           n: formFields.n,
           size: formFields.size,
         },
-        sanitizeHeaders(request.headers as any)
+        request.headers
       );
 
       const unifiedResponse = await dispatcher.dispatchImageEdits(unifiedRequest);

@@ -8,7 +8,6 @@ import { getClientIp } from '../../utils/ip';
 import { calculateCosts } from '../../utils/calculate-costs';
 import { DebugManager } from '../../services/debug-manager';
 import { attachKeyAccessPolicy } from '../../utils/auth';
-import { sanitizeHeaders } from '../../utils/sanitize-headers';
 
 export async function registerEmbeddingsRoute(
   fastify: FastifyInstance,
@@ -61,7 +60,7 @@ export async function registerEmbeddingsRoute(
       unifiedRequest.requestId = requestId;
       unifiedRequest = attachKeyAccessPolicy(request, unifiedRequest);
 
-      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
+      DebugManager.getInstance().startLog(requestId, body, request.headers);
 
       const unifiedResponse = await dispatcher.dispatchEmbeddings(unifiedRequest);
 

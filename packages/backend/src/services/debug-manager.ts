@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { createParser, EventSourceMessage } from 'eventsource-parser';
 import { encode } from 'eventsource-encoder';
 import { getCurrentKeyName } from './request-context';
+import { sanitizeHeaders } from '../utils/sanitize-headers';
 
 export interface DebugLogRecord {
   requestId: string;
@@ -108,13 +109,18 @@ export class DebugManager {
   }
 
   // ─── Log capture ────────────────────────────────────────────────
-  startLog(requestId: string, rawRequest: any, requestHeaders?: Record<string, string | string[]>) {
+  startLog(
+    requestId: string,
+    rawRequest: any,
+    requestHeaders?: Record<string, string | string[] | undefined>
+  ) {
     if (!this.isCaptureEnabled()) return;
+    const sanitizedHeaders = requestHeaders ? sanitizeHeaders(requestHeaders) : undefined;
     this.pendingLogs.set(requestId, {
       requestId,
       apiKey: getCurrentKeyName() ?? null,
       rawRequest,
-      requestHeaders,
+      requestHeaders: sanitizedHeaders,
       createdAt: Date.now(),
     });
 

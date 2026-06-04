@@ -89,15 +89,19 @@ export async function registerSpeechRoute(
       };
       unifiedRequest = attachKeyAccessPolicy(request, unifiedRequest);
 
-      DebugManager.getInstance().startLog(requestId, {
-        model: body.model,
-        voice: body.voice,
-        inputLength: body.input?.length || 0,
-        response_format: body.response_format,
-        speed: body.speed,
-        stream_format: body.stream_format,
-        instructions: body.instructions ? '(provided)' : undefined,
-      });
+      DebugManager.getInstance().startLog(
+        requestId,
+        {
+          model: body.model,
+          voice: body.voice,
+          inputLength: body.input?.length || 0,
+          response_format: body.response_format,
+          speed: body.speed,
+          stream_format: body.stream_format,
+          instructions: body.instructions ? '(provided)' : undefined,
+        },
+        request.headers
+      );
 
       const unifiedResponse = await dispatcher.dispatchSpeech(unifiedRequest);
 

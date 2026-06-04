@@ -13,6 +13,14 @@ import { getConfig } from '../config';
 import { logger } from './logger';
 import { StallInspector, type StallConfig } from '../services/inspectors/stall-inspector';
 
+const DEFAULT_STALL_CONFIG: StallConfig = {
+  ttfbMs: null,
+  ttfbBytes: 100,
+  minBytesPerSecond: null,
+  windowMs: 10000,
+  gracePeriodMs: 30000,
+};
+
 /**
  * Resolve the effective stall configuration by merging global settings
  * with per-provider overrides.
@@ -28,13 +36,7 @@ export function resolveStallConfig(
   }
 ): StallConfig | null {
   // Base defaults used when there is no global config
-  const defaults: StallConfig = {
-    ttfbMs: null,
-    ttfbBytes: 100,
-    minBytesPerSecond: null,
-    windowMs: 10000,
-    gracePeriodMs: 30000,
-  };
+  const defaults: StallConfig = DEFAULT_STALL_CONFIG;
 
   const base = globalConfig ?? defaults;
 
@@ -112,9 +114,10 @@ export function getGlobalStallConfig(): StallConfig | null {
  * @param abortController The route's AbortController (same one passed to
  *   `handleResponse` for stream disconnect detection and `wireUpstreamTimeout`).
  * @param globalStallConfig The resolved global stall config (or null if disabled).
- * @returns An object with the `stallInspector` stream to insert into the pipeline
- *   and an `addStallConfig` callback for per-provider overrides, or null if
- *   stall detection is globally disabled.
+ * @returns An object with the `stallInspector` stream and an `addStallConfig`
+ *   callback. Always returns a non-null result — without a global config the
+ *   inspector starts with a disabled skeleton that per-provider overrides can
+ *   activate later.
  */
 export function wireStallDetection(
   abortController: AbortController,
@@ -128,7 +131,7 @@ export function wireStallDetection(
     stallWindowMs?: number | null;
     stallGracePeriodMs?: number | null;
   }) => void;
-} | null {
+} {
   // When global stall config is null, we still create a StallInspector
   // with a "disabled" skeleton config so that per-provider overrides can
   // activate it later via addStallConfig(). This handles the case where
@@ -139,13 +142,7 @@ export function wireStallDetection(
   // simply pass all data through without monitoring (both ttfbMs and
   // minBytesPerSecond are null = no timers, no checks). The periodic
   // check never starts because we never enter MONITORING state.
-  const baseConfig: StallConfig = globalStallConfig ?? {
-    ttfbMs: null,
-    ttfbBytes: 100,
-    minBytesPerSecond: null,
-    windowMs: 10000,
-    gracePeriodMs: 30000,
-  };
+  const baseConfig: StallConfig = globalStallConfig ?? DEFAULT_STALL_CONFIG;
 
   const stallInspector = new StallInspector(
     crypto.randomUUID(), // Will be overwritten by the request ID in the pipeline
@@ -172,9 +169,10 @@ export function wireStallDetection(
         `wireStallDetection.addStallConfig: overrides=${JSON.stringify(providerOverrides)}, ` +
           `merged=${JSON.stringify(merged)}`
       );
-      if (!merged) return;
-
-      stallInspector.updateConfig(merged);
+      // Always update the inspector — even when merged is null, we must reset
+      // the StallInspector to a disabled skeleton so that a previous provider's
+      // overrides don't leak into the next failover target.
+      stallInspector.updateConfig(merged ?? DEFAULT_STALL_CONFIG);
     },
   };
 }

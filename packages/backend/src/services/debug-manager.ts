@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { createParser, EventSourceMessage } from 'eventsource-parser';
 import { encode } from 'eventsource-encoder';
 import { getCurrentKeyName } from './request-context';
+import { sanitizeHeaders } from '../utils/sanitize-headers';
 
 export interface DebugLogRecord {
   requestId: string;
@@ -13,6 +14,9 @@ export interface DebugLogRecord {
   transformedResponse?: any;
   rawResponseSnapshot?: any;
   transformedResponseSnapshot?: any;
+  requestHeaders?: Record<string, string | string[]>;
+  responseHeaders?: Record<string, string>;
+  responseStatus?: number;
   provider?: string;
   createdAt?: number;
 }
@@ -105,12 +109,18 @@ export class DebugManager {
   }
 
   // ─── Log capture ────────────────────────────────────────────────
-  startLog(requestId: string, rawRequest: any) {
+  startLog(
+    requestId: string,
+    rawRequest: any,
+    requestHeaders?: Record<string, string | string[] | undefined>
+  ) {
     if (!this.isCaptureEnabled()) return;
+    const sanitizedHeaders = requestHeaders ? sanitizeHeaders(requestHeaders) : undefined;
     this.pendingLogs.set(requestId, {
       requestId,
       apiKey: getCurrentKeyName() ?? null,
       rawRequest,
+      requestHeaders: sanitizedHeaders,
       createdAt: Date.now(),
     });
 
@@ -169,6 +179,13 @@ export class DebugManager {
     // ALWAYS save to memory for usage extraction/estimation
     const log = this.ensureLog(requestId);
     log.transformedResponseSnapshot = payload;
+  }
+
+  addResponseMeta(requestId: string, status: number, headers: Record<string, string>) {
+    if (!this.isCaptureEnabled()) return;
+    const log = this.ensureLog(requestId);
+    log.responseStatus = status;
+    log.responseHeaders = headers;
   }
 
   flush(requestId: string) {
@@ -239,5 +256,14 @@ export class DebugManager {
       this.ephemeralRequests.delete(requestId);
       logger.debug(`Discarded ephemeral data for ${requestId}`);
     }
+  }
+
+  resetForTesting(): void {
+    this.pendingLogs.clear();
+    this.ephemeralRequests.clear();
+  }
+
+  getPendingLog(requestId: string): DebugLogRecord | undefined {
+    return this.pendingLogs.get(requestId);
   }
 }

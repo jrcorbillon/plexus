@@ -532,6 +532,8 @@ paths:
     $ref: paths/v0_management_restart.yaml
   /v0/management/backup:
     $ref: paths/v0_management_backup.yaml
+  /v0/management/logs/reset:
+    $ref: paths/v0_management_logs_reset.yaml
   /v0/management/restore:
     $ref: paths/v0_management_restore.yaml
   /v0/management/events:

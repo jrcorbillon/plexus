@@ -121,6 +121,11 @@ export class StallInspector extends PassThrough {
     this.requestId = requestId;
   }
 
+  /** Get the current stall config. */
+  getConfig(): StallConfig {
+    return this.config;
+  }
+
   override _transform(chunk: any, encoding: BufferEncoding, callback: Function) {
     if (this.state === StallState.THROUGHPUT_STALLED) {
       // Already stalled — just pass through (abort is already triggered)

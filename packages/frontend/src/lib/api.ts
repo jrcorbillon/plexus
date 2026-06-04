@@ -231,6 +231,10 @@ export interface Provider {
     intervalMinutes: number;
     options?: Record<string, unknown>;
   };
+  modelAutosync?: {
+    enabled: boolean;
+    intervalMinutes: number;
+  };
   // GPU Profile settings for inference energy calculation
   gpu_profile?: string;
   gpu_ram_gb?: number;
@@ -886,6 +890,7 @@ export interface KeyConfig {
   allowedProviders?: string[];
   excludedModels?: string[];
   excludedProviders?: string[];
+  allowedIps?: string[];
 }
 
 export type UsageSortField =
@@ -1330,6 +1335,7 @@ export const api = {
 
       records.forEach((r) => {
         const name = r.incomingModelAlias || 'Unknown';
+        if (name.startsWith('direct/')) return;
         if (!aggregated[name]) {
           aggregated[name] = { name, requests: 0, tokens: 0 };
         }
@@ -1441,7 +1447,13 @@ export const api = {
       const aggregated: Record<string, PieChartDataPoint> = {};
 
       records.forEach((r) => {
-        const name = r.apiKey ? `${r.apiKey.slice(0, 8)}...` : 'Unknown';
+        if (r.apiKey === 'probe') return;
+
+        const name = r.apiKey
+          ? r.apiKey.length > 8
+            ? `${r.apiKey.slice(0, 8)}...`
+            : r.apiKey
+          : 'Unknown';
         if (!aggregated[name]) {
           aggregated[name] = { name, requests: 0, tokens: 0 };
         }
@@ -1575,6 +1587,7 @@ export const api = {
           allowedProviders?: string[];
           excludedModels?: string[];
           excludedProviders?: string[];
+          allowedIps?: string[];
         }
       >;
 
@@ -1587,6 +1600,7 @@ export const api = {
         allowedProviders: val.allowedProviders,
         excludedModels: val.excludedModels,
         excludedProviders: val.excludedProviders,
+        allowedIps: val.allowedIps,
       }));
     } catch (e) {
       console.error('API Error getKeys', e);
@@ -1608,12 +1622,15 @@ export const api = {
           allowedProviders: keyConfig.allowedProviders ?? [],
           excludedModels: keyConfig.excludedModels ?? [],
           excludedProviders: keyConfig.excludedProviders ?? [],
+          allowedIps: keyConfig.allowedIps ?? [],
         }),
       }
     );
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to save key');
+      const detail =
+        Array.isArray(err.details) && err.details[0]?.message ? `: ${err.details[0].message}` : '';
+      throw new Error(`${err.error || 'Failed to save key'}${detail}`);
     }
 
     // Delete old key only after new one is saved successfully
@@ -1677,6 +1694,12 @@ export const api = {
               : {},
           models: normalizedModels,
           quotaChecker: normalizeProviderQuotaChecker(val.quota_checker),
+          modelAutosync: val.model_autosync
+            ? {
+                enabled: val.model_autosync.enabled === true,
+                intervalMinutes: Math.max(1, val.model_autosync.intervalMinutes || 60),
+              }
+            : { enabled: false, intervalMinutes: 60 },
           adapter: val.adapter ? (Array.isArray(val.adapter) ? val.adapter : [val.adapter]) : [],
           timeoutMs: val.timeoutMs ?? undefined,
           maxConcurrency: val.maxConcurrency ?? undefined,
@@ -1718,6 +1741,10 @@ export const api = {
             options: provider.quotaChecker.options,
           }
         : undefined,
+      model_autosync: {
+        enabled: provider.modelAutosync?.enabled === true,
+        intervalMinutes: Math.max(1, provider.modelAutosync?.intervalMinutes || 60),
+      },
       // GPU Profile settings — always send resolved numeric fields so backend
       // never needs to resolve profile names. gpu_profile is a display hint only.
       ...(provider.gpu_profile ? { gpu_profile: provider.gpu_profile } : {}),
@@ -1991,7 +2018,7 @@ export const api = {
   getDebugLogs: async (
     limit: number = 50,
     offset: number = 0
-  ): Promise<{ requestId: string; createdAt: number }[]> => {
+  ): Promise<{ requestId: string; createdAt: number; responseStatus: number | null }[]> => {
     try {
       const res = await fetchWithAuth(
         `${API_BASE}/v0/management/debug/logs?limit=${limit}&offset=${offset}`
@@ -3063,6 +3090,18 @@ export const api = {
     return res.json();
   },
 
+  /** Reset all request logs, error logs, and debug trace logs. */
+  resetLogs: async (): Promise<{ success: boolean; message: string }> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/logs/reset`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Reset logs failed' }));
+      throw new Error(err.error || 'Reset logs failed');
+    }
+    return res.json();
+  },
+
   // ─── Failover Settings ────────────────────────────────────────────
 
   /** Fetch current failover policy. */
@@ -3121,6 +3160,31 @@ export const api = {
       body: JSON.stringify(updates),
     });
     if (!res.ok) throw new Error('Failed to update cooldown policy');
+    return res.json();
+  },
+
+  // ─── Trusted Proxies ───────────────────────────────────────────────
+
+  /** Fetch the trusted-proxy allowlist (IPs/CIDRs whose forwarding headers are honored). */
+  getTrustedProxies: async (): Promise<{ trustedProxies: string[] }> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/config/trusted-proxies`);
+    if (!res.ok) throw new Error('Failed to fetch trusted proxies');
+    return res.json();
+  },
+
+  /** Replace the trusted-proxy allowlist. */
+  patchTrustedProxies: async (trustedProxies: string[]): Promise<{ trustedProxies: string[] }> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/config/trusted-proxies`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trustedProxies }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const detail =
+        Array.isArray(err.details) && err.details[0]?.message ? `: ${err.details[0].message}` : '';
+      throw new Error(`${err.error || 'Failed to update trusted proxies'}${detail}`);
+    }
     return res.json();
   },
 

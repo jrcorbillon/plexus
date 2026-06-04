@@ -201,12 +201,19 @@ export class QuotaScheduler {
     const checkedAt = toDbTimestampMs(new Date(result.checkedAt), dialect);
     const createdAt = toDbTimestampMs(Date.now(), dialect);
 
-    if (!result.success) {
-      try {
-        await db.insert(schema.meterSnapshots).values({
-          checkerId: result.checkerId,
-          checkerType: result.checkerType,
-          provider: result.provider,
+    const sentinelValues = result.success
+      ? {
+          meterKey: '_empty',
+          kind: 'allowance',
+          unit: '',
+          label: 'No meters',
+          utilizationState: 'not_applicable',
+          utilizationPercent: null,
+          status: 'ok',
+          success: true,
+          errorMessage: null,
+        }
+      : {
           meterKey: '_error',
           kind: 'allowance',
           unit: '',
@@ -216,11 +223,20 @@ export class QuotaScheduler {
           status: 'ok',
           success: false,
           errorMessage: result.error ?? 'Unknown quota check error',
+        };
+
+    if (!result.success || result.meters.length === 0) {
+      try {
+        await db.insert(schema.meterSnapshots).values({
+          checkerId: result.checkerId,
+          checkerType: result.checkerType,
+          provider: result.provider,
           checkedAt,
           createdAt,
+          ...sentinelValues,
         });
       } catch (error) {
-        logger.error(`Failed to persist quota error for '${result.checkerId}': ${error}`);
+        logger.error(`Failed to persist quota result for '${result.checkerId}': ${error}`);
       }
       return;
     }
@@ -311,31 +327,33 @@ export class QuotaScheduler {
         };
       }
 
-      const meters: Meter[] = latestRows.map((row: any) => {
-        const util: Meter['utilizationPercent'] =
-          row.utilizationState === 'unknown'
-            ? 'unknown'
-            : row.utilizationState === 'not_applicable'
-              ? 'not_applicable'
-              : (row.utilizationPercent ?? 0);
-        return {
-          key: row.meterKey,
-          label: row.label,
-          kind: row.kind,
-          unit: row.unit,
-          group: row.group ?? undefined,
-          scope: row.scope ?? undefined,
-          limit: row.limit ?? undefined,
-          used: row.used ?? undefined,
-          remaining: row.remaining ?? undefined,
-          utilizationPercent: util,
-          status: row.status,
-          periodValue: row.periodValue ?? undefined,
-          periodUnit: row.periodUnit ?? undefined,
-          periodCycle: row.periodCycle ?? undefined,
-          resetsAt: row.resetsAt ? toIso(row.resetsAt) : undefined,
-        };
-      });
+      const meters: Meter[] = latestRows
+        .filter((r: any) => r.meterKey !== '_empty' && r.meterKey !== '_error')
+        .map((row: any) => {
+          const util: Meter['utilizationPercent'] =
+            row.utilizationState === 'unknown'
+              ? 'unknown'
+              : row.utilizationState === 'not_applicable'
+                ? 'not_applicable'
+                : (row.utilizationPercent ?? 0);
+          return {
+            key: row.meterKey,
+            label: row.label,
+            kind: row.kind,
+            unit: row.unit,
+            group: row.group ?? undefined,
+            scope: row.scope ?? undefined,
+            limit: row.limit ?? undefined,
+            used: row.used ?? undefined,
+            remaining: row.remaining ?? undefined,
+            utilizationPercent: util,
+            status: row.status,
+            periodValue: row.periodValue ?? undefined,
+            periodUnit: row.periodUnit ?? undefined,
+            periodCycle: row.periodCycle ?? undefined,
+            resetsAt: row.resetsAt ? toIso(row.resetsAt) : undefined,
+          };
+        });
 
       const firstRow = latestRows[0];
       return {

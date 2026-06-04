@@ -18,6 +18,7 @@
  *   PLEXUS_STAGING_IMAGE_RETAIN     Number of staging images to keep on host (default: 3)
  *   PLEXUS_STAGING_BACKUP_DIR       Local directory for backup files (default: ".staging-backups")
  *   PLEXUS_STAGING_HEALTH_TIMEOUT   Seconds to wait for health check (default: 60)
+ *   PLEXUS_TARGETPLATFORM           Docker target platform (default: "linux/amd64")
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
@@ -44,11 +45,59 @@ function optionalEnv(name: string, defaultValue: string): string {
 const CTX = requireEnv('PLEXUS_STAGING_DOCKER_CONTEXT');
 const STAGING_URL = requireEnv('PLEXUS_STAGING_URL').replace(/\/$/, '');
 const STAGING_ADMIN_KEY = requireEnv('PLEXUS_STAGING_ADMIN_KEY');
-const CONTAINER_NAME = optionalEnv('PLEXUS_STAGING_CONTAINER_NAME', 'plexus');
 const BACKUP_RETAIN = parseInt(optionalEnv('PLEXUS_STAGING_BACKUP_RETAIN', '3'), 10);
 const IMAGE_RETAIN = parseInt(optionalEnv('PLEXUS_STAGING_IMAGE_RETAIN', '3'), 10);
 const BACKUP_DIR = optionalEnv('PLEXUS_STAGING_BACKUP_DIR', '.staging-backups');
 const HEALTH_TIMEOUT = parseInt(optionalEnv('PLEXUS_STAGING_HEALTH_TIMEOUT', '60'), 10);
+const TARGETPLATFORM = optionalEnv('PLEXUS_TARGETPLATFORM', 'linux/amd64');
+
+function resolveContainerName(): string {
+  const envName = process.env.PLEXUS_STAGING_CONTAINER_NAME;
+  if (envName) return envName;
+
+  const detectResult = spawnSync(
+    'docker',
+    [
+      '--context',
+      CTX,
+      'ps',
+      '-a',
+      '--filter',
+      'ancestor=plexus:staging-latest',
+      '--format',
+      '{{.Names}}',
+    ],
+    { encoding: 'utf-8' }
+  );
+  const detected = detectResult.stdout?.trim();
+  if (detected) {
+    const names = detected
+      .split('\n')
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (names.length === 1) return names[0]!;
+    if (names.length > 1) {
+      console.warn(`  ⚠️  Multiple containers match (plexus:staging-latest): ${names.join(', ')}`);
+      console.warn(`     Using first: ${names[0]}`);
+      return names[0]!;
+    }
+  }
+
+  const fallbackResult = spawnSync(
+    'docker',
+    ['--context', CTX, 'ps', '-a', '--format', '{{.Names}}\t{{.Image}}'],
+    { encoding: 'utf-8' }
+  );
+  const lines = (fallbackResult.stdout ?? '').trim().split('\n').filter(Boolean);
+  for (const line of lines) {
+    const [name, image] = line.split('\t');
+    if (name && image?.startsWith('plexus:')) return name;
+  }
+
+  return 'Plexus';
+}
+
+const CONTAINER_NAME = resolveContainerName();
 
 // Timestamp-based tag — works for uncommitted work, always sortable
 const now = new Date();
@@ -89,15 +138,17 @@ function step(n: number, label: string) {
  */
 function docker(
   args: string[],
-  opts: { fatal?: boolean; silent?: boolean; stream?: boolean } = {}
+  opts: { fatal?: boolean; silent?: boolean; stream?: boolean; env?: Record<string, string> } = {}
 ): { success: boolean; stdout: string; stderr: string } {
   const cmd = ['docker', '--context', CTX, ...args];
   if (!opts.silent) {
     console.log(`  $ ${cmd.join(' ')}`);
   }
 
+  const env = opts.env ? { ...process.env, ...opts.env } : undefined;
+
   if (opts.stream) {
-    const result = spawnSync(cmd[0]!, cmd.slice(1), { stdio: 'inherit' });
+    const result = spawnSync(cmd[0]!, cmd.slice(1), { stdio: 'inherit', env });
     const success = result.status === 0;
     if (!success && opts.fatal !== false) {
       console.error(`\n❌ Command failed: ${cmd.join(' ')}\n`);
@@ -106,7 +157,7 @@ function docker(
     return { success, stdout: '', stderr: '' };
   }
 
-  const result = spawnSync(cmd[0]!, cmd.slice(1), { encoding: 'utf-8' });
+  const result = spawnSync(cmd[0]!, cmd.slice(1), { encoding: 'utf-8', env });
   const stdout = result.stdout?.trim() ?? '';
   const stderr = result.stderr?.trim() ?? '';
   const success = result.status === 0;
@@ -133,7 +184,10 @@ console.log('╚═════════════════════�
 console.log();
 console.log(`  Docker context:  ${CTX}`);
 console.log(`  Staging URL:     ${STAGING_URL}`);
-console.log(`  Container:       ${CONTAINER_NAME}`);
+console.log(
+  `  Container:       ${CONTAINER_NAME}${process.env.PLEXUS_STAGING_CONTAINER_NAME ? '' : ' (auto-detected)'}`
+);
+console.log(`  Target platform: ${TARGETPLATFORM}`);
 console.log(`  New image tag:   ${NEW_TAG}`);
 console.log();
 
@@ -213,11 +267,9 @@ if (inspectResult.success && inspectResult.stdout) {
   if (info) {
     previousImage = info.Config?.Image ?? null;
 
-    // Reconstruct a docker run command from the live container config
     const parts: string[] = [`docker --context ${CTX} run -d`];
     parts.push(`  --name ${CONTAINER_NAME}`);
 
-    // Restart policy
     const restartPolicy = info.HostConfig?.RestartPolicy?.Name;
     if (restartPolicy && restartPolicy !== 'no') {
       const maxRetries = info.HostConfig.RestartPolicy.MaximumRetryCount;
@@ -226,7 +278,6 @@ if (inspectResult.success && inspectResult.stdout) {
       parts.push(`  --restart ${policyStr}`);
     }
 
-    // Port bindings
     const portBindings = info.HostConfig?.PortBindings ?? {};
     for (const [containerPort, bindings] of Object.entries(portBindings)) {
       for (const binding of (bindings as any[]) ?? []) {
@@ -237,7 +288,6 @@ if (inspectResult.success && inspectResult.stdout) {
       }
     }
 
-    // Mounts / volumes
     const mounts = info.Mounts ?? [];
     for (const m of mounts) {
       if (m.Type === 'bind') {
@@ -249,7 +299,6 @@ if (inspectResult.success && inspectResult.stdout) {
       }
     }
 
-    // Environment variables (skip internal Docker bookkeeping vars)
     const skipEnvPrefixes = ['PATH=', 'HOSTNAME=', 'HOME='];
     const envVars: string[] = info.Config?.Env ?? [];
     for (const e of envVars) {
@@ -278,17 +327,35 @@ if (inspectResult.success && inspectResult.stdout) {
 step(3, 'Build on staging host');
 
 console.log(`  Building ${NEW_TAG} on context "${CTX}"...`);
-docker(['build', '--build-arg', `APP_VERSION=${TIMESTAMP}`, '-t', NEW_TAG, '-t', LATEST_TAG, '.'], {
-  fatal: true,
-  stream: true,
-});
+docker(
+  [
+    'build',
+    '--build-arg',
+    `APP_VERSION=${TIMESTAMP}`,
+    '--build-arg',
+    `TARGETPLATFORM=${TARGETPLATFORM}`,
+    '-t',
+    NEW_TAG,
+    '-t',
+    LATEST_TAG,
+    '.',
+  ],
+  {
+    fatal: true,
+    stream: true,
+    // DOCKER_BUILDKIT=1 enables BuildKit on the remote daemon so it
+    // injects TARGETPLATFORM natively (in addition to our --build-arg).
+    // The build still runs on the remote host via the Docker context.
+    env: { DOCKER_BUILDKIT: '1' },
+  }
+);
 console.log(`  ✓ Built ${NEW_TAG}`);
 
 // ---------------------------------------------------------------------------
-// Phase 4: Deploy via Watchtower --run-once
+// Phase 4: Deploy via Watchtower --run-once --no-pull
 // ---------------------------------------------------------------------------
 
-step(4, 'Deploy via Watchtower --run-once');
+step(4, 'Deploy via Watchtower --run-once --no-pull');
 
 docker(
   [
@@ -298,6 +365,7 @@ docker(
     '/var/run/docker.sock:/var/run/docker.sock',
     'containrrr/watchtower',
     '--run-once',
+    '--no-pull',
     CONTAINER_NAME,
   ],
   { fatal: true }

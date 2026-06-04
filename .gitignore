@@ -82,3 +82,4 @@ plexus
 # Profiling output
 .prof/
 .grepai/
+mise.local.toml

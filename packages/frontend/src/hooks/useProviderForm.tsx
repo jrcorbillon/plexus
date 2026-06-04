@@ -70,6 +70,7 @@ export const EMPTY_PROVIDER: Provider = {
   headers: {},
   extraBody: {},
   models: {},
+  modelAutosync: { enabled: false, intervalMinutes: 60 },
   adapter: [],
   timeoutMs: undefined,
   maxConcurrency: undefined,
@@ -730,10 +731,20 @@ export function useProviderForm() {
   };
 
   const toggleModelSelection = (modelId: string) => {
-    const next = new Set(selectedModelIds);
-    if (next.has(modelId)) next.delete(modelId);
-    else next.add(modelId);
-    setSelectedModelIds(next);
+    setSelectedModelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(modelId)) next.delete(modelId);
+      else next.add(modelId);
+      return next;
+    });
+  };
+
+  const selectAllFetchedModels = () => {
+    setSelectedModelIds(new Set(fetchedModels.map((model) => model.id)));
+  };
+
+  const clearSelectedModels = () => {
+    setSelectedModelIds(new Set());
   };
 
   const handleAddSelectedModels = () => {
@@ -760,8 +771,8 @@ export function useProviderForm() {
     if (quotaType === 'minimax') {
       if (!options.groupid || !(options.groupid as string).trim())
         return 'Group ID is required for MiniMax quota checker';
-      if (!options.hertzSession || !(options.hertzSession as string).trim())
-        return 'HERTZ-SESSION cookie value is required for MiniMax quota checker';
+      if (!options.token || !(options.token as string).trim())
+        return '_token cookie value is required for MiniMax quota checker';
     }
     if (quotaType === 'wisdomgate' && (!options.session || !(options.session as string).trim()))
       return 'Session cookie is required for Wisdom Gate quota checker';
@@ -936,6 +947,8 @@ export function useProviderForm() {
     handleOpenFetchModels,
     handleFetchModels,
     toggleModelSelection,
+    selectAllFetchedModels,
+    clearSelectedModels,
     handleAddSelectedModels,
     // Quota
     getQuotaDisplay,

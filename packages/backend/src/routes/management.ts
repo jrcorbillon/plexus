@@ -119,7 +119,7 @@ export async function registerManagementRoutes(
       // Model routes for AI energy calculations
       await registerModelRoutes(adminOnly);
       // Backup and restore routes
-      await registerBackupRoutes(adminOnly);
+      await registerBackupRoutes(adminOnly, usageStorage, mcpUsageStorage);
       // Concurrency (live snapshot + historical timeline)
       await registerConcurrencyRoutes(adminOnly, usageStorage);
       // Model insights (per-alias aggregate endpoint)

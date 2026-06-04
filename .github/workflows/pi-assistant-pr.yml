@@ -1,5 +1,5 @@
-name: Pi Assistant
-run-name: "Pi: #${{ github.event.issue.number }} @${{ github.event.comment.user.login }}"
+name: Pi Assistant (PR)
+run-name: "Pi PR: #${{ github.event.issue.number }} @${{ github.event.comment.user.login }}"
 
 on:
   issue_comment:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   pi-agent:
-    if: contains(github.event.comment.body, '/pi')
+    if: contains(github.event.comment.body, '/pi') && github.event.issue.pull_request != null
     runs-on: ubuntu-latest
     env:
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}:${{ github.repository }}|${{ github.workflow }}|${{ github.job }}
@@ -55,11 +55,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create working branch
+      - name: Get PR branch
+        id: pr_branch
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            });
+            core.setOutput('head_ref', pull.head.ref);
+            core.setOutput('head_repo', pull.head.repo.full_name);
+            core.setOutput('same_repo', String(pull.head.repo.full_name === `${context.repo.owner}/${context.repo.repo}`));
+
+      - name: Check out PR branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ steps.pr_branch.outputs.head_ref }}
+          HEAD_REPO: ${{ steps.pr_branch.outputs.head_repo }}
+          SAME_REPO: ${{ steps.pr_branch.outputs.same_repo }}
         run: |
-          BRANCH="pi-agent/$(date +%Y%m%d-%H%M%S)"
-          git checkout -b "$BRANCH"
-          echo "WORKING_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          if [ "$SAME_REPO" = "true" ]; then
+            git fetch origin "$HEAD_REF:refs/remotes/origin/$HEAD_REF"
+            git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
+            git branch --set-upstream-to="origin/$HEAD_REF" "$HEAD_REF"
+          else
+            git remote add pr-head "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git"
+            git fetch pr-head "$HEAD_REF:refs/remotes/pr-head/$HEAD_REF"
+            git checkout -B "$HEAD_REF" "pr-head/$HEAD_REF"
+            git branch --set-upstream-to="pr-head/$HEAD_REF" "$HEAD_REF"
+          fi
+          echo "WORKING_BRANCH=$HEAD_REF" >> "$GITHUB_ENV"
 
       - name: Configure Git identity
         run: |
@@ -90,9 +117,10 @@ jobs:
           suppress_final_comment: true
           suppress_bun_install: true
           export_session_html: true
-          prompt_file: .github/prompts/pi-assistant.md
+          prompt_file: .github/prompts/pi-assistant-pr.md
         env:
           INITIAL_COMMENT_ID: ${{ steps.initial_comment.outputs.comment_id }}
+          WORKING_BRANCH: ${{ steps.pr_branch.outputs.head_ref }}
 
       - name: Post failure comment if agent did not complete
         if: always() && (steps.pi.outputs.success != 'true' || steps.pi.outputs.response == '')

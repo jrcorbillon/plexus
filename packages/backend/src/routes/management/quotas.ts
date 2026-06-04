@@ -50,7 +50,7 @@ export async function registerQuotaRoutes(
             displayName: displayNameMap.get(quota.type) ?? quota.type,
             pending: latest === null,
             meters: latest?.meters ?? [],
-            success: latest?.success ?? false,
+            success: latest?.success ?? true,
             ...(latest?.error ? { error: latest.error } : {}),
           });
         } catch (error) {

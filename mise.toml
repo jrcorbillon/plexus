@@ -3,6 +3,7 @@ act = "latest"
 actionlint = "latest"
 bun = "latest"
 lefthook = "latest"
+"npm:greptile" = "latest"
 
 [env]
 _.path = ["./node_modules/.bin"]

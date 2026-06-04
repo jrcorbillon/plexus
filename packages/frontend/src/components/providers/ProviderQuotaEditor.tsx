@@ -23,6 +23,8 @@ import { ZenmuxQuotaConfig } from '../quota/ZenmuxQuotaConfig';
 import { WaferQuotaConfig } from '../quota/WaferQuotaConfig';
 import { OpenCodeGoQuotaConfig } from '../quota/OpenCodeGoQuotaConfig';
 import { CrofQuotaConfig } from '../quota/CrofQuotaConfig';
+import { ExeDevQuotaConfig } from '../quota/ExeDevQuotaConfig';
+import { HyperQuotaConfig } from '../quota/HyperQuotaConfig';
 
 interface Props {
   editingProvider: Provider;
@@ -65,6 +67,8 @@ const QUOTA_CONFIG_MAP: Record<
   wafer: WaferQuotaConfig,
   'opencode-go': OpenCodeGoQuotaConfig,
   crof: CrofQuotaConfig,
+  exedev: ExeDevQuotaConfig,
+  hyper: HyperQuotaConfig,
 };
 
 export function ProviderQuotaEditor({

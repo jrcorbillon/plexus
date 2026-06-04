@@ -12,6 +12,7 @@ import { checkQuotaMiddleware } from '../../services/quota/quota-middleware';
 import { attachKeyAccessPolicy } from '../../utils/auth';
 import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/timeout';
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
+import { sanitizeHeaders } from '../../utils/sanitize-headers';
 
 export async function registerMessagesRoute(
   fastify: FastifyInstance,
@@ -79,7 +80,7 @@ export async function registerMessagesRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(requestId, body);
+      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
 
       // Check quota before processing
       if (quotaEnforcer) {
@@ -88,13 +89,13 @@ export async function registerMessagesRoute(
       }
 
       const abortController = new AbortController();
-      const { signal: dispatchSignal, addTimeoutSource } = wireUpstreamTimeout(abortController);
+      const { signal: dispatchSignal, resolveTimeoutMs } = wireUpstreamTimeout(abortController);
       earlyDisconnect = wireEarlyDisconnectDetection(request, abortController);
       const stallDetectionResult = wireStallDetection(abortController, getGlobalStallConfig());
       const unifiedResponse = await dispatcher.dispatch(
         unifiedRequest,
         dispatchSignal,
-        addTimeoutSource,
+        resolveTimeoutMs,
         stallDetectionResult?.addStallConfig
       );
 
@@ -136,12 +137,8 @@ export async function registerMessagesRoute(
       return result;
     } catch (e: any) {
       earlyDisconnect?.cleanup();
-      if (
-        e?.routingContext?.code === 'client_disconnected' ||
-        e?.routingContext?.code === 'upstream_timeout'
-      ) {
-        usageRecord.responseStatus =
-          e?.routingContext?.code === 'upstream_timeout' ? 'timeout' : 'cancelled';
+      if (e?.routingContext?.code === 'client_disconnected') {
+        usageRecord.responseStatus = 'cancelled';
         usageRecord.durationMs = Date.now() - startTime;
         usageRecord.attemptCount = e.routingContext?.attemptCount || usageRecord.attemptCount || 1;
         usageRecord.retryHistory =
@@ -152,7 +149,8 @@ export async function registerMessagesRoute(
         );
         return;
       }
-      usageRecord.responseStatus = 'error';
+      usageRecord.responseStatus =
+        e?.routingContext?.code === 'upstream_timeout' ? 'timeout' : 'error';
       usageRecord.durationMs = Date.now() - startTime;
       usageRecord.attemptCount = e.routingContext?.attemptCount || usageRecord.attemptCount || 1;
       usageRecord.retryHistory = e.routingContext?.retryHistory || usageRecord.retryHistory || null;

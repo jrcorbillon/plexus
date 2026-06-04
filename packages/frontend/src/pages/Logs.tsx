@@ -66,9 +66,12 @@ import {
   CheckCircle,
   XCircle,
   Gauge,
+  Wifi,
+  WifiOff,
+  Loader,
 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 // @ts-ignore
 import messagesLogo from '../assets/messages.svg';
@@ -112,14 +115,74 @@ const parseRetryHistory = (value?: string | null): RetryAttemptDetail[] => {
   }
 };
 
+const getOffsetFromSearchParams = (searchParams: URLSearchParams) => {
+  const offsetParam = searchParams.get('offset');
+  if (!offsetParam) return 0;
+
+  const parsedOffset = Number(offsetParam);
+  if (!Number.isFinite(parsedOffset) || parsedOffset < 0) return 0;
+
+  return Math.floor(parsedOffset);
+};
+
+interface PaginationControlsProps {
+  position: 'top' | 'bottom';
+  currentPage: number;
+  totalPages: number;
+  offset: number;
+  limit: number;
+  total: number;
+  onOffsetChange: (offset: number) => void;
+}
+
+const PaginationControls = ({
+  position,
+  currentPage,
+  totalPages,
+  offset,
+  limit,
+  total,
+  onOffsetChange,
+}: PaginationControlsProps) => (
+  <div
+    className={clsx(
+      'flex items-center justify-between gap-3 px-3 py-3 sm:justify-end',
+      position === 'top' ? 'border-b border-border' : 'border-t border-border'
+    )}
+  >
+    <span className="text-xs text-text-secondary font-mono">
+      Page {currentPage} of {Math.max(1, totalPages)}
+    </span>
+    <div className="flex gap-1">
+      <Button
+        variant="ghost"
+        size="icon"
+        disabled={offset === 0}
+        onClick={() => onOffsetChange(Math.max(0, offset - limit))}
+      >
+        <ChevronLeft size={16} />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        disabled={offset + limit >= total}
+        onClick={() => onOffsetChange(offset + limit)}
+      >
+        <ChevronRight size={16} />
+      </Button>
+    </div>
+  </div>
+);
+
 export const Logs = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { adminKey, isAdmin, isLimited, principal } = useAuth();
   const [logs, setLogs] = useState<UsageRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [limit] = useState(20);
-  const [offset, setOffset] = useState(0);
+  const [offset, setOffset] = useState(() => getOffsetFromSearchParams(searchParams));
   const [newestLogId, setNewestLogId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<UsageSortField>('date');
   const [sortDir, setSortDir] = useState<UsageSortDirection>('desc');
@@ -151,6 +214,13 @@ export const Logs = () => {
   const [isRetryModalOpen, setIsRetryModalOpen] = useState(false);
 
   const filtersRef = useRef(filters);
+  // sseConnected tracks whether the live-update SSE stream is currently active.
+  // Used to stop the liveTick timer when the stream drops so duration counters freeze.
+  const sseConnected = useRef(false);
+  // sseStatus drives the visible connection indicator in the UI.
+  const [sseStatus, setSseStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>(
+    'disconnected'
+  );
 
   useEffect(() => {
     filtersRef.current = filters;
@@ -172,9 +242,31 @@ export const Logs = () => {
   const [, setLiveTick] = useState(0);
 
   useEffect(() => {
-    const interval = setInterval(() => setLiveTick((t) => t + 1), 100);
+    // Only tick while the SSE stream is active so duration counters freeze when it drops.
+    const interval = setInterval(() => {
+      if (sseConnected.current) setLiveTick((t) => t + 1);
+    }, 100);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const nextOffset = getOffsetFromSearchParams(searchParams);
+    setOffset((currentOffset) => (currentOffset === nextOffset ? currentOffset : nextOffset));
+  }, [searchParams]);
+
+  const updateOffset = (nextOffset: number) => {
+    const normalizedOffset = Math.max(0, Math.floor(nextOffset));
+    setOffset(normalizedOffset);
+    setSearchParams((currentParams) => {
+      const nextParams = new URLSearchParams(currentParams);
+      if (normalizedOffset === 0) {
+        nextParams.delete('offset');
+      } else {
+        nextParams.set('offset', String(normalizedOffset));
+      }
+      return nextParams;
+    });
+  };
 
   const loadLogs = async () => {
     setLoading(true);
@@ -209,7 +301,7 @@ export const Logs = () => {
         await api.deleteAllUsageLogs(olderThanDays);
       }
       // Reset to first page
-      setOffset(0);
+      updateOffset(0);
       await loadLogs();
       setIsDeleteModalOpen(false);
     } finally {
@@ -252,28 +344,55 @@ export const Logs = () => {
 
     const controller = new AbortController();
 
-    const connect = async () => {
+    // Freeze pending logs and update connection status when the stream drops.
+    const handleDisconnect = () => {
+      sseConnected.current = false;
+      setLogs((prev) =>
+        prev.map((log) =>
+          log.responseStatus === 'pending' && log.durationMs == null
+            ? { ...log, durationMs: Date.now() - log.startTime }
+            : log
+        )
+      );
+    };
+
+    // Attempt a single SSE connection.
+    // Returns:
+    //   true  — connected and stream ended (transient; safe to retry)
+    //   false — connection-level error (transient; safe to retry)
+    //   null  — permanent server error (4xx); stop retrying
+    const connectOnce = async (): Promise<boolean | null> => {
       try {
         const response = await fetch('/v0/management/events', {
-          headers: {
-            'x-admin-key': adminKey,
-          },
+          headers: { 'x-admin-key': adminKey },
           signal: controller.signal,
         });
 
         if (!response.ok) {
+          // Non-transient HTTP errors (401, 403, 404, etc.) — no point retrying.
+          if (response.status >= 400 && response.status < 500) {
+            handleDisconnect();
+            console.error(`SSE: permanent error ${response.status} — stopping reconnect`);
+            return null;
+          }
           throw new Error(`Failed to connect: ${response.statusText}`);
         }
 
         const reader = response.body?.getReader();
-        if (!reader) return;
+        if (!reader) return false;
+
+        sseConnected.current = true;
+        setSseStatus('connected');
 
         const decoder = new TextDecoder();
         let buffer = '';
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            handleDisconnect();
+            break;
+          }
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n\n'); // SSE messages are separated by double newline
@@ -371,28 +490,94 @@ export const Logs = () => {
             }
           }
         }
+
+        return true;
       } catch (err: any) {
-        if (err.name !== 'AbortError') {
-          console.error('Log stream error:', err);
+        handleDisconnect();
+        if (err.name === 'AbortError') {
+          // Intentional teardown — do not retry.
+          throw err;
         }
+        console.error('Log stream error:', err);
+        return false;
       }
     };
 
-    connect();
+    // Reconnect loop with exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (cap).
+    // Delay resets to 1s after any successful connection so a brief outage
+    // following a long stable session doesn't start with an accumulated delay.
+    const run = async () => {
+      const MAX_DELAY_MS = 30_000;
+      let delay = 1_000;
+
+      while (!controller.signal.aborted) {
+        const result = await connectOnce();
+
+        if (controller.signal.aborted) break;
+
+        // Permanent server error (4xx) — stop retrying entirely.
+        if (result === null) break;
+
+        // Reset backoff after a successful connection so the next drop after a
+        // long stable session starts back at 1 s instead of the accumulated delay.
+        if (result === true) delay = 1_000;
+
+        // Stream ended unexpectedly — start reconnecting.
+        setSseStatus('reconnecting');
+
+        // Wait before retrying, but bail early if aborted.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delay);
+          controller.signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true }
+          );
+        });
+
+        if (!controller.signal.aborted) {
+          delay = Math.min(delay * 2, MAX_DELAY_MS);
+        }
+      }
+
+      setSseStatus('disconnected');
+    };
+
+    run().catch(() => {
+      // AbortError from intentional teardown — suppress.
+      setSseStatus('disconnected');
+    });
 
     return () => {
+      sseConnected.current = false;
+      setSseStatus('disconnected');
       controller.abort();
+      // Freeze any in-flight logs that are still 'pending' so their duration
+      // counter stops at the moment the stream dropped rather than continuing forever.
+      setLogs((prev) =>
+        prev.map((log) =>
+          log.responseStatus === 'pending' && log.durationMs == null
+            ? { ...log, durationMs: Date.now() - log.startTime }
+            : log
+        )
+      );
     };
   }, [offset, limit, adminKey, sortBy, sortDir]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    setOffset(0); // Reset to first page
-    loadLogs();
+    if (offset === 0) {
+      loadLogs();
+      return;
+    }
+    updateOffset(0);
   };
 
   const handleSort = (field: UsageSortField) => {
-    setOffset(0);
+    updateOffset(0);
     if (sortBy === field) {
       setSortDir((current) => (current === 'desc' ? 'asc' : 'desc'));
       return;
@@ -454,18 +639,51 @@ export const Logs = () => {
             : 'All API requests routed through the gateway'
         }
         actions={
-          isAdmin ? (
-            <Button
-              onClick={handleDeleteAll}
-              variant="danger"
-              size="sm"
-              leftIcon={<Trash2 size={14} />}
-              disabled={logs.length === 0}
-              type="button"
-            >
-              Delete All
-            </Button>
-          ) : undefined
+          <>
+            {/* SSE live-update connection status — only visible when on page 1, sorted by date desc */}
+            {!!adminKey && offset === 0 && sortBy === 'date' && sortDir === 'desc' && (
+              <span
+                className={clsx(
+                  'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border select-none',
+                  sseStatus === 'connected' && 'bg-green-500/10 text-green-400 border-green-500/20',
+                  sseStatus === 'reconnecting' &&
+                    'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+                  sseStatus === 'disconnected' &&
+                    'bg-red-500/10 text-text-muted border-border-glass'
+                )}
+                title={
+                  sseStatus === 'connected'
+                    ? 'Live updates active'
+                    : sseStatus === 'reconnecting'
+                      ? 'Reconnecting to live updates…'
+                      : 'Live updates disconnected'
+                }
+              >
+                {sseStatus === 'connected' && <Wifi size={12} />}
+                {sseStatus === 'reconnecting' && <Loader size={12} className="animate-spin" />}
+                {sseStatus === 'disconnected' && <WifiOff size={12} />}
+                <span className="hidden sm:inline">
+                  {sseStatus === 'connected'
+                    ? 'Live'
+                    : sseStatus === 'reconnecting'
+                      ? 'Reconnecting…'
+                      : 'Disconnected'}
+                </span>
+              </span>
+            )}
+            {isAdmin && (
+              <Button
+                onClick={handleDeleteAll}
+                variant="danger"
+                size="sm"
+                leftIcon={<Trash2 size={14} />}
+                disabled={logs.length === 0}
+                type="button"
+              >
+                Delete All
+              </Button>
+            )}
+          </>
         }
       >
         <form
@@ -531,6 +749,16 @@ export const Logs = () => {
 
       <PageContainer>
         <Card flush>
+          <PaginationControls
+            position="top"
+            currentPage={currentPage}
+            totalPages={totalPages}
+            offset={offset}
+            limit={limit}
+            total={total}
+            onOffsetChange={updateOffset}
+          />
+
           <div className="space-y-3 p-3 lg:hidden">
             {loading ? (
               <div className="rounded-lg border border-border-glass bg-bg-subtle p-4 text-center text-sm text-text-secondary">
@@ -653,11 +881,14 @@ export const Logs = () => {
                                 log.responseStatus === 'pending'
                                   ? progressMapRef.current.get(log.requestId)
                                   : undefined;
-                              const liveDuration = formatMs(
+                              const rawDurationMs =
                                 log.durationMs != null && log.durationMs > 0
                                   ? log.durationMs
-                                  : Date.now() - log.startTime
-                              );
+                                  : log.responseStatus === 'pending'
+                                    ? Date.now() - log.startTime
+                                    : null;
+                              const liveDuration =
+                                rawDurationMs != null ? formatMs(rawDurationMs) : '-';
                               if (progress) {
                                 return (
                                   <div
@@ -1241,11 +1472,14 @@ export const Logs = () => {
                             log.responseStatus === 'pending'
                               ? progressMapRef.current.get(log.requestId)
                               : undefined;
-                          const liveDuration = formatMs(
+                          const rawDurationMs =
                             log.durationMs != null && log.durationMs > 0
                               ? log.durationMs
-                              : Date.now() - log.startTime
-                          );
+                              : log.responseStatus === 'pending'
+                                ? Date.now() - log.startTime
+                                : null;
+                          const liveDuration =
+                            rawDurationMs != null ? formatMs(rawDurationMs) : '-';
                           if (progress) {
                             return (
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
@@ -1488,29 +1722,15 @@ export const Logs = () => {
             </table>
           </div>
 
-          <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-3 sm:justify-end">
-            <span className="text-xs text-text-secondary font-mono">
-              Page {currentPage} of {Math.max(1, totalPages)}
-            </span>
-            <div className="flex gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                disabled={offset === 0}
-                onClick={() => setOffset(Math.max(0, offset - limit))}
-              >
-                <ChevronLeft size={16} />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                disabled={offset + limit >= total}
-                onClick={() => setOffset(offset + limit)}
-              >
-                <ChevronRight size={16} />
-              </Button>
-            </div>
-          </div>
+          <PaginationControls
+            position="bottom"
+            currentPage={currentPage}
+            totalPages={totalPages}
+            offset={offset}
+            limit={limit}
+            total={total}
+            onOffsetChange={updateOffset}
+          />
         </Card>
       </PageContainer>
 

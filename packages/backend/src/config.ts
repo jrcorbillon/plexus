@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { logger } from './utils/logger';
 import { DEFAULT_VISION_DESCRIPTION_PROMPT } from './utils/constants';
+import { isValidIpRule } from './utils/ip-match';
 import { resolveGpuParams, VALID_GPU_PROFILES } from '@plexus/shared';
 import type { ModelArchitecture } from '@plexus/shared';
 
@@ -229,7 +230,7 @@ const NovitaQuotaCheckerOptionsSchema = z.object({
 
 const MiniMaxQuotaCheckerOptionsSchema = z.object({
   groupid: z.string().trim().min(1, 'MiniMax groupid is required'),
-  hertzSession: z.string().trim().min(1, 'MiniMax HERTZ-SESSION cookie value is required'),
+  token: z.string().trim().min(1, 'MiniMax _token cookie value is required'),
 });
 
 const MiniMaxCodingQuotaCheckerOptionsSchema = z.object({
@@ -304,6 +305,7 @@ const ZenmuxQuotaCheckerOptionsSchema = z.object({
 
 const WaferQuotaCheckerOptionsSchema = z.object({
   endpoint: z.string().url().optional(),
+  includeAllowance: z.boolean().optional(),
 });
 
 const PoeQuotaCheckerOptionsSchema = z.object({
@@ -327,6 +329,14 @@ const OpenCodeGoQuotaCheckerOptionsSchema = z.object({
 
 const CrofQuotaCheckerOptionsSchema = z.object({
   endpoint: z.string().url().optional(),
+});
+
+const ExeDevQuotaCheckerOptionsSchema = z.object({
+  endpoint: z.string().url().optional(),
+});
+
+const HyperQuotaCheckerOptionsSchema = z.object({
+  endpoint: z.url().optional(),
 });
 
 const ProviderQuotaCheckerSchema = z.discriminatedUnion('type', [
@@ -519,7 +529,26 @@ const ProviderQuotaCheckerSchema = z.discriminatedUnion('type', [
     id: z.string().trim().min(1).optional(),
     options: CrofQuotaCheckerOptionsSchema.optional().default({}),
   }),
+  z.object({
+    type: z.literal('exedev'),
+    enabled: z.boolean().default(true),
+    intervalMinutes: z.number().min(1).default(30),
+    id: z.string().trim().min(1).optional(),
+    options: ExeDevQuotaCheckerOptionsSchema.optional().default({}),
+  }),
+  z.object({
+    type: z.literal('hyper'),
+    enabled: z.boolean().default(true),
+    intervalMinutes: z.number().min(1).default(30),
+    id: z.string().trim().min(1).optional(),
+    options: HyperQuotaCheckerOptionsSchema.optional().default({}),
+  }),
 ]);
+
+const ModelAutosyncSchema = z.object({
+  enabled: z.boolean().default(false),
+  intervalMinutes: z.number().int().min(1).default(60),
+});
 
 export const ProviderConfigSchema = z
   .object({
@@ -545,6 +574,7 @@ export const ProviderConfigSchema = z
     estimateTokens: z.boolean().optional().default(false),
     useClaudeMasking: z.boolean().optional().default(false),
     quota_checker: ProviderQuotaCheckerSchema.optional(),
+    model_autosync: ModelAutosyncSchema.optional(),
     // GPU Profile settings — gpu_profile is a display hint (e.g. 'H100', 'custom').
     // The 4 numeric fields are the source of truth; the frontend resolves named
     // profiles to concrete values before saving. The backend never resolves.
@@ -790,6 +820,14 @@ export const KeyConfigSchema = z.object({
   allowedProviders: z.array(z.string().min(1)).optional(),
   excludedModels: z.array(z.string().min(1)).optional(),
   excludedProviders: z.array(z.string().min(1)).optional(),
+  allowedIps: z
+    .array(
+      z.string().min(1).refine(isValidIpRule, {
+        message:
+          'Invalid IP rule. Use IPv4/IPv6, CIDR (a.b.c.d/n, ::/n), or a range (a.b.c.d-N or addr-addr).',
+      })
+    )
+    .optional(),
 });
 
 const QuotaConfigSchema = z.object({
@@ -870,6 +908,14 @@ export type PlexusConfig = z.infer<typeof RawPlexusConfigSchema> & {
   stall?: StallConfigType;
   quotas: QuotaConfig[];
   mcpServers?: Record<string, McpServerConfig>;
+  // Immediate-peer IPs/CIDRs whose forwarding headers are trusted when
+  // resolving the client IP. Semantics:
+  //  - undefined: legacy trust-all before DB-backed config is loaded
+  //  - ['0.0.0.0/0', '::/0']: explicit trust-all database default
+  //  - []: trust no proxies, use peer IP only
+  //  - specific CIDRs: trust only matching peers
+  // See getTrustedClientIp for enforcement.
+  trustedProxies?: string[];
 };
 export type DatabaseConfig = {
   connectionString: string;

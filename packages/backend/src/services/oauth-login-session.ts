@@ -221,6 +221,14 @@ export class OAuthLoginSessionManager {
         session.status = 'awaiting_auth';
         this.touch(session);
       },
+      onDeviceCode: (info) => {
+        session.authInfo = {
+          url: info.verificationUri,
+          instructions: `Enter code: ${info.userCode}`,
+        };
+        session.status = 'awaiting_auth';
+        this.touch(session);
+      },
       onPrompt: async (prompt) => {
         session.prompt = prompt;
         session.status = 'awaiting_prompt';
@@ -245,6 +253,7 @@ export class OAuthLoginSessionManager {
         session.rejectManualCode = deferred.reject;
         return deferred.promise;
       },
+      onSelect: async (prompt) => prompt.options[0]?.id,
       signal: session.abortController.signal,
     };
 

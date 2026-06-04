@@ -7,6 +7,7 @@ import { calculateCosts } from '../../utils/calculate-costs';
 import { DebugManager } from '../debug-manager';
 import { estimateTokensFromReconstructed, estimateInputTokens } from '../../utils/estimate-tokens';
 import {
+  normalizeAnthropicUsage,
   normalizeGeminiUsage,
   normalizeOpenAIChatUsage,
   normalizeOpenAIResponsesUsage,
@@ -148,6 +149,15 @@ export class UsageInspector extends PassThrough {
       // Some providers emit `: cost {"request_cost_usd": ...}` as SSE comments
       if (reconstructed?.providerReportedCost) {
         applyProviderReportedCost(this.usageRecord, reconstructed.providerReportedCost);
+        if (reconstructed?.usage) {
+          const usageCostDetails = extractUsageCostDetails(reconstructed.usage);
+          if (usageCostDetails) {
+            logger.debug(
+              `[ProviderCost] Both SSE :cost and usage.cost_details present for ${this.usageRecord.requestId}; ` +
+                `SSE value ($${this.usageRecord.providerReportedCost}) takes priority over cost_details total ($${usageCostDetails.total_cost})`
+            );
+          }
+        }
       }
 
       // Override with provider-reported cost from usage.cost_details if available
@@ -318,15 +328,17 @@ export class UsageInspector extends PassThrough {
           };
         }
       case 'messages':
-        return reconstructed.usage
-          ? {
-              inputTokens: reconstructed.usage.input_tokens || 0,
-              outputTokens: reconstructed.usage.output_tokens || 0,
-              cachedTokens: reconstructed.usage.cache_read_input_tokens || 0,
-              cacheWriteTokens: reconstructed.usage.cache_creation_input_tokens || 0,
-              reasoningTokens: 0,
-            }
-          : null;
+        if (!reconstructed.usage) return null;
+        {
+          const usage = normalizeAnthropicUsage(reconstructed.usage);
+          return {
+            inputTokens: usage.input_tokens,
+            outputTokens: usage.output_tokens,
+            cachedTokens: usage.cached_tokens,
+            cacheWriteTokens: usage.cache_creation_tokens,
+            reasoningTokens: usage.reasoning_tokens,
+          };
+        }
       case 'gemini':
         if (!reconstructed.usageMetadata) return null;
         {

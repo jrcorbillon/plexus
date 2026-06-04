@@ -223,6 +223,12 @@ const MODEL_TIMELINE_COLORS = ['#3b82f6', '#14b8a6', '#8b5cf6', '#f59e0b', '#ef4
  */
 const PLACEHOLDER_LABELS = new Set(['unknown', 'n/a', 'na', 'none', 'null', 'undefined']);
 
+/**
+ * Synthetic provider labels returned by {@link getProviderLabel}.
+ * These are not real providers and should be excluded from provider-scoped aggregations.
+ */
+const EXCLUDED_PROVIDER_LABELS = ['Failed Request', 'Unresolved Provider'];
+
 //
 // LABEL NORMALISATION HELPERS
 //
@@ -1083,6 +1089,12 @@ export const LiveTab: React.FC<LiveTabProps> = ({
     );
   }, [liveRequests, streamFilter]);
 
+  /** Requests that resolved to a real provider (excludes synthetic labels) */
+  const providerRequests = useMemo(
+    () => liveRequests.filter((r) => !EXCLUDED_PROVIDER_LABELS.includes(getProviderLabel(r))),
+    [liveRequests]
+  );
+
   /** Aggregate summary of all liveRequests: counts, token totals, cost, latency sums */
   const summary = useMemo(() => {
     return liveRequests.reduce(
@@ -1409,7 +1421,7 @@ export const LiveTab: React.FC<LiveTabProps> = ({
       { requests: number; success: number; totalLatency: number; totalCost: number }
     >();
 
-    for (const request of liveRequests) {
+    for (const request of providerRequests) {
       const provider = getProviderLabel(request);
       const row = providers.get(provider) || {
         requests: 0,
@@ -1437,7 +1449,7 @@ export const LiveTab: React.FC<LiveTabProps> = ({
       }))
       .sort((a, b) => b.requests - a.requests)
       .slice(0, 6);
-  }, [liveRequests]);
+  }, [providerRequests]);
 
   /**
    * Computes minute-over-minute request rate deltas for the velocity chart.
@@ -1461,7 +1473,7 @@ export const LiveTab: React.FC<LiveTabProps> = ({
   /** Top 8 providers by request count with success rate -- for the provider pulse bar chart */
   const providerPulseRows = useMemo(() => {
     const rows = new Map<string, { requests: number; success: number }>();
-    for (const request of liveRequests) {
+    for (const request of providerRequests) {
       const provider = getProviderLabel(request);
       const row = rows.get(provider) || { requests: 0, success: 0 };
       row.requests += 1;
@@ -1479,7 +1491,7 @@ export const LiveTab: React.FC<LiveTabProps> = ({
       }))
       .sort((a, b) => b.requests - a.requests)
       .slice(0, 8);
-  }, [liveRequests]);
+  }, [providerRequests]);
 
   /** Top 8 models by request count with success rate -- for the model pulse bar chart */
   const modelPulseRows = useMemo(() => {
@@ -1521,7 +1533,10 @@ export const LiveTab: React.FC<LiveTabProps> = ({
   }, [cooldowns]);
 
   /** Aggregated stats for the top 5 providers -- used by the "stats" card */
-  const providerStats = useMemo(() => aggregateByEntity(liveRequests, 'provider'), [liveRequests]);
+  const providerStats = useMemo(
+    () => aggregateByEntity(providerRequests, 'provider'),
+    [providerRequests]
+  );
 
   /** Aggregated stats for the top 5 models -- used by the "stats" card */
   const modelStats = useMemo(() => aggregateByEntity(liveRequests, 'model'), [liveRequests]);

@@ -12,6 +12,8 @@ import {
   Shield,
   Save,
   Radar,
+  Network,
+  Trash2,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { formatMinutesToMinSec } from '@plexus/shared';
@@ -20,6 +22,7 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Switch } from '../components/ui/Switch';
 import { Disclosure } from '../components/ui/Disclosure';
+import { TagSelect } from '../components/ui/TagSelect';
 import { PageHeader } from '../components/layout/PageHeader';
 import { PageContainer } from '../components/layout/PageContainer';
 import type { CardLayout } from '../types/card';
@@ -130,6 +133,7 @@ export const Config = () => {
   const [isBackupLoading, setIsBackupLoading] = useState(false);
   const [isFullBackupLoading, setIsFullBackupLoading] = useState(false);
   const [isRestoreLoading, setIsRestoreLoading] = useState(false);
+  const [isResetLogsLoading, setIsResetLogsLoading] = useState(false);
   const restoreInputRef = useRef<HTMLInputElement>(null);
 
   // Failover settings state
@@ -138,6 +142,11 @@ export const Config = () => {
   const [failoverSaving, setFailoverSaving] = useState(false);
   const [statusCodesText, setStatusCodesText] = useState('');
   const [errorsText, setErrorsText] = useState('');
+
+  // Trusted proxies (which immediate peers' forwarding headers are believed)
+  const [trustedProxies, setTrustedProxies] = useState<string[]>([]);
+  const [trustedProxiesLoaded, setTrustedProxiesLoaded] = useState(false);
+  const [trustedProxiesSaving, setTrustedProxiesSaving] = useState(false);
 
   // Cooldown settings state
   const [cooldownPolicy, setCooldownPolicy] = useState<CooldownPolicy>(DEFAULT_COOLDOWN_POLICY);
@@ -342,6 +351,17 @@ export const Config = () => {
     }
   }, [toast]);
 
+  const loadTrustedProxies = useCallback(async () => {
+    try {
+      const result = await api.getTrustedProxies();
+      setTrustedProxies(result.trustedProxies);
+      setTrustedProxiesLoaded(true);
+    } catch (e) {
+      console.error('Failed to load trusted proxies:', e);
+      toast.error('Failed to load trusted proxies');
+    }
+  }, [toast]);
+
   const loadExplorationRates = useCallback(async () => {
     try {
       const rates = await api.getExplorationRates();
@@ -432,6 +452,19 @@ export const Config = () => {
       toast.error((e as Error).message, 'Failed to save cooldown settings');
     } finally {
       setCooldownSaving(false);
+    }
+  };
+
+  const handleSaveTrustedProxies = async () => {
+    setTrustedProxiesSaving(true);
+    try {
+      const result = await api.patchTrustedProxies(trustedProxies);
+      setTrustedProxies(result.trustedProxies);
+      toast.success('Trusted proxies saved');
+    } catch (e) {
+      toast.error((e as Error).message, 'Failed to save trusted proxies');
+    } finally {
+      setTrustedProxiesSaving(false);
     }
   };
 
@@ -596,6 +629,7 @@ export const Config = () => {
     loadConfig();
     loadFailoverPolicy();
     loadCooldownPolicy();
+    loadTrustedProxies();
     loadTimeoutConfig();
     loadStallConfig();
     loadExplorationRates();
@@ -775,6 +809,27 @@ export const Config = () => {
     } catch (e) {
       toast.error((e as Error).message, 'Restart failed');
       setIsRestarting(false);
+    }
+  };
+
+  const handleResetLogs = async () => {
+    const ok = await toast.confirm({
+      title: 'Reset All Logs?',
+      message:
+        'This will **permanently delete all request logs, error logs, and debug trace logs**. Configuration, cooldowns, and settings will not be touched. This action cannot be undone. Are you sure?',
+      confirmLabel: 'Reset Logs',
+      variant: 'danger',
+    });
+    if (!ok) return;
+
+    setIsResetLogsLoading(true);
+    try {
+      const res = await api.resetLogs();
+      toast.success(res.message || 'All logs have been reset successfully');
+    } catch (e) {
+      toast.error((e as Error).message, 'Failed to reset logs');
+    } finally {
+      setIsResetLogsLoading(false);
     }
   };
 
@@ -1314,6 +1369,57 @@ export const Config = () => {
             </div>
           </Disclosure>
 
+          {/* ─── Network / Trusted Proxies ──────────────────────────── */}
+          <Disclosure
+            title="Network Settings"
+            defaultOpen={false}
+            extra={
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleSaveTrustedProxies}
+                isLoading={trustedProxiesSaving}
+                disabled={!trustedProxiesLoaded}
+                leftIcon={<Save size={14} />}
+              >
+                Save
+              </Button>
+            }
+          >
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <Network size={16} className="text-primary" />
+                <div>
+                  <p className="font-body text-[12px] font-medium text-text">Trusted Proxies</p>
+                  <p className="font-body text-[11px] text-text-muted">
+                    IPs/CIDRs of reverse proxies whose forwarding headers (X-Forwarded-For,
+                    CF-Connecting-IP, …) are believed when resolving a client&apos;s IP. Requests
+                    arriving directly from any other address use their real connection IP instead,
+                    so spoofed headers cannot defeat per-key IP allowlists.
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <TagSelect
+                  label="Trusted Proxy IPs"
+                  placeholder="e.g. 10.0.0.0/8  172.16.0.0/12  192.168.1.5"
+                  options={[]}
+                  selected={trustedProxies}
+                  allowCustom
+                  splitOnSpace
+                  onChange={setTrustedProxies}
+                />
+                <p className="text-xs text-text-muted mt-2">
+                  Type entries separated by spaces. The default trust-all list is{' '}
+                  <code>0.0.0.0/0</code> plus <code>::/0</code> — keep this only if Plexus is not
+                  publicly reachable except through your proxy. An empty list trusts no proxies.
+                  Accepts IPv4/IPv6, CIDR, and ranges.
+                </p>
+              </div>
+            </div>
+          </Disclosure>
+
           <Card title="Backup & Restore">
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 mr-1">
@@ -1348,6 +1454,15 @@ export const Config = () => {
                 leftIcon={<HardDrive size={14} />}
               >
                 Config Backup
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={handleResetLogs}
+                isLoading={isResetLogsLoading}
+                leftIcon={<Trash2 size={14} />}
+              >
+                Reset All Logs
               </Button>
               <input
                 ref={restoreInputRef}

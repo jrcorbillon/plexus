@@ -1,12 +1,25 @@
+import Fuse from 'fuse.js';
 import { useState, useEffect, useCallback } from 'react';
 import { api, Alias, Provider, Model, Cooldown } from '../lib/api';
 import { useToast } from '../contexts/ToastContext';
+
+export interface AliasMatch {
+  alias: Alias;
+  reason: string;
+}
 
 export interface OrphanGroup {
   modelId: string;
   existingAlias?: Alias;
   matchReason?: string;
+  aliasMatches: AliasMatch[];
   candidates: Array<{ provider: Provider; model: Model }>;
+}
+
+interface AliasSearchEntry {
+  alias: Alias;
+  value: string;
+  normalized: string;
 }
 
 const EMPTY_ALIAS: Alias = {
@@ -14,6 +27,133 @@ const EMPTY_ALIAS: Alias = {
   aliases: [],
   priority: 'selector',
   target_groups: [{ name: 'default', selector: 'random', targets: [] }],
+};
+
+const IMPORT_SUPPRESSIONS_STORAGE_KEY = 'plexus_suppressed_import_models';
+
+const getSuppressedImportKey = (value: string) => value.toLowerCase();
+
+const normalizeModelName = (value: string) =>
+  value
+    .toLowerCase()
+    .split('/')
+    .at(-1)!
+    .split(':')
+    .at(0)!
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+const readSuppressedImportModels = () => {
+  if (typeof window === 'undefined') return new Set<string>();
+
+  try {
+    const raw = window.localStorage.getItem(IMPORT_SUPPRESSIONS_STORAGE_KEY);
+    if (!raw) return new Set<string>();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set<string>();
+    return new Set(parsed.filter((item): item is string => typeof item === 'string'));
+  } catch (error) {
+    console.warn('Failed to load suppressed import models from localStorage:', error);
+    return new Set<string>();
+  }
+};
+
+const saveSuppressedImportModels = (suppressed: Set<string>) => {
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.localStorage.setItem(
+      IMPORT_SUPPRESSIONS_STORAGE_KEY,
+      JSON.stringify(Array.from(suppressed).sort())
+    );
+  } catch (error) {
+    console.warn('Failed to save suppressed import models to localStorage:', error);
+  }
+};
+
+const getAliasSearchEntries = (aliasList: Alias[]): AliasSearchEntry[] =>
+  aliasList.flatMap((alias) =>
+    [alias.id, ...(alias.aliases ?? [])]
+      .filter((value) => value.trim().length > 0)
+      .map((value) => ({ alias, value, normalized: normalizeModelName(value) }))
+  );
+
+const getTokenSet = (value: string) =>
+  new Set(normalizeModelName(value).split('-').filter(Boolean));
+
+const getSharedPrefixTokenCount = (leftValue: string, rightValue: string) => {
+  const left = normalizeModelName(leftValue).split('-');
+  const right = normalizeModelName(rightValue).split('-');
+  let count = 0;
+  while (left[count] && left[count] === right[count]) count += 1;
+  return count;
+};
+
+const hasStrongModelRelationship = (modelId: string, aliasValue: string) => {
+  const normalizedModel = normalizeModelName(modelId);
+  const normalizedAlias = normalizeModelName(aliasValue);
+  if (!normalizedModel || !normalizedAlias) return false;
+  if (normalizedModel === normalizedAlias) return true;
+  if (
+    normalizedModel.startsWith(`${normalizedAlias}-`) ||
+    normalizedAlias.startsWith(`${normalizedModel}-`)
+  ) {
+    return true;
+  }
+
+  const modelTokens = getTokenSet(modelId);
+  const aliasTokens = getTokenSet(aliasValue);
+  const shared = Array.from(aliasTokens).filter((token) => modelTokens.has(token));
+  const aliasCoverage = shared.length / aliasTokens.size;
+  const prefixCount = getSharedPrefixTokenCount(modelId, aliasValue);
+
+  return prefixCount >= 4 && aliasCoverage >= 0.8;
+};
+
+const getAliasMatches = (modelId: string, aliasList: Alias[]): AliasMatch[] => {
+  const entries = getAliasSearchEntries(aliasList);
+  const normalizedModel = normalizeModelName(modelId);
+  const matches = new Map<string, AliasMatch>();
+
+  const addMatch = (entry: AliasSearchEntry, reason: string) => {
+    if (!matches.has(entry.alias.id)) {
+      matches.set(entry.alias.id, { alias: entry.alias, reason });
+    }
+  };
+
+  for (const entry of entries) {
+    if (entry.normalized === normalizedModel) {
+      addMatch(
+        entry,
+        entry.value === entry.alias.id ? 'exact match' : `alias match: ${entry.value}`
+      );
+    }
+  }
+
+  for (const entry of entries) {
+    if (matches.has(entry.alias.id)) continue;
+    if (normalizedModel.startsWith(`${entry.normalized}-`)) {
+      addMatch(entry, `base alias match: ${entry.value}`);
+    } else if (entry.normalized.startsWith(`${normalizedModel}-`)) {
+      addMatch(entry, `variant alias match: ${entry.value}`);
+    }
+  }
+
+  const fuse = new Fuse(entries, {
+    keys: ['normalized'],
+    includeScore: true,
+    threshold: 0.35,
+    ignoreLocation: true,
+    minMatchCharLength: 4,
+  });
+
+  for (const result of fuse.search(normalizedModel)) {
+    const entry = result.item;
+    if (matches.has(entry.alias.id) || !hasStrongModelRelationship(modelId, entry.value)) continue;
+    addMatch(entry, `similar alias: ${entry.value}`);
+  }
+
+  return Array.from(matches.values());
 };
 
 export const useModels = () => {
@@ -49,6 +189,11 @@ export const useModels = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [orphanGroups, setOrphanGroups] = useState<OrphanGroup[]>([]);
   const [selectedImports, setSelectedImports] = useState<Map<string, Set<string>>>(new Map());
+  const [selectedImportModels, setSelectedImportModels] = useState<Set<string>>(new Set());
+  const [selectedImportAliases, setSelectedImportAliases] = useState<Map<string, string>>(
+    new Map()
+  );
+  const [hasSuppressedImportModels, setHasSuppressedImportModels] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -232,43 +377,10 @@ export const useModels = () => {
 
   const filteredAliases = aliases.filter((a) => a.id.toLowerCase().includes(search.toLowerCase()));
 
-  const findExistingAlias = useCallback(
-    (modelId: string, aliasList: Alias[]): { alias: Alias; reason?: string } | undefined => {
-      const lowerModel = modelId.toLowerCase();
-
-      // 1. Case-insensitive exact match
-      const ciMatch = aliasList.find((a) => a.id.toLowerCase() === lowerModel);
-      if (ciMatch && ciMatch.id !== modelId) {
-        return { alias: ciMatch, reason: `case-insensitive match: ${ciMatch.id}` };
-      }
-      if (ciMatch) {
-        return { alias: ciMatch };
-      }
-
-      // 2. Suffix match
-      const modelSuffix = modelId.includes('/')
-        ? modelId.substring(modelId.lastIndexOf('/') + 1)
-        : modelId;
-      const modelSuffixLower = modelSuffix.toLowerCase();
-
-      for (const alias of aliasList) {
-        const aliasSuffix = alias.id.includes('/')
-          ? alias.id.substring(alias.id.lastIndexOf('/') + 1)
-          : alias.id;
-        const aliasSuffixLower = aliasSuffix.toLowerCase();
-
-        if (aliasSuffixLower === modelSuffixLower && alias.id !== modelId) {
-          return { alias, reason: `suffix match: ${alias.id}` };
-        }
-      }
-
-      return undefined;
-    },
-    []
-  );
-
   const handleOpenImport = useCallback(() => {
     const covered = new Set<string>();
+    const suppressedImports = readSuppressedImportModels();
+    setHasSuppressedImportModels(suppressedImports.size > 0);
     aliases.forEach((alias) => {
       alias.target_groups.forEach((g) => {
         g.targets.forEach((t) => {
@@ -282,6 +394,7 @@ export const useModels = () => {
     availableModels.forEach((model) => {
       const key = `${model.providerId}|${model.id}`;
       if (covered.has(key)) return;
+      if (suppressedImports.has(getSuppressedImportKey(model.id))) return;
 
       const groupKey = model.id.toLowerCase();
       if (!canonicalIds.has(groupKey)) {
@@ -300,39 +413,83 @@ export const useModels = () => {
     const groups: OrphanGroup[] = [];
     orphanMap.forEach((candidates, groupKey) => {
       const modelId = canonicalIds.get(groupKey) || groupKey;
-      const match = findExistingAlias(modelId, aliases);
+      const aliasMatches = getAliasMatches(modelId, aliases);
       groups.push({
         modelId,
-        existingAlias: match?.alias,
-        matchReason: match?.reason,
+        existingAlias: aliasMatches[0]?.alias,
+        matchReason: aliasMatches[0]?.reason,
+        aliasMatches,
         candidates,
       });
     });
     groups.sort((a, b) => a.modelId.localeCompare(b.modelId));
 
     const selections = new Map<string, Set<string>>();
+    const aliasSelections = new Map<string, string>();
     groups.forEach((group) => {
       selections.set(group.modelId, new Set(group.candidates.map((c) => c.provider.id)));
+      if (group.aliasMatches[0]) {
+        aliasSelections.set(group.modelId, group.aliasMatches[0].alias.id);
+      }
     });
 
     setOrphanGroups(groups);
     setSelectedImports(selections);
+    setSelectedImportModels(new Set());
+    setSelectedImportAliases(aliasSelections);
     setIsImportModalOpen(true);
-  }, [aliases, availableModels, providers, findExistingAlias]);
+  }, [aliases, availableModels, providers]);
+
+  const handleSuppressImportModel = useCallback((modelId: string) => {
+    const nextSuppressed = readSuppressedImportModels();
+    nextSuppressed.add(getSuppressedImportKey(modelId));
+    saveSuppressedImportModels(nextSuppressed);
+    setHasSuppressedImportModels(true);
+
+    setOrphanGroups((prev) => prev.filter((group) => group.modelId !== modelId));
+    setSelectedImports((prev) => {
+      const next = new Map(prev);
+      next.delete(modelId);
+      return next;
+    });
+    setSelectedImportModels((prev) => {
+      const next = new Set(prev);
+      next.delete(modelId);
+      return next;
+    });
+    setSelectedImportAliases((prev) => {
+      const next = new Map(prev);
+      next.delete(modelId);
+      return next;
+    });
+  }, []);
+
+  const handleUnsuppressAllImportModels = useCallback(() => {
+    saveSuppressedImportModels(new Set());
+    handleOpenImport();
+  }, [handleOpenImport]);
 
   const handleSaveImports = useCallback(async () => {
     setIsImporting(true);
     try {
-      for (const [modelId, providerIds] of selectedImports.entries()) {
+      for (const modelId of selectedImportModels) {
+        const providerIds = selectedImports.get(modelId) ?? new Set<string>();
         if (providerIds.size === 0) continue;
 
         const group = orphanGroups.find((g) => g.modelId === modelId);
         if (!group) continue;
 
         const selectedCandidates = group.candidates.filter((c) => providerIds.has(c.provider.id));
+        const selectedAliasId = selectedImportAliases.get(modelId);
+        const selectedAlias = selectedAliasId
+          ? group.aliasMatches.find((match) => match.alias.id === selectedAliasId)?.alias
+          : undefined;
 
-        if (group.existingAlias) {
-          const updatedAlias = JSON.parse(JSON.stringify(group.existingAlias)) as Alias;
+        if (selectedAlias) {
+          const updatedAlias = JSON.parse(JSON.stringify(selectedAlias)) as Alias;
+          if (!updatedAlias.target_groups[0]) {
+            updatedAlias.target_groups = [{ name: 'default', selector: 'random', targets: [] }];
+          }
           // Merge into the first group of the existing alias
           selectedCandidates.forEach((c) => {
             const alreadyExists = updatedAlias.target_groups[0].targets.some(
@@ -346,7 +503,7 @@ export const useModels = () => {
               });
             }
           });
-          await api.saveAlias(updatedAlias, group.existingAlias.id);
+          await api.saveAlias(updatedAlias, selectedAlias.id);
         } else {
           const newAlias: Alias = {
             ...EMPTY_ALIAS,
@@ -371,6 +528,8 @@ export const useModels = () => {
       toast.success('Imports saved successfully');
       setIsImportModalOpen(false);
       setSelectedImports(new Map());
+      setSelectedImportModels(new Set());
+      setSelectedImportAliases(new Map());
       setOrphanGroups([]);
       return true;
     } catch (e) {
@@ -380,7 +539,7 @@ export const useModels = () => {
     } finally {
       setIsImporting(false);
     }
-  }, [selectedImports, orphanGroups, loadData, toast]);
+  }, [selectedImportModels, selectedImports, selectedImportAliases, orphanGroups, loadData, toast]);
 
   return {
     aliases: filteredAliases,
@@ -413,8 +572,15 @@ export const useModels = () => {
     setOrphanGroups,
     selectedImports,
     setSelectedImports,
+    selectedImportModels,
+    setSelectedImportModels,
+    selectedImportAliases,
+    setSelectedImportAliases,
+    hasSuppressedImportModels,
     isImporting,
     handleOpenImport,
+    handleSuppressImportModel,
+    handleUnsuppressAllImportModels,
     handleSaveImports,
   };
 };

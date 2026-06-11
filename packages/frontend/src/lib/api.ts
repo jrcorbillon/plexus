@@ -2031,14 +2031,15 @@ export const api = {
     }
   },
 
-  getDebugLogDetail: async (requestId: string): Promise<any> => {
+  getDebugLogDetail: async (requestId: string): Promise<any | null> => {
     try {
       const res = await fetchWithAuth(`${API_BASE}/v0/management/debug/logs/${requestId}`);
-      if (!res.ok) throw new Error('Failed to fetch debug log detail');
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`Failed to fetch debug log detail (${res.status})`);
       return await res.json();
     } catch (e) {
       console.error('API Error getDebugLogDetail', e);
-      return null;
+      throw e;
     }
   },
 
@@ -2076,6 +2077,17 @@ export const api = {
     } catch (e) {
       console.error('API Error getErrors', e);
       return [];
+    }
+  },
+
+  getErrorDetail: async (requestId: string): Promise<InferenceError | null> => {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/v0/management/errors/${requestId}`);
+      if (!res.ok) throw new Error('Failed to fetch error log detail');
+      return await res.json();
+    } catch (e) {
+      console.error('API Error getErrorDetail', e);
+      return null;
     }
   },
 

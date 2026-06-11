@@ -359,6 +359,21 @@ export class UsageStorageService extends EventEmitter {
     }
   }
 
+  async getError(requestId: string): Promise<any | null> {
+    try {
+      const results = await this.ensureDb()
+        .select()
+        .from(this.schema.inferenceErrors)
+        .where(eq(this.schema.inferenceErrors.requestId, requestId))
+        .orderBy(desc(this.schema.inferenceErrors.createdAt))
+        .limit(1);
+      return results[0] ?? null;
+    } catch (error) {
+      logger.error(`Failed to get inference error for ${requestId}`, error);
+      return null;
+    }
+  }
+
   async getErrorOwner(requestId: string): Promise<string | null> {
     try {
       const rows = await this.ensureDb()

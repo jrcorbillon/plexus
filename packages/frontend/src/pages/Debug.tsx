@@ -148,7 +148,9 @@ export const Debug: React.FC = () => {
       })
       .catch((e) => {
         if (!cancelled) {
-          setDetailError(e instanceof Error ? e.message : 'Failed to load trace');
+          console.error('Failed to load debug log detail', e);
+          const message = e instanceof Error ? e.message : 'Failed to load trace';
+          setDetailError(message || 'Failed to load trace');
         }
       })
       .finally(() => {

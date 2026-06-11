@@ -2032,10 +2032,15 @@ export const api = {
   },
 
   getDebugLogDetail: async (requestId: string): Promise<any | null> => {
-    const res = await fetchWithAuth(`${API_BASE}/v0/management/debug/logs/${requestId}`);
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`Failed to fetch debug log detail (${res.status})`);
-    return await res.json();
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/v0/management/debug/logs/${requestId}`);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`Failed to fetch debug log detail (${res.status})`);
+      return await res.json();
+    } catch (e) {
+      console.error('API Error getDebugLogDetail', e);
+      throw e;
+    }
   },
 
   deleteDebugLog: async (requestId: string): Promise<boolean> => {

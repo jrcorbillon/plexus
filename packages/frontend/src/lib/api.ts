@@ -2079,6 +2079,17 @@ export const api = {
     }
   },
 
+  getErrorDetail: async (requestId: string): Promise<InferenceError | null> => {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/v0/management/errors/${requestId}`);
+      if (!res.ok) throw new Error('Failed to fetch error log detail');
+      return await res.json();
+    } catch (e) {
+      console.error('API Error getErrorDetail', e);
+      return null;
+    }
+  },
+
   deleteError: async (requestId: string): Promise<boolean> => {
     try {
       const res = await fetchWithAuth(`${API_BASE}/v0/management/errors/${requestId}`, {

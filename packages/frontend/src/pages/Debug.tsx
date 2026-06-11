@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
-import Editor from '@monaco-editor/react';
 import {
   RefreshCw,
   Clock,
@@ -13,8 +12,6 @@ import {
   Download,
   Filter,
   X,
-  Minimize2,
-  Maximize2,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Button } from '../components/ui/Button';
@@ -67,7 +64,6 @@ export const Debug: React.FC = () => {
   useEffect(() => {
     if (location.state?.requestId) {
       setSelectedId(location.state.requestId);
-      // clear state so it doesn't persist on refresh if we wanted, but standard behavior is fine
     }
   }, [location.state]);
 
@@ -76,9 +72,6 @@ export const Debug: React.FC = () => {
     try {
       const data = await api.getDebugLogs(50);
       setLogs(data);
-      if (data.length > 0 && !selectedId && !location.state?.requestId) {
-        // Optionally select first? No, let user choose.
-      }
     } finally {
       setLoading(false);
     }
@@ -133,15 +126,26 @@ export const Debug: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (selectedId) {
-      setLoadingDetail(true);
-      api.getDebugLogDetail(selectedId).then((data) => {
-        setDetail(data);
-        setLoadingDetail(false);
-      });
-    } else {
+    if (!selectedId) {
       setDetail(null);
+      setLoadingDetail(false);
+      return;
     }
+
+    let cancelled = false;
+    setLoadingDetail(true);
+    api
+      .getDebugLogDetail(selectedId)
+      .then((data) => {
+        if (!cancelled) setDetail(data);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDetail(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedId]);
 
   useEffect(() => {
@@ -440,7 +444,12 @@ export const Debug: React.FC = () => {
             {logs.map((log) => (
               <div
                 key={log.requestId}
-                onClick={() => setSelectedId(log.requestId)}
+                onClick={() => {
+                  setSelectedId(log.requestId);
+                  if (log.requestId !== selectedId) {
+                    setDetail(null);
+                  }
+                }}
                 className={clsx(
                   'p-3 rounded-md cursor-pointer transition-all duration-200 border border-transparent hover:bg-bg-hover group',
                   selectedId === log.requestId && 'bg-bg-glass border-border-glass shadow-sm'
@@ -488,7 +497,12 @@ export const Debug: React.FC = () => {
 
         {/* Right Pane: Details */}
         <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg-deep">
-          {selectedId && detail ? (
+          {loadingDetail && !detail ? (
+            <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
+              <RefreshCw className="animate-spin text-primary" size={32} />
+              <p>Loading...</p>
+            </div>
+          ) : detail ? (
             <div className="flex flex-col">
               <div className="sticky top-0 z-10 flex flex-col gap-2 border-b border-border-glass bg-bg-surface px-3 py-3 sm:px-4">
                 <div className="flex min-w-0 flex-col gap-1">
@@ -520,6 +534,7 @@ export const Debug: React.FC = () => {
                 </div>
               </div>
               <AccordionPanel
+                key={`${detail.requestId}-raw-request`}
                 title="Raw Request"
                 content={formatContent(detail.rawRequest)}
                 color="text-blue-400"
@@ -527,23 +542,27 @@ export const Debug: React.FC = () => {
               />
               {detail.requestHeaders && (
                 <AccordionPanel
+                  key={`${detail.requestId}-request-headers`}
                   title="Request Headers"
                   content={formatContent(detail.requestHeaders)}
                   color="text-blue-400"
                 />
               )}
               <AccordionPanel
+                key={`${detail.requestId}-transformed-request`}
                 title="Transformed Request"
                 content={formatContent(detail.transformedRequest)}
                 color="text-purple-400"
               />
               <AccordionPanel
+                key={`${detail.requestId}-raw-response`}
                 title="Raw Response"
                 content={formatContent(detail.rawResponse)}
                 color="text-orange-400"
               />
               {detail.rawResponseSnapshot && (
                 <AccordionPanel
+                  key={`${detail.requestId}-raw-response-snapshot`}
                   title="Raw Response (Reconstructed)"
                   content={formatContent(detail.rawResponseSnapshot)}
                   color="text-orange-400"
@@ -551,12 +570,14 @@ export const Debug: React.FC = () => {
               )}
               {detail.responseHeaders && (
                 <AccordionPanel
+                  key={`${detail.requestId}-response-headers`}
                   title="Response Headers"
                   content={formatContent(detail.responseHeaders)}
                   color="text-yellow-400"
                 />
               )}
               <AccordionPanel
+                key={`${detail.requestId}-transformed-response`}
                 title="Transformed Response"
                 content={formatContent(detail.transformedResponse)}
                 color="text-green-400"
@@ -564,22 +585,22 @@ export const Debug: React.FC = () => {
               />
               {detail.transformedResponseSnapshot && (
                 <AccordionPanel
+                  key={`${detail.requestId}-transformed-response-snapshot`}
                   title="Transformed Response (Reconstructed)"
                   content={formatContent(detail.transformedResponseSnapshot)}
                   color="text-green-400"
                 />
               )}
             </div>
+          ) : selectedId ? (
+            <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
+              <Database size={48} opacity={0.2} />
+              <p>Trace not found</p>
+            </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
               <Database size={48} opacity={0.2} />
               <p>Select a request trace to inspect details</p>
-            </div>
-          )}
-
-          {loadingDetail && (
-            <div className="absolute inset-0 bg-[rgba(15,23,42,0.5)] backdrop-blur-sm flex items-center justify-center z-10">
-              <RefreshCw className="animate-spin text-[var(--color-primary)]" size={32} />
             </div>
           )}
         </div>
@@ -632,8 +653,6 @@ const AccordionPanel: React.FC<{
 }> = ({ title, content, color, defaultOpen = false }) => {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [copied, setCopied] = useState(false);
-  const [folded, setFolded] = useState(false);
-  const editorRef = useRef<any>(null);
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -643,25 +662,6 @@ const AccordionPanel: React.FC<{
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
-  };
-
-  const handleToggleFold = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const editor = editorRef.current;
-    if (!editor) return;
-    if (folded) {
-      editor.trigger('unfoldAll', 'editor.unfoldAll', null);
-    } else {
-      // Fold everything first
-      editor.trigger('foldAll', 'editor.foldAll', null);
-      // Then unfold the outermost object (line 1) to keep it visible
-      setTimeout(() => {
-        editor.setSelection({ startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 1 });
-        editor.trigger('unfold', 'editor.unfold', null);
-        editor.setSelection({ startLineNumber: 0, startColumn: 0, endLineNumber: 0, endColumn: 0 });
-      }, 50);
-    }
-    setFolded(!folded);
   };
 
   return (
@@ -675,13 +675,6 @@ const AccordionPanel: React.FC<{
           <span className={clsx('truncate text-[11px] font-bold uppercase tracking-wider', color)}>
             {title}
           </span>
-          <button
-            className="bg-transparent border-0 text-text-muted p-0.5 rounded cursor-pointer transition-all duration-200 flex items-center justify-center hover:bg-white/10 hover:text-text"
-            onClick={handleToggleFold}
-            title={folded ? 'Unfold all' : 'Fold all'}
-          >
-            {folded ? <Maximize2 size={12} /> : <Minimize2 size={12} />}
-          </button>
         </div>
         <button
           className="bg-transparent border-0 text-text-muted p-1 rounded cursor-pointer transition-all duration-200 flex items-center justify-center hover:bg-white/10 hover:text-text"
@@ -697,28 +690,13 @@ const AccordionPanel: React.FC<{
           isOpen ? 'max-h-[500px]' : 'max-h-0'
         )}
       >
-        <div className="h-[280px] bg-[#1e1e1e] sm:h-[400px]">
-          <Editor
-            height="100%"
-            defaultLanguage="json"
-            theme="vs-dark"
-            value={content}
-            onMount={(editor) => {
-              editorRef.current = editor;
-            }}
-            options={{
-              readOnly: true,
-              minimap: { enabled: false },
-              scrollBeyondLastLine: false,
-              fontSize: 12,
-              fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-              lineNumbers: 'on',
-              folding: true,
-              wordWrap: 'on',
-              padding: { top: 10, bottom: 10 },
-            }}
-          />
-        </div>
+        {isOpen && (
+          <div className="h-[280px] overflow-auto bg-[#1e1e1e] sm:h-[400px]">
+            <pre className="m-0 p-2.5 text-xs leading-relaxed font-mono text-[#d4d4d4] whitespace-pre-wrap break-words">
+              {content}
+            </pre>
+          </div>
+        )}
       </div>
     </div>
   );

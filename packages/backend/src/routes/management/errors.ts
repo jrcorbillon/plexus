@@ -15,6 +15,23 @@ export async function registerErrorRoutes(
     return reply.send(errors);
   });
 
+  fastify.get('/v0/management/errors/:requestId', async (request, reply) => {
+    const params = request.params as any;
+    const requestId = params.requestId;
+
+    const scopeKey = scopedKeyName(request);
+    if (scopeKey) {
+      const owner = await usageStorage.getErrorOwner(requestId);
+      if (owner !== scopeKey) {
+        return reply.code(404).send({ error: 'Error log not found' });
+      }
+    }
+
+    const error = await usageStorage.getError(requestId);
+    if (!error) return reply.code(404).send({ error: 'Error log not found' });
+    return reply.send(error);
+  });
+
   fastify.delete('/v0/management/errors', async (request, reply) => {
     if (isLimited(request)) {
       return reply.code(403).send({

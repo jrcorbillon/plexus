@@ -4,6 +4,7 @@ import {
   RefreshCw,
   Clock,
   Database,
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -47,6 +48,8 @@ export const Debug: React.FC = () => {
   const [detail, setDetail] = useState<DebugLogDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRetryKey, setDetailRetryKey] = useState(0);
   const [copiedAll, setCopiedAll] = useState(false);
 
   // Provider filter state
@@ -128,16 +131,25 @@ export const Debug: React.FC = () => {
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setDetailError(null);
       setLoadingDetail(false);
       return;
     }
 
     let cancelled = false;
+    setDetail(null);
+    setDetailError(null);
     setLoadingDetail(true);
     api
       .getDebugLogDetail(selectedId)
       .then((data) => {
-        if (!cancelled) setDetail(data);
+        if (cancelled) return;
+        setDetail(data);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setDetailError(e instanceof Error ? e.message : 'Failed to load trace');
+        }
       })
       .finally(() => {
         if (!cancelled) setLoadingDetail(false);
@@ -146,7 +158,7 @@ export const Debug: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [selectedId, detailRetryKey]);
 
   useEffect(() => {
     setCopiedAll(false);
@@ -591,6 +603,19 @@ export const Debug: React.FC = () => {
                   color="text-green-400"
                 />
               )}
+            </div>
+          ) : detailError ? (
+            <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
+              <AlertTriangle size={48} opacity={0.2} className="text-amber-400" />
+              <p>{detailError}</p>
+              <Button
+                onClick={() => setDetailRetryKey((k) => k + 1)}
+                variant="secondary"
+                size="sm"
+                leftIcon={<RefreshCw size={16} />}
+              >
+                Retry
+              </Button>
             </div>
           ) : selectedId ? (
             <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">

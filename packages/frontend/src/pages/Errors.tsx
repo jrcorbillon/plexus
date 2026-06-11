@@ -111,11 +111,14 @@ export const Errors: React.FC = () => {
       return;
     }
 
+    // Clear stale details from a prior selection before waiting or fetching.
+    setSelectedError(null);
+    setLoadingDetail(true);
+
     // Wait for the list fetch before falling back to the per-id API.
     if (loading) return;
 
     let cancelled = false;
-    setLoadingDetail(true);
     api
       .getErrorDetail(selectedId)
       .then((data) => {

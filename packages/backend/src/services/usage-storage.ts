@@ -365,6 +365,7 @@ export class UsageStorageService extends EventEmitter {
         .select()
         .from(this.schema.inferenceErrors)
         .where(eq(this.schema.inferenceErrors.requestId, requestId))
+        .orderBy(desc(this.schema.inferenceErrors.createdAt))
         .limit(1);
       return results[0] ?? null;
     } catch (error) {

@@ -95,7 +95,17 @@ async function filterGroupTargets(
     }
   }
 
-  let healthyTargets = [...healthyEligible, ...cooldownExempt];
+  // Merge healthy eligible + exempt targets back into the original order.
+  // cooldownExempt and healthyEligible are subsets of enabledTargets (same
+  // object references), so iterate the original order and keep each target
+  // that survived the cooldown check. This preserves caller-defined ordering
+  // (critical for the in_order selector); a naive concat would push all
+  // cooldown-exempt targets to the end.
+  const healthyEligibleSet = new Set(healthyEligible);
+  const cooldownExemptSet = new Set(cooldownExempt);
+  let healthyTargets = enabledTargets.filter(
+    (t) => healthyEligibleSet.has(t) || cooldownExemptSet.has(t)
+  );
 
   if (healthyTargets.length === 0) return [];
 

@@ -16,6 +16,7 @@ export interface GenerateContentRequest {
     thinkingConfig?: {
       includeThoughts?: boolean;
       thinkingBudget?: number;
+      thinkingLevel?: string;
     };
     [key: string]: any;
   };
@@ -143,8 +144,16 @@ export async function buildGeminiRequest(
         }
 
         functionDeclarations.push(funcDecl);
-      } else if (t.type === 'googleSearch') {
-        // Gap 5: Google built-in tools
+      } else if (
+        t.type === 'googleSearch' ||
+        // Coerce known cross-provider web search types to googleSearch so that
+        // clients using Anthropic/OpenAI/OpenRouter web search tool formats are
+        // transparently mapped to the Gemini built-in when routing to a Gemini provider.
+        (t as any).type === 'web_search_20250305' ||
+        (t as any).type === 'web_search' ||
+        (t as any).type === 'openrouter:web_search'
+      ) {
+        // Gap 5: Google built-in tools (including cross-provider web search coercion)
         googleSearches.push({});
       } else if (t.type === 'codeExecution') {
         codeExecutions.push({});
@@ -199,10 +208,12 @@ export async function buildGeminiRequest(
   }
 
   // Pass through thinking config
-  if (request.reasoning) {
+  if (request.reasoning && request.reasoning.enabled !== false) {
     generationConfig.thinkingConfig = {
       includeThoughts: request.reasoning.enabled,
       thinkingBudget: request.reasoning.max_tokens,
+      // Map unified effort back to Gemini's ThinkingLevel enum values (MINIMAL/LOW/MEDIUM/HIGH)
+      thinkingLevel: request.reasoning.effort ? request.reasoning.effort.toUpperCase() : undefined,
     };
   }
 

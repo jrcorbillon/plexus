@@ -4,6 +4,7 @@ import { DEFAULT_VISION_DESCRIPTION_PROMPT } from './utils/constants';
 import { isValidIpRule } from './utils/ip-match';
 import { resolveGpuParams, VALID_GPU_PROFILES } from '@plexus/shared';
 import type { ModelArchitecture } from '@plexus/shared';
+import { getModel } from '@earendil-works/pi-ai';
 
 // --- Zod Schemas ---
 
@@ -118,6 +119,20 @@ export type ModelOverrideRule = z.infer<typeof ModelOverrideRuleSchema>;
 export type ModelOverrideOptions = z.infer<typeof ModelOverrideOptionsSchema>;
 export type AdapterEntry = z.infer<typeof AdapterEntrySchema>;
 
+// ─── Web Search Coercion Adapter Config ──────────────────────────────
+
+const WebSearchCoercionOptionsSchema = z.object({
+  /** The target provider web-search format to coerce incoming tools to. */
+  target: z.enum(['anthropic', 'openai', 'openrouter', 'google']),
+  /**
+   * Max number of web searches allowed (Anthropic only).
+   * Ignored when target is not 'anthropic'.
+   */
+  max_uses: z.number().int().positive().optional(),
+});
+
+export type WebSearchCoercionOptions = z.infer<typeof WebSearchCoercionOptionsSchema>;
+
 // ─── Reasoning Rewrite Adapter Config ────────────────────────────────
 
 const ValueTransformSchema = z.union([
@@ -182,6 +197,7 @@ const ModelProviderConfigSchema = z.object({
   extraBody: z.record(z.string(), z.any()).optional(),
   adapter: AdapterConfigSchema,
   maxConcurrency: z.number().int().positive().nullable().optional(),
+  pi_ai_model_id: z.string().optional(),
 });
 
 const OAuthProviderSchema = z.enum([
@@ -593,6 +609,7 @@ export const ProviderConfigSchema = z
     stallMinBps: z.number().int().min(50).max(5000).nullable().optional(),
     stallWindowMs: z.number().int().min(3000).max(30000).nullable().optional(),
     stallGracePeriodMs: z.number().int().min(0).max(120000).nullable().optional(),
+    pi_ai_provider: z.string().optional(),
   })
   .refine((data) => !!data.api_key || isOAuthProviderConfig(data), {
     message: "'api_key' must be specified for provider",
@@ -820,6 +837,7 @@ export const KeyConfigSchema = z.object({
   allowedProviders: z.array(z.string().min(1)).optional(),
   excludedModels: z.array(z.string().min(1)).optional(),
   excludedProviders: z.array(z.string().min(1)).optional(),
+  beta: z.boolean().optional(),
   allowedIps: z
     .array(
       z.string().min(1).refine(isValidIpRule, {
@@ -1029,6 +1047,32 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
       };
     } else {
       resolvedProviders[providerId] = pc;
+    }
+  }
+
+  // Startup registry validation: warn (non-fatally) for any configured
+  // (pi_ai_provider, pi_ai_model_id) pair that is not in the pi-ai registry.
+  // getModel() throws on unknown pairs — downgrade to a warning so that new or
+  // unreleased model IDs don't prevent Plexus from starting.
+  for (const [providerId, providerConfig] of Object.entries(resolvedProviders)) {
+    const pc = providerConfig as ProviderConfig;
+    if (!pc.pi_ai_provider) continue;
+    if (!pc.models || Array.isArray(pc.models)) continue;
+    for (const [modelName, modelCfg] of Object.entries(
+      pc.models as Record<string, { pi_ai_model_id?: string }>
+    )) {
+      const piAiModelId = modelCfg.pi_ai_model_id;
+      if (!piAiModelId) continue;
+      try {
+        getModel(pc.pi_ai_provider as any, piAiModelId as any);
+      } catch {
+        logger.warn(
+          `pi-ai registry: provider "${providerId}" model "${modelName}" references ` +
+            `pi_ai_provider="${pc.pi_ai_provider}" pi_ai_model_id="${piAiModelId}" ` +
+            `which is not in the pi-ai model registry. The beta inference path will ` +
+            `skip this provider/model combination.`
+        );
+      }
     }
   }
 

@@ -6,6 +6,7 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
 import { Tabs } from '../components/ui/Tabs';
+import { Switch } from '../components/ui/Switch';
 import { PageHeader } from '../components/layout/PageHeader';
 import { PageContainer } from '../components/layout/PageContainer';
 import { useToast } from '../contexts/ToastContext';
@@ -28,6 +29,7 @@ const EMPTY_KEY: KeyConfig = {
   key: '',
   secret: '',
   comment: '',
+  beta: false,
 };
 
 const EMPTY_QUOTA: UserQuota & { name: string } = {
@@ -278,7 +280,10 @@ export const Keys = () => {
         provider.toLowerCase().includes(search.toLowerCase())
       ) ||
       k.excludedModels?.some((model) => model.toLowerCase().includes(search.toLowerCase())) ||
-      k.excludedProviders?.some((provider) => provider.toLowerCase().includes(search.toLowerCase()))
+      k.excludedProviders?.some((provider) =>
+        provider.toLowerCase().includes(search.toLowerCase())
+      ) ||
+      (k.beta && 'beta'.includes(search.toLowerCase()))
   );
 
   const filteredQuotas = Object.entries(quotas).filter(([name]) =>
@@ -394,8 +399,15 @@ export const Keys = () => {
                           onClick={() => handleEditKey(key)}
                           className="min-w-0 flex-1 text-left"
                         >
-                          <div className="truncate font-heading text-sm font-semibold text-text">
-                            {key.key}
+                          <div className="flex items-center gap-2">
+                            <div className="truncate font-heading text-sm font-semibold text-text">
+                              {key.key}
+                            </div>
+                            {key.beta && (
+                              <span className="shrink-0 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                                Beta
+                              </span>
+                            )}
                           </div>
                           {key.comment && (
                             <div className="mt-1 truncate text-xs text-text-muted">
@@ -543,7 +555,12 @@ export const Keys = () => {
                           style={{ fontWeight: 600, paddingLeft: '24px' }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            {key.key}
+                            <span>{key.key}</span>
+                            {key.beta && (
+                              <span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                                Beta
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3 text-left border-b border-border-glass text-text">
@@ -909,6 +926,23 @@ export const Keys = () => {
               onChange={(e) => setEditingKey({ ...editingKey, comment: e.target.value })}
               placeholder="Optional description..."
             />
+
+            <div className="flex items-start justify-between gap-4 rounded-md border border-border-glass bg-bg-subtle p-3">
+              <div className="min-w-0 flex-1">
+                <div className="font-body text-[13px] font-medium text-text-secondary">
+                  Use beta inference path
+                </div>
+                <p className="mt-1 text-xs text-text-muted">
+                  Requests from this key use the pi-ai beta handlers even when clients call stable
+                  /v1 endpoints.
+                </p>
+              </div>
+              <Switch
+                checked={!!editingKey.beta}
+                onChange={(beta) => setEditingKey({ ...editingKey, beta })}
+                aria-label="Toggle beta inference path"
+              />
+            </div>
 
             <TagSelect
               label="Excluded Model Aliases"

@@ -10,6 +10,8 @@ import { ConfigService } from '../../services/config-service';
 import { isValidIpRule } from '../../utils/ip-match';
 import { getCheckerDefinitions } from '../../services/quota/checker-registry';
 import { UsageStorageService } from '../../services/usage-storage';
+import { validateServerName } from '../../services/mcp-proxy/mcp-proxy-service';
+import { VisionDescriptorService } from '../../services/vision-descriptor-service';
 import type { GpuParams, ModelArchitecture } from '@plexus/shared';
 import { DEFAULT_GPU_PARAMS } from '@plexus/shared';
 
@@ -199,6 +201,20 @@ export async function registerConfigRoutes(
     }
   });
 
+  // Using wildcard to support slugs containing '/' (e.g. "provider/model")
+  fastify.get('/v0/management/aliases/*', async (request, reply) => {
+    const slug = (request.params as { '*': string })['*'];
+    try {
+      const alias = await configService.getRepository().getAlias(slug);
+      if (!alias) {
+        return reply.code(404).send({ error: `Alias '${slug}' not found` });
+      }
+      return reply.send({ slug, ...alias });
+    } catch (e: any) {
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
   // PUT — full create-or-replace with Zod validation
   // Using wildcard to support slugs containing '/' (e.g. "provider/model")
   fastify.put('/v0/management/aliases/*', async (request, reply) => {
@@ -296,6 +312,20 @@ export async function registerConfigRoutes(
     }
   });
 
+  fastify.get('/v0/management/keys/:name', async (request, reply) => {
+    const { name } = request.params as { name: string };
+    try {
+      const keys = await configService.getRepository().getAllKeys();
+      const key = keys[name];
+      if (!key) {
+        return reply.code(404).send({ error: `API key '${name}' not found` });
+      }
+      return reply.send({ name, ...key });
+    } catch (e: any) {
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
   // PUT — full create-or-replace with Zod validation
   fastify.put('/v0/management/keys/:name', async (request, reply) => {
     const { name } = request.params as { name: string };
@@ -309,6 +339,33 @@ export async function registerConfigRoutes(
       return reply.send({ success: true, name });
     } catch (e: any) {
       logger.error(`Failed to save API key '${name}'`, e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
+  fastify.patch('/v0/management/keys/:name', async (request, reply) => {
+    const { name } = request.params as { name: string };
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Object body is required' });
+    }
+
+    try {
+      const keys = await configService.getRepository().getAllKeys();
+      const existing = keys[name];
+      if (!existing) {
+        return reply.code(404).send({ error: `API key '${name}' not found` });
+      }
+      const merged = { ...existing, ...body };
+      const result = KeyConfigSchema.safeParse(merged);
+      if (!result.success) {
+        return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
+      }
+      await configService.saveKey(name, result.data);
+      logger.debug(`API key '${name}' updated via API (PATCH)`);
+      return reply.send({ success: true, name });
+    } catch (e: any) {
+      logger.error(`Failed to patch API key '${name}'`, e);
       return reply.code(500).send({ error: 'Internal server error' });
     }
   });
@@ -776,6 +833,13 @@ export async function registerConfigRoutes(
     }
   });
 
+  // ─── Vision Descriptor Cache ──────────────────────────────────────
+
+  fastify.post('/v0/management/cache/vision-descriptor/clear', async (_request, reply) => {
+    VisionDescriptorService.clearCache();
+    return reply.send({ success: true, message: 'Vision descriptor cache cleared.' });
+  });
+
   // ─── MCP Servers ──────────────────────────────────────────────────
 
   fastify.get('/v0/management/mcp-servers', async (_request, reply) => {
@@ -787,13 +851,28 @@ export async function registerConfigRoutes(
     }
   });
 
+  fastify.get('/v0/management/mcp-servers/:serverName', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+
+    try {
+      const servers = await configService.getRepository().getAllMcpServers();
+      const server = servers[serverName];
+      if (!server) {
+        return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+      }
+      return reply.send({ name: serverName, ...server });
+    } catch (e: any) {
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
   fastify.put('/v0/management/mcp-servers/:serverName', async (request, reply) => {
     const { serverName } = request.params as { serverName: string };
 
-    if (!/^[a-z0-9][a-z0-9-_]{1,62}$/.test(serverName)) {
+    if (!validateServerName(serverName)) {
       return reply.code(400).send({
         error:
-          'Invalid server name. Must be a slug (lowercase letters, numbers, hyphens, underscores, 2-63 characters)',
+          'Invalid server name. Must be a non-reserved slug (lowercase letters, numbers, hyphens, underscores, 2-63 characters)',
       });
     }
 
@@ -812,6 +891,40 @@ export async function registerConfigRoutes(
     }
   });
 
+  fastify.patch('/v0/management/mcp-servers/:serverName', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Object body is required' });
+    }
+
+    if (!validateServerName(serverName)) {
+      return reply.code(400).send({
+        error:
+          'Invalid server name. Must be a non-reserved slug (lowercase letters, numbers, hyphens, underscores, 2-63 characters)',
+      });
+    }
+
+    try {
+      const servers = await configService.getRepository().getAllMcpServers();
+      const existing = servers[serverName];
+      if (!existing) {
+        return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+      }
+      const merged = { ...existing, ...body };
+      const result = McpServerConfigSchema.safeParse(merged);
+      if (!result.success) {
+        return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
+      }
+      await configService.saveMcpServer(serverName, result.data);
+      logger.debug(`MCP server '${serverName}' updated via API (PATCH)`);
+      return reply.send({ success: true, name: serverName });
+    } catch (e: any) {
+      logger.error(`Failed to patch MCP server '${serverName}'`, e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
   fastify.delete('/v0/management/mcp-servers/:serverName', async (request, reply) => {
     const { serverName } = request.params as { serverName: string };
 
@@ -821,6 +934,37 @@ export async function registerConfigRoutes(
       return reply.send({ success: true });
     } catch (e: any) {
       logger.error(`Failed to delete MCP server '${serverName}'`, e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
+  // ─── MCP Server Enabled ──────────────────────────────────────────
+
+  fastify.get('/v0/management/config/mcp-enabled', async (_request, reply) => {
+    try {
+      const enabled = await configService.getSetting<boolean>('mcpEnabled', true);
+      return reply.send({ enabled });
+    } catch (e: any) {
+      logger.error('Failed to read mcp-enabled setting', e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
+  fastify.patch('/v0/management/config/mcp-enabled', async (request, reply) => {
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Object body is required' });
+    }
+    if (typeof body.enabled !== 'boolean') {
+      return reply.code(400).send({ error: 'enabled must be a boolean' });
+    }
+
+    try {
+      await configService.setSetting('mcpEnabled', body.enabled);
+      logger.debug(`MCP server ${body.enabled ? 'enabled' : 'disabled'} via API`);
+      return reply.send({ enabled: body.enabled });
+    } catch (e: any) {
+      logger.error('Failed to update mcp-enabled setting', e);
       return reply.code(500).send({ error: 'Internal server error' });
     }
   });

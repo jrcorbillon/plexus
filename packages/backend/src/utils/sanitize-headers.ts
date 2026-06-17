@@ -1,4 +1,11 @@
-const SENSITIVE_HEADERS = ['authorization', 'x-api-key', 'x-goog-api-key', 'api-key', 'cookie'];
+const SENSITIVE_HEADERS = [
+  'authorization',
+  'x-auth-token',
+  'x-api-key',
+  'x-goog-api-key',
+  'api-key',
+  'cookie',
+];
 
 export function sanitizeHeaders(
   headers: Record<string, string | string[] | undefined>

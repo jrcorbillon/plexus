@@ -11,6 +11,13 @@ describe('sanitizeHeaders', () => {
     expect(result['content-type']).toBe('application/json');
   });
 
+  test('masks auth token header', () => {
+    const result = sanitizeHeaders({
+      'x-auth-token': 'token-1234567890abcdef',
+    });
+    expect(result['x-auth-token']).toBe('toke...cdef');
+  });
+
   test('masks x-api-key header', () => {
     const result = sanitizeHeaders({
       'x-api-key': 'my-long-api-key-value',

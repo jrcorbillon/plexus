@@ -12,6 +12,8 @@ import { checkQuotaMiddleware } from '../../services/quota/quota-middleware';
 import { attachKeyAccessPolicy } from '../../utils/auth';
 import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/timeout';
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
+import { sanitizeHeaders } from '../../utils/sanitize-headers';
+import { handleBetaMessages } from '../../inference-v2';
 
 export async function registerMessagesRoute(
   fastify: FastifyInstance,
@@ -24,6 +26,10 @@ export async function registerMessagesRoute(
    * Anthropic Compatible Endpoint.
    */
   fastify.post('/v1/messages', async (request, reply) => {
+    if ((request as any).keyConfig?.beta === true) {
+      return handleBetaMessages(request, reply, { usageStorage, quotaEnforcer });
+    }
+
     const requestId = crypto.randomUUID();
     reply.header('x-request-id', requestId);
     const startTime = Date.now();

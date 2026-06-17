@@ -12,6 +12,8 @@ import { checkQuotaMiddleware } from '../../services/quota/quota-middleware';
 import { attachKeyAccessPolicy } from '../../utils/auth';
 import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/timeout';
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
+import { sanitizeHeaders } from '../../utils/sanitize-headers';
+import { handleBetaChatCompletions } from '../../inference-v2';
 
 export async function registerChatRoute(
   fastify: FastifyInstance,
@@ -26,6 +28,10 @@ export async function registerChatRoute(
    * and translates the response back to OpenAI format.
    */
   fastify.post('/v1/chat/completions', async (request, reply) => {
+    if ((request as any).keyConfig?.beta === true) {
+      return handleBetaChatCompletions(request, reply, { usageStorage, quotaEnforcer });
+    }
+
     const requestId = crypto.randomUUID();
     reply.header('x-request-id', requestId);
     const startTime = Date.now();

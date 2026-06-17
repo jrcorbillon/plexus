@@ -250,6 +250,7 @@ export interface Provider {
   stallMinBps?: number | null;
   stallWindowMs?: number | null;
   stallGracePeriodMs?: number | null;
+  pi_ai_provider?: string;
 }
 
 export interface McpServer {
@@ -357,6 +358,28 @@ export interface NormalizedModelMetadata {
   top_provider?: {
     context_length?: number;
     max_completion_tokens?: number;
+  };
+}
+
+export interface ModelMetadataRefreshSourceSummary {
+  source: Exclude<MetadataSource, 'custom'>;
+  initialized: boolean;
+  count: number;
+  error?: string;
+}
+
+export interface ModelMetadataRefreshResult {
+  success: boolean;
+  message: string;
+  trigger: 'startup' | 'scheduled' | 'manual';
+  refreshedAt: string;
+  durationMs: number;
+  intervalMinutes: number;
+  hadErrors: boolean;
+  sources: {
+    openrouter: ModelMetadataRefreshSourceSummary;
+    modelsDev: ModelMetadataRefreshSourceSummary;
+    catwalk: ModelMetadataRefreshSourceSummary;
   };
 }
 
@@ -891,6 +914,7 @@ export interface KeyConfig {
   excludedModels?: string[];
   excludedProviders?: string[];
   allowedIps?: string[];
+  beta?: boolean;
 }
 
 export type UsageSortField =
@@ -1011,33 +1035,15 @@ export const api = {
 
   getStats: async (): Promise<Stat[]> => {
     try {
-      const now = normalizeNow();
-      const startDate = new Date(now);
-      startDate.setDate(startDate.getDate() - 7);
-      const usageResponse = await fetchUsageRecords({
-        limit: 1000,
-        startDate: startDate.toISOString(),
-        fields: ['tokensInput', 'tokensOutput', 'tokensCached', 'tokensCacheWrite', 'durationMs'],
-        cache: true,
-      });
-
-      const config = await fetchConfigCached();
+      const [summary, config] = await Promise.all([
+        fetchUsageSummary('week', true),
+        fetchConfigCached(),
+      ]);
       const activeProviders = config ? Object.keys(config.providers || {}).length : '-';
 
-      const records = usageResponse.data || [];
-      const totalRequests = usageResponse.total;
-      const totalTokens = records.reduce(
-        (acc, r) =>
-          acc +
-          (r.tokensInput || 0) +
-          (r.tokensOutput || 0) +
-          (r.tokensCached || 0) +
-          (r.tokensCacheWrite || 0),
-        0
-      );
-      const avgLatency = records.length
-        ? Math.round(records.reduce((acc, r) => acc + (r.durationMs || 0), 0) / records.length)
-        : 0;
+      const totalRequests = summary.stats.totalRequests || 0;
+      const totalTokens = summary.stats.totalTokens || 0;
+      const avgLatency = Math.round(summary.stats.avgDurationMs || 0);
 
       return [
         { label: STAT_LABELS.REQUESTS, value: formatNumber(totalRequests, 0) },
@@ -1588,6 +1594,7 @@ export const api = {
           excludedModels?: string[];
           excludedProviders?: string[];
           allowedIps?: string[];
+          beta?: boolean;
         }
       >;
 
@@ -1601,6 +1608,7 @@ export const api = {
         excludedModels: val.excludedModels,
         excludedProviders: val.excludedProviders,
         allowedIps: val.allowedIps,
+        beta: val.beta,
       }));
     } catch (e) {
       console.error('API Error getKeys', e);
@@ -1623,6 +1631,7 @@ export const api = {
           excludedModels: keyConfig.excludedModels ?? [],
           excludedProviders: keyConfig.excludedProviders ?? [],
           allowedIps: keyConfig.allowedIps ?? [],
+          beta: !!keyConfig.beta,
         }),
       }
     );
@@ -1708,6 +1717,7 @@ export const api = {
           stallMinBps: val.stallMinBps ?? undefined,
           stallWindowMs: val.stallWindowMs ?? undefined,
           stallGracePeriodMs: val.stallGracePeriodMs ?? undefined,
+          pi_ai_provider: val.pi_ai_provider ?? undefined,
         };
       });
     } catch (e) {
@@ -1766,6 +1776,7 @@ export const api = {
       ...(provider.stallGracePeriodMs != null
         ? { stallGracePeriodMs: provider.stallGracePeriodMs }
         : {}),
+      ...(provider.pi_ai_provider ? { pi_ai_provider: provider.pi_ai_provider } : {}),
     };
 
     const res = await fetchWithAuth(
@@ -2604,6 +2615,17 @@ export const api = {
     return json.data;
   },
 
+  refreshModelMetadata: async (): Promise<ModelMetadataRefreshResult> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/models/metadata/refresh`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to refresh model metadata');
+    }
+    return (await res.json()) as ModelMetadataRefreshResult;
+  },
+
   getPiProviders: async (): Promise<string[]> => {
     const res = await fetchWithAuth(`${API_BASE}/v0/management/pi/providers`);
     if (!res.ok) throw new Error('Failed to fetch pi providers');
@@ -2946,6 +2968,7 @@ export const api = {
     allowedModels?: string[];
     quotaName?: string | null;
     comment?: string | null;
+    beta?: boolean;
     traceEnabled?: boolean;
     traceEnabledGlobal?: boolean;
   }> => {
@@ -3283,6 +3306,26 @@ export const api = {
       body: JSON.stringify(updates),
     });
     if (!res.ok) throw new Error('Failed to update timeout settings');
+    return res.json();
+  },
+
+  // ─── MCP Server Enabled ───────────────────────────────────────────
+
+  /** Fetch current MCP server enabled state. */
+  getMcpEnabled: async (): Promise<{ enabled: boolean }> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/config/mcp-enabled`);
+    if (!res.ok) throw new Error('Failed to fetch MCP enabled state');
+    return res.json();
+  },
+
+  /** Enable or disable the MCP server. */
+  patchMcpEnabled: async (enabled: boolean): Promise<{ enabled: boolean }> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/config/mcp-enabled`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) throw new Error('Failed to update MCP enabled state');
     return res.json();
   },
 

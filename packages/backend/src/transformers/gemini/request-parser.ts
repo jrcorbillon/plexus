@@ -67,11 +67,15 @@ export async function parseGeminiRequest(input: any): Promise<UnifiedChatRequest
   }
 
   // Map thinking config
+  // Accept both camelCase (includeThoughts, thinkingBudget, thinkingLevel) and
+  // snake_case (include_thoughts, thinking_budget, thinking_level) variants since
+  // some Gemini SDK clients send snake_case field names.
   if (generationConfig.thinkingConfig) {
-    const thinkingLevel = generationConfig.thinkingConfig.thinkingLevel as string | undefined;
+    const tc = generationConfig.thinkingConfig;
+    const thinkingLevel = (tc.thinkingLevel ?? tc.thinking_level) as string | undefined;
     unifiedChatRequest.reasoning = {
-      enabled: generationConfig.thinkingConfig.includeThoughts,
-      max_tokens: generationConfig.thinkingConfig.thinkingBudget,
+      enabled: tc.includeThoughts ?? tc.include_thoughts,
+      max_tokens: tc.thinkingBudget ?? tc.thinking_budget,
       // Map Gemini's thinkingLevel (NONE/LOW/MEDIUM/HIGH) to unified ThinkLevel
       effort: thinkingLevel ? (thinkingLevel.toLowerCase() as any) : undefined,
     };
@@ -115,6 +119,17 @@ export async function parseGeminiRequest(input: any): Promise<UnifiedChatRequest
       }
       if (tool.urlContext) {
         unifiedTools.push({ type: 'urlContext' as const, urlContext: {} });
+      }
+
+      // Coerce cross-provider web search types to googleSearch so clients
+      // using Anthropic/OpenAI/OpenRouter web search tool formats work transparently
+      // when routing to a Gemini provider via the native Gemini API.
+      if (
+        tool.type === 'web_search_20250305' ||
+        tool.type === 'web_search' ||
+        tool.type === 'openrouter:web_search'
+      ) {
+        unifiedTools.push({ type: 'googleSearch' as const, googleSearch: {} });
       }
     }
 

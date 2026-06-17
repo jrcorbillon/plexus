@@ -142,7 +142,7 @@ export class OpenAITransformer implements Transformer {
       model: response.model,
       created: response.created,
       content: message?.content || null,
-      reasoning_content: message?.reasoning_content || null,
+      reasoning_content: message?.reasoning_content ?? message?.reasoning ?? null,
       tool_calls: message?.tool_calls,
       usage,
       finishReason: choice?.finish_reason || null,
@@ -159,6 +159,9 @@ export class OpenAITransformer implements Transformer {
       content: response.content,
       reasoning_content: response.reasoning_content,
       tool_calls: response.tool_calls,
+      ...(response.annotations && response.annotations.length > 0
+        ? { annotations: response.annotations }
+        : {}),
     };
 
     return {
@@ -210,7 +213,7 @@ export class OpenAITransformer implements Transformer {
                 delta: {
                   role: choice?.delta?.role,
                   content: choice?.delta?.content,
-                  reasoning_content: choice?.delta?.reasoning_content,
+                  reasoning_content: choice?.delta?.reasoning_content ?? choice?.delta?.reasoning,
                   tool_calls: choice?.delta?.tool_calls,
                 },
                 finish_reason:

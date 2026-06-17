@@ -166,6 +166,7 @@ vi.mock('@earendil-works/pi-ai', () => ({
     timestamp: Date.now(),
   })),
   stream: vi.fn(async () => ({ ok: true })),
+  calculateCost: vi.fn(() => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 })),
 }));
 
 vi.mock('../src/utils/logger', () => ({

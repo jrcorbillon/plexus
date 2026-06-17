@@ -511,8 +511,13 @@ export class Dispatcher {
               route,
               targetApiType
             );
-            doRelease();
-            return oauthResponse;
+            try {
+              CooldownManager.getInstance().markProviderSuccess(route.provider, route.model);
+              this.recordStickySession(sessionKey, route, currentRequest);
+              return oauthResponse;
+            } finally {
+              doRelease();
+            }
           } catch (oauthError: any) {
             const effectiveOAuthError = attemptTimeout.isTimedOut()
               ? this.buildTimeoutError()
@@ -1818,6 +1823,39 @@ export class Dispatcher {
     return error;
   }
 
+  private buildOAuthRawStreamError(value: unknown): Error | null {
+    let text: string | null = null;
+
+    if (typeof value === 'string') {
+      text = value;
+    } else if (value instanceof Uint8Array) {
+      text = new TextDecoder().decode(value);
+    } else if (value instanceof ArrayBuffer) {
+      text = new TextDecoder().decode(value);
+    }
+
+    if (!text) return null;
+
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('{')) return null;
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed?.error || typeof parsed.error !== 'object') return null;
+
+      const message =
+        parsed.error.message ||
+        parsed.error.errorMessage ||
+        parsed.message ||
+        'OAuth provider error';
+      const error = new Error(message) as Error & { piAiResponse?: unknown };
+      error.piAiResponse = parsed;
+      return error;
+    } catch {
+      return null;
+    }
+  }
+
   private async probeOAuthStreamStart(
     stream: ReadableStream<any>,
     stallConfig?: StallConfig | null
@@ -1913,6 +1951,21 @@ export class Dispatcher {
               };
             }
 
+            const rawError = this.buildOAuthRawStreamError(value);
+            if (rawError) {
+              try {
+                await reader.cancel();
+              } catch {}
+              try {
+                reader.releaseLock();
+              } catch {}
+              return {
+                ok: false,
+                error: rawError,
+                streamStarted: false,
+              };
+            }
+
             buffered.push(value);
 
             // If this event is not pure bookkeeping, the stream is healthy.
@@ -1960,6 +2013,16 @@ export class Dispatcher {
             return {
               ok: false,
               error: this.buildOAuthStreamEventError(value),
+              streamStarted: false,
+            };
+          }
+
+          const rawError = this.buildOAuthRawStreamError(value);
+          if (rawError) {
+            reader.releaseLock();
+            return {
+              ok: false,
+              error: rawError,
               streamStarted: false,
             };
           }

@@ -1,6 +1,7 @@
 [tools]
 act = "latest"
 actionlint = "latest"
+"aqua:vercel-labs/agent-browser" = "latest"
 bun = "latest"
 lefthook = "latest"
 "npm:greptile" = "latest"

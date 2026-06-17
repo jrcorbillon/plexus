@@ -242,13 +242,19 @@ console.log('Watching for changes...');
 // --- Auto-open browser (unless --no-open) ---
 
 function openBrowser(url: string) {
-  if (process.platform === 'win32') {
-    nodeSpawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' }).unref();
-  } else {
-    nodeSpawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], {
-      detached: true,
-      stdio: 'ignore',
-    }).unref();
+  try {
+    if (process.platform === 'win32') {
+      nodeSpawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      const child = nodeSpawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.on('error', () => {});
+      child.unref();
+    }
+  } catch {
+    // Silently ignore if browser opener is not available
   }
 }
 

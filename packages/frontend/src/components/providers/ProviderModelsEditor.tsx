@@ -19,6 +19,7 @@ import { Badge } from '../ui/Badge';
 import { OpenRouterSlugInput } from '../ui/OpenRouterSlugInput';
 import { DebouncedInput } from '../ui/DebouncedInput';
 import type { Provider } from '../../lib/api';
+import { api } from '../../lib/api';
 import { KNOWN_ADAPTERS } from './ProviderAdvancedEditor';
 
 const getApiBadgeStyle = (apiType: string): React.CSSProperties => {
@@ -138,6 +139,41 @@ export function ProviderModelsEditor({
 }: Props) {
   const [modelAdaptersOpen, setModelAdaptersOpen] = useState<Record<string, boolean>>({});
   const [modelAdvancedOpen, setModelAdvancedOpen] = useState<Record<string, boolean>>({});
+
+  // pi-ai model dropdown state — shared across all models (same provider)
+  const [piModels, setPiModels] = useState<Array<{ id: string; name: string; api: string }>>([]);
+  const [piModelCustom, setPiModelCustom] = useState<Record<string, boolean>>({});
+
+  const piAiProvider = editingProvider.pi_ai_provider;
+
+  useEffect(() => {
+    if (!piAiProvider) {
+      setPiModels([]);
+      return;
+    }
+    api
+      .getPiModels(piAiProvider)
+      .then(setPiModels)
+      .catch(() => setPiModels([]));
+  }, [piAiProvider]);
+
+  // When models load, mark any existing model IDs that aren't in the registry as custom
+  useEffect(() => {
+    if (piModels.length === 0) return;
+    const modelIds = new Set(piModels.map((m) => m.id));
+    const models = editingProvider.models as Record<string, any> | undefined;
+    if (!models) return;
+    const updates: Record<string, boolean> = {};
+    for (const [mId, mCfg] of Object.entries(models)) {
+      const piId = (mCfg as any).pi_ai_model_id;
+      if (piId && !modelIds.has(piId)) {
+        updates[mId] = true;
+      }
+    }
+    if (Object.keys(updates).length > 0) {
+      setPiModelCustom((prev) => ({ ...prev, ...updates }));
+    }
+  }, [piModels, editingProvider.models]);
 
   return (
     <div className="border border-border-glass rounded-md">
@@ -269,7 +305,7 @@ export function ProviderModelsEditor({
                           alignItems: 'start',
                         }}
                       >
-                        {/* Left: Model ID + Type + Access Via */}
+                        {/* Left: Model ID + Type + Access Via + pi-ai Model ID */}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                           {/* Compact Model ID — bypasses Input component's py-2 */}
                           <div className="flex flex-col gap-1">
@@ -398,6 +434,65 @@ export function ProviderModelsEditor({
                               })()}
                             </div>
                           )}
+
+                          {/* pi-ai Model ID */}
+                          <div className="flex flex-col gap-1">
+                            <label className="font-body text-[11px] font-medium text-text-secondary">
+                              pi-ai Model ID
+                            </label>
+                            {piAiProvider && piModels.length > 0 && !piModelCustom[mId] ? (
+                              <select
+                                className={FIELD_CLS}
+                                value={mCfg.pi_ai_model_id ?? ''}
+                                onChange={(e) => {
+                                  const raw = e.target.value;
+                                  if (raw === '__custom__') {
+                                    setPiModelCustom((prev) => ({ ...prev, [mId]: true }));
+                                    return;
+                                  }
+                                  updateModelConfig(mId, {
+                                    pi_ai_model_id: raw || undefined,
+                                  });
+                                }}
+                              >
+                                <option value="">— none —</option>
+                                {piModels.map((m) => (
+                                  <option key={m.id} value={m.id} title={m.api}>
+                                    {m.id}
+                                  </option>
+                                ))}
+                                <option value="__custom__">custom...</option>
+                              </select>
+                            ) : (
+                              <div className="flex gap-1">
+                                <input
+                                  className={`${FIELD_CLS} flex-1`}
+                                  type="text"
+                                  placeholder="e.g. gpt-4.1, claude-opus-4-6"
+                                  value={mCfg.pi_ai_model_id ?? ''}
+                                  onChange={(e) => {
+                                    const raw = e.target.value;
+                                    updateModelConfig(mId, {
+                                      pi_ai_model_id: raw || undefined,
+                                    });
+                                  }}
+                                  autoFocus={!!piModelCustom[mId]}
+                                />
+                                {piAiProvider && piModels.length > 0 && piModelCustom[mId] && (
+                                  <button
+                                    type="button"
+                                    className="font-body text-[11px] text-text-muted hover:text-text px-1 flex-shrink-0"
+                                    title="Back to list"
+                                    onClick={() =>
+                                      setPiModelCustom((prev) => ({ ...prev, [mId]: false }))
+                                    }
+                                  >
+                                    ↩
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
 
                         {/* Right: Pricing Source + Pricing Inputs */}
@@ -1187,7 +1282,7 @@ export function ProviderModelsEditor({
                                 </div>
                               );
                             })()}
-                            /* reasoning_rewrite rules editor */
+                            {/* reasoning_rewrite rules editor */}
                             {(() => {
                               const modelAdapters: any[] = mCfg.adapter
                                 ? Array.isArray(mCfg.adapter)

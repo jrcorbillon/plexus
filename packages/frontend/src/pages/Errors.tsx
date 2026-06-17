@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { api, InferenceError } from '../lib/api';
-import Editor from '@monaco-editor/react';
 import {
   RefreshCw,
   Clock,
@@ -26,6 +25,7 @@ export const Errors: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedError, setSelectedError] = useState<InferenceError | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingDetail, setLoadingDetail] = useState(false);
 
   // Delete Modal State
   const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false);
@@ -98,18 +98,40 @@ export const Errors: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (selectedId) {
-      const found = errors.find((e) => e.requestId === selectedId);
-      if (found) {
-        setSelectedError(found);
-      } else {
-        // If not in current list, maybe fetch specific?
-        // For now, assuming it's in the list or will appear on refresh
-      }
-    } else {
+    if (!selectedId) {
       setSelectedError(null);
+      setLoadingDetail(false);
+      return;
     }
-  }, [selectedId, errors]);
+
+    const found = errors.find((e) => e.requestId === selectedId);
+    if (found) {
+      setSelectedError(found);
+      setLoadingDetail(false);
+      return;
+    }
+
+    // Clear stale details from a prior selection before waiting or fetching.
+    setSelectedError(null);
+    setLoadingDetail(true);
+
+    // Wait for the list fetch before falling back to the per-id API.
+    if (loading) return;
+
+    let cancelled = false;
+    api
+      .getErrorDetail(selectedId)
+      .then((data) => {
+        if (!cancelled) setSelectedError(data);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDetail(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, errors, loading]);
 
   const formatContent = (content: any) => {
     if (!content) return '';
@@ -192,7 +214,11 @@ export const Errors: React.FC = () => {
             {errors.map((err) => (
               <div
                 key={err.id}
-                onClick={() => setSelectedId(err.requestId)}
+                onClick={() => {
+                  setSelectedId(err.requestId);
+                  setSelectedError(err);
+                  setLoadingDetail(false);
+                }}
                 className={clsx(
                   'p-3 rounded-md cursor-pointer transition-all duration-200 border border-transparent hover:bg-bg-hover group',
                   selectedId === err.requestId && 'bg-bg-glass border-border-glass shadow-sm'
@@ -233,7 +259,12 @@ export const Errors: React.FC = () => {
 
         {/* Right Pane: Details */}
         <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg-deep">
-          {selectedId && selectedError ? (
+          {loadingDetail && !selectedError ? (
+            <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
+              <RefreshCw className="animate-spin text-primary" size={32} />
+              <p>Loading...</p>
+            </div>
+          ) : selectedError ? (
             <div className="flex flex-col">
               <div className="mb-3 border-b border-[var(--color-border)] p-3 sm:mb-4 sm:p-4">
                 <h3 className="mb-2 text-base font-semibold text-red-500 sm:text-lg">
@@ -307,29 +338,29 @@ export const Errors: React.FC = () => {
               </div>
 
               <AccordionPanel
+                key={`${selectedError.requestId}-message`}
                 title="Message"
                 content={selectedError.errorMessage}
                 color="text-red-400"
                 defaultOpen={true}
-                language="plaintext"
               />
               <AccordionPanel
+                key={`${selectedError.requestId}-stack`}
                 title="Stack Trace"
                 content={selectedError.errorStack || '(No stack trace available)'}
                 color="text-orange-400"
                 defaultOpen={true}
-                language="plaintext"
               />
               {(() => {
                 const details = parseDetails(selectedError.details);
                 if (details?.providerResponse) {
                   return (
                     <AccordionPanel
+                      key={`${selectedError.requestId}-provider-response`}
                       title="Provider Response"
                       content={details.providerResponse}
                       color="text-purple-400"
                       defaultOpen={false}
-                      language="plaintext"
                     />
                   );
                 }
@@ -340,6 +371,7 @@ export const Errors: React.FC = () => {
                 if (details?.headers) {
                   return (
                     <AccordionPanel
+                      key={`${selectedError.requestId}-headers`}
                       title="Request Headers"
                       content={formatContent(details.headers)}
                       color="text-cyan-400"
@@ -368,6 +400,7 @@ export const Errors: React.FC = () => {
                   if (hasOtherFields) {
                     return (
                       <AccordionPanel
+                        key={`${selectedError.requestId}-additional`}
                         title="Additional Details"
                         content={formatContent(details)}
                         color="text-blue-400"
@@ -377,6 +410,11 @@ export const Errors: React.FC = () => {
                   }
                   return null;
                 })()}
+            </div>
+          ) : selectedId ? (
+            <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
+              <AlertTriangle size={48} opacity={0.2} />
+              <p>Error log not found</p>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
@@ -431,8 +469,7 @@ const AccordionPanel: React.FC<{
   content: string;
   color: string;
   defaultOpen?: boolean;
-  language?: string;
-}> = ({ title, content, color, defaultOpen = false, language = 'json' }) => {
+}> = ({ title, content, color, defaultOpen = false }) => {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [copied, setCopied] = useState(false);
 
@@ -472,25 +509,13 @@ const AccordionPanel: React.FC<{
           isOpen ? 'max-h-[500px]' : 'max-h-0'
         )}
       >
-        <div className="h-[280px] bg-[#1e1e1e] sm:h-[400px]">
-          <Editor
-            height="100%"
-            defaultLanguage={language}
-            theme="vs-dark"
-            value={content}
-            options={{
-              readOnly: true,
-              minimap: { enabled: false },
-              scrollBeyondLastLine: false,
-              fontSize: 12,
-              fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-              lineNumbers: 'off',
-              folding: true,
-              wordWrap: 'on',
-              padding: { top: 10, bottom: 10 },
-            }}
-          />
-        </div>
+        {isOpen && (
+          <div className="h-[280px] overflow-auto bg-[#1e1e1e] sm:h-[400px]">
+            <pre className="m-0 p-2.5 text-xs leading-relaxed font-mono text-[#d4d4d4] whitespace-pre-wrap break-words">
+              {content}
+            </pre>
+          </div>
+        )}
       </div>
     </div>
   );

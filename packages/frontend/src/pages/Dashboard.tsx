@@ -1,15 +1,16 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Zap, BarChart3, Gauge, LayoutDashboard } from 'lucide-react';
+import { Zap, BarChart3, Gauge, LayoutDashboard, CalendarDays } from 'lucide-react';
 import { LiveTab } from '../components/dashboard/tabs/LiveTab';
 import { UsageTab } from '../components/dashboard/tabs/UsageTab';
 import { PerformanceTab } from '../components/dashboard/tabs/PerformanceTab';
 import { OverallTab } from '../components/dashboard/tabs/OverallTab';
+import { DailyTab } from '../components/dashboard/tabs/DailyTab';
 import { Tabs } from '../components/ui/Tabs';
 import { useAuth } from '../contexts/AuthContext';
 import type { CustomDateRange } from '../lib/date';
 
-type TabId = 'overall' | 'live' | 'usage' | 'performance';
+type TabId = 'overall' | 'live' | 'usage' | 'daily' | 'performance';
 type TimeRange = 'hour' | 'day' | 'week' | 'month' | 'custom';
 type LiveWindowPeriod = 5 | 15 | 30 | 1440 | 10080 | 43200;
 
@@ -27,6 +28,14 @@ const BASE_TABS = [
     label: (
       <span className="inline-flex items-center gap-2">
         <BarChart3 size={14} /> Usage Analytics
+      </span>
+    ),
+  },
+  {
+    value: 'daily' as const,
+    label: (
+      <span className="inline-flex items-center gap-2">
+        <CalendarDays size={14} /> Daily Usage
       </span>
     ),
   },
@@ -123,6 +132,7 @@ export const Dashboard = () => {
             onCustomDateRangeChange={setCustomDateRange}
           />
         )}
+        {activeTab === 'daily' && <DailyTab />}
         {activeTab === 'performance' && <PerformanceTab />}
       </div>
     </div>

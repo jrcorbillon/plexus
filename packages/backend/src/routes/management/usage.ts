@@ -376,6 +376,78 @@ export async function registerUsageRoutes(
     }
   });
 
+  fastify.get('/v0/management/usage/daily-breakdown', async (request, reply) => {
+    const query = request.query as any;
+    // Parse `days` (default 30). Invalid values (non-numeric, negative, NaN)
+    // fall back to the default so the endpoint never 500s on bad input.
+    const parsedDays = Number(query.days);
+    const days =
+      query.days === undefined || !Number.isFinite(parsedDays) || parsedDays < 0
+        ? 30
+        : Math.floor(parsedDays);
+
+    const db = usageStorage.getDb();
+    const schema = getSchema();
+    const dialect = getCurrentDialect();
+
+    // rangeStartMs: floor of "now" to UTC midnight, then subtract `days` days.
+    // days=0 → rangeStartMs is the start of today (today-only bucket).
+    const nowMs = Date.now();
+    const todayUtcMidnightMs = Math.floor(nowMs / 86_400_000) * 86_400_000;
+    const rangeStartMs = todayUtcMidnightMs - days * 86_400_000;
+
+    // Dialect-aware day bucket. startTime is an integer epoch *ms*.
+    // SQLite strftime expects epoch *seconds*, so divide by 1000.
+    // Postgres to_timestamp also expects epoch seconds.
+    const dayBucket =
+      dialect === 'sqlite'
+        ? sql<string>`strftime('%Y-%m-%d', (${schema.requestUsage.startTime} / 1000), 'unixepoch')`
+        : sql<string>`to_char(to_timestamp(${schema.requestUsage.startTime} / 1000.0), 'YYYY-MM-DD')`;
+
+    // Limited-user scoping: when the caller is a limited/api-key user, force
+    // an exact match on their own key name (same pattern as /usage/summary).
+    const scopeKey = scopedKeyName(request);
+    const keyFilter = scopeKey ? eq(schema.requestUsage.apiKey, scopeKey) : undefined;
+
+    try {
+      const rows = await db
+        .select({
+          day: dayBucket,
+          provider: sql<string>`COALESCE(${schema.requestUsage.provider}, 'unknown')`,
+          model: sql<string>`COALESCE(${schema.requestUsage.selectedModelName}, 'unknown')`,
+          requests: sql<number>`COUNT(*)`,
+          inputTokens: sql<number>`COALESCE(SUM(${schema.requestUsage.tokensInput}), 0)`,
+          outputTokens: sql<number>`COALESCE(SUM(${schema.requestUsage.tokensOutput}), 0)`,
+          cachedTokens: sql<number>`COALESCE(SUM(${schema.requestUsage.tokensCached}), 0)`,
+          cacheWriteTokens: sql<number>`COALESCE(SUM(${schema.requestUsage.tokensCacheWrite}), 0)`,
+        })
+        .from(schema.requestUsage)
+        .where(
+          and(gte(schema.requestUsage.startTime, rangeStartMs), ...(keyFilter ? [keyFilter] : []))
+        )
+        .groupBy(dayBucket, schema.requestUsage.provider, schema.requestUsage.selectedModelName)
+        .orderBy(sql`${dayBucket} DESC`);
+
+      const toNumber = (value: unknown): number =>
+        value === null || value === undefined ? 0 : Number(value);
+
+      return reply.send({
+        days: rows.map((row: any) => ({
+          day: String(row.day),
+          provider: String(row.provider),
+          model: String(row.model),
+          requests: toNumber(row.requests),
+          inputTokens: toNumber(row.inputTokens),
+          outputTokens: toNumber(row.outputTokens),
+          cachedTokens: toNumber(row.cachedTokens),
+          cacheWriteTokens: toNumber(row.cacheWriteTokens),
+        })),
+      });
+    } catch (e: any) {
+      return reply.code(500).send({ error: e.message });
+    }
+  });
+
   fastify.delete('/v0/management/usage', async (request, reply) => {
     if (isLimited(request)) {
       return reply.code(403).send({

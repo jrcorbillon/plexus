@@ -22,7 +22,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { api, type DailyBreakdownRow } from '../../../lib/api';
-import { formatNumber, formatTokens } from '../../../lib/format';
+import { formatInteger } from '../../../lib/format';
 import { Card } from '../../ui/Card';
 
 /**
@@ -191,10 +191,7 @@ export const DailyTab: React.FC = () => {
                 // Leaf rows are already sorted by total tokens descending in
                 // the parent useMemo, so we render them directly here.
                 return (
-                  <div
-                    key={day.day}
-                    className="border-b border-border last:border-b-0 bg-bg-card"
-                  >
+                  <div key={day.day} className="border-b border-border last:border-b-0 bg-bg-card">
                     {/* Collapsible day header */}
                     <button
                       type="button"
@@ -212,19 +209,19 @@ export const DailyTab: React.FC = () => {
                         <span className="truncate font-mono text-sm">{day.day}</span>
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
-                        {formatNumber(day.requests, 0)}
+                        {formatInteger(day.requests)}
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
-                        {formatTokens(day.totalTokens)}
+                        {formatInteger(day.totalTokens)}
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
-                        {formatTokens(day.inputTokens)}
+                        {formatInteger(day.inputTokens)}
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
-                        {formatTokens(day.cachedTokens)}
+                        {formatInteger(day.cachedTokens)}
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
-                        {formatTokens(day.outputTokens)}
+                        {formatInteger(day.outputTokens)}
                       </span>
                     </button>
 
@@ -255,19 +252,19 @@ export const DailyTab: React.FC = () => {
                               {row.provider} / {row.model}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
-                              {formatNumber(row.requests, 0)}
+                              {formatInteger(row.requests)}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
-                              {formatTokens(leafTotalTokens(row))}
+                              {formatInteger(leafTotalTokens(row))}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
-                              {formatTokens(row.inputTokens)}
+                              {formatInteger(row.inputTokens)}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
-                              {formatTokens(row.cachedTokens)}
+                              {formatInteger(row.cachedTokens)}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
-                              {formatTokens(row.outputTokens)}
+                              {formatInteger(row.outputTokens)}
                             </span>
                           </div>
                         ))}

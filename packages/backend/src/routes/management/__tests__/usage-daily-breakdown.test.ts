@@ -623,4 +623,45 @@ describe('GET /v0/management/usage/daily-breakdown', () => {
 
     expect(res.statusCode).toBe(401);
   });
+
+  // -------------------------------------------------------------------------
+  // Regression: NULL and literal 'unknown" must merge into a single group
+  // (GROUP BY must use the same COALESCE expressions as the SELECT)
+  // -------------------------------------------------------------------------
+  it('merges NULL and literal "unknown" provider/model into one row per day', async () => {
+    const now = Date.now();
+    await db.insert(schema.requestUsage).values([
+      makeRow({
+        startTime: now,
+        provider: null,
+        selectedModelName: null,
+        tokensInput: 10,
+        tokensOutput: 0,
+        tokensCached: 0,
+        tokensCacheWrite: 0,
+      }),
+      makeRow({
+        startTime: now + 1000,
+        provider: 'unknown' as any,
+        selectedModelName: 'unknown' as any,
+        tokensInput: 20,
+        tokensOutput: 0,
+        tokensCached: 0,
+        tokensCacheWrite: 0,
+      }),
+    ]);
+
+    const res = await fastify.inject({
+      method: 'GET',
+      url: '/v0/management/usage/daily-breakdown',
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { days: DayRow[] };
+    const unknownRows = body.days.filter((r) => r.provider === 'unknown' && r.model === 'unknown');
+    expect(unknownRows).toHaveLength(1);
+    expect(unknownRows[0]!.requests).toBe(2);
+    expect(unknownRows[0]!.inputTokens).toBe(30);
+  });
 });

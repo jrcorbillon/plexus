@@ -402,7 +402,7 @@ export async function registerUsageRoutes(
     const dayBucket =
       dialect === 'sqlite'
         ? sql<string>`strftime('%Y-%m-%d', (${schema.requestUsage.startTime} / 1000), 'unixepoch')`
-        : sql<string>`to_char(to_timestamp(${schema.requestUsage.startTime} / 1000.0), 'YYYY-MM-DD')`;
+        : sql<string>`to_char(to_timestamp(${schema.requestUsage.startTime} / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD')`;
 
     // Limited-user scoping: when the caller is a limited/api-key user, force
     // an exact match on their own key name (same pattern as /usage/summary).
@@ -425,7 +425,11 @@ export async function registerUsageRoutes(
         .where(
           and(gte(schema.requestUsage.startTime, rangeStartMs), ...(keyFilter ? [keyFilter] : []))
         )
-        .groupBy(dayBucket, schema.requestUsage.provider, schema.requestUsage.selectedModelName)
+        .groupBy(
+          dayBucket,
+          sql`COALESCE(${schema.requestUsage.provider}, 'unknown')`,
+          sql`COALESCE(${schema.requestUsage.selectedModelName}, 'unknown')`
+        )
         .orderBy(sql`${dayBucket} DESC`);
 
       const toNumber = (value: unknown): number =>

@@ -218,7 +218,7 @@ export const DailyTab: React.FC = () => {
                         {formatInteger(day.inputTokens)}
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
-                        {formatInteger(day.cachedTokens)}
+                        {formatInteger(day.cachedTokens + day.cacheWriteTokens)}
                       </span>
                       <span className={`${NUMERIC_CELL_CLS} text-text`}>
                         {formatInteger(day.outputTokens)}
@@ -261,7 +261,7 @@ export const DailyTab: React.FC = () => {
                               {formatInteger(row.inputTokens)}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
-                              {formatInteger(row.cachedTokens)}
+                              {formatInteger(row.cachedTokens + row.cacheWriteTokens)}
                             </span>
                             <span className={`${NUMERIC_CELL_CLS} text-text-muted`}>
                               {formatInteger(row.outputTokens)}

@@ -548,6 +548,29 @@ export interface UsageSummaryResponse {
   today: TodayMetrics;
 }
 
+/**
+ * A single pre-aggregated leaf row from the daily-breakdown endpoint.
+ *
+ * Each row represents the summed token usage for one (day, provider, model)
+ * triple over the requested lookback window. The frontend pivots this flat
+ * array into nested day -> provider/model groupings.
+ *
+ * - `day` is a `YYYY-MM-DD` ISO date string (UTC midnight boundary).
+ * - `model` is the routed `selectedModelName` (the real model), not the
+ *   user's incoming alias. Null values are bucketed as `'unknown'` by the
+ *   backend.
+ */
+export interface DailyBreakdownRow {
+  day: string;
+  provider: string;
+  model: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+}
+
 type UsageRecordField = keyof UsageRecord;
 
 interface UsageQueryParams<T extends UsageRecordField> {
@@ -1201,6 +1224,34 @@ export const api = {
     } catch (e) {
       console.error('API Error getEnergySummary', e);
       return null;
+    }
+  },
+
+  /**
+   * Fetch pre-aggregated daily token usage broken down by provider and model.
+   *
+   * Hits `GET /v0/management/usage/daily-breakdown?days=<days>` which performs
+   * a single server-side `GROUP BY (day, provider, selectedModelName)` so we
+   * don't have to transfer and aggregate raw records on the client.
+   *
+   * The backend auto-scopes the result to the calling principal (limited
+   * api-key users see only their own rows), mirroring `/usage/summary`.
+   *
+   * @param days Lookback window in days (default 30). Values <= 0 or non-numeric
+   *             values are clamped to 30 by the backend.
+   * @returns Flat array of leaf rows. Empty array on error or no data.
+   */
+  getDailyBreakdown: async (days: number = 30): Promise<DailyBreakdownRow[]> => {
+    try {
+      const res = await fetchWithAuth(
+        `${API_BASE}/v0/management/usage/daily-breakdown?days=${days}`
+      );
+      if (!res.ok) throw new Error('Failed to fetch daily breakdown');
+      const body = (await res.json()) as { days?: DailyBreakdownRow[] };
+      return body.days || [];
+    } catch (e) {
+      console.error('API Error getDailyBreakdown', e);
+      return [];
     }
   },
 

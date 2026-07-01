@@ -10,7 +10,12 @@ const fetchMock: any = vi.fn(async (): Promise<any> => {
 
 global.fetch = fetchMock as any;
 
-function makeConfig(options?: { failoverEnabled?: boolean; targetCount?: number }) {
+function makeConfig(options?: {
+  failoverEnabled?: boolean;
+  targetCount?: number;
+  maxAttempts?: number;
+  retryDelaySeconds?: number;
+}) {
   const failoverEnabled = options?.failoverEnabled ?? true;
   const targetCount = options?.targetCount ?? 2;
 
@@ -47,6 +52,8 @@ function makeConfig(options?: { failoverEnabled?: boolean; targetCount?: number 
       'test-alias': {
         selector: 'in_order',
         targets: orderedTargets,
+        max_attempts: options?.maxAttempts ?? 1,
+        retry_delay_seconds: options?.retryDelaySeconds ?? 0,
       },
     },
     keys: {},
@@ -674,5 +681,68 @@ describe('Dispatcher Failover', () => {
     expect(savedRequestId).toBe('req-intermediate');
     expect(savedError?.routingContext?.statusCode).toBe(500);
     expect(savedDetails?.apiType).toBe('chat');
+  });
+
+  test('max_attempts 2 retries the full alias round after exhaustion', async () => {
+    setConfigForTesting(makeConfig({ targetCount: 1, maxAttempts: 2 }));
+    fetchMock
+      .mockImplementationOnce(async () => errorResponse(503, 'round 1 failed'))
+      .mockImplementationOnce(async () => successChatResponse('model-1'));
+
+    const dispatcher = new Dispatcher();
+    const response = await dispatcher.dispatch(makeChatRequest());
+    const meta = (response as any).plexus;
+
+    expect(meta?.attemptCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retryHistory = JSON.parse(meta?.retryHistory || '[]');
+    expect(retryHistory.some((entry: any) => entry.round === 2)).toBe(true);
+  });
+
+  test('max_attempts 2 waits retry_delay_seconds between rounds', async () => {
+    vi.useFakeTimers();
+    setConfigForTesting(makeConfig({ targetCount: 1, maxAttempts: 2, retryDelaySeconds: 2 }));
+    fetchMock
+      .mockImplementationOnce(async () => errorResponse(503, 'round 1 failed'))
+      .mockImplementationOnce(async () => successChatResponse('model-1'));
+
+    const dispatcher = new Dispatcher();
+    const dispatchPromise = dispatcher.dispatch(makeChatRequest());
+
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await dispatchPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  test('non-retryable 400 does not start a second alias round', async () => {
+    setConfigForTesting(makeConfig({ targetCount: 2, maxAttempts: 2 }));
+    fetchMock.mockImplementation(async () => errorResponse(400, 'bad request'));
+
+    const dispatcher = new Dispatcher();
+
+    await expect(dispatcher.dispatch(makeChatRequest())).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('abort during retry delay cancels before second round', async () => {
+    vi.useFakeTimers();
+    setConfigForTesting(makeConfig({ targetCount: 1, maxAttempts: 2, retryDelaySeconds: 5 }));
+    fetchMock.mockImplementation(async () => errorResponse(503, 'round 1 failed'));
+
+    const controller = new AbortController();
+    const dispatcher = new Dispatcher();
+    const dispatchPromise = dispatcher.dispatch(makeChatRequest(), controller.signal);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort();
+
+    await expect(dispatchPromise).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

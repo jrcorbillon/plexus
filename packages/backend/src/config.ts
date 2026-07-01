@@ -770,6 +770,10 @@ export const ModelConfigSchema = z
     // in the alias targets). Tracked in-memory only; see
     // services/sticky-session-manager.ts.
     sticky_session: z.boolean().default(false).optional(),
+    // When all targets in an alias fail, re-run the full candidate list up to this many times.
+    max_attempts: z.number().int().min(1).max(10).default(1).optional(),
+    // Fixed wait (seconds) before starting each subsequent retry round. No delay before round 1.
+    retry_delay_seconds: z.number().int().min(0).max(300).default(0).optional(),
     // Advertised in GET /v1/models to inform clients of the preferred API surface(s)
     // for this alias, even if plexus can translate between them.
     preferred_api: z

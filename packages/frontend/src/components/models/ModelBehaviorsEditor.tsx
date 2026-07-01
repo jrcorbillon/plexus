@@ -130,6 +130,54 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                 size="sm"
               />
             </div>
+
+            <div className="grid grid-cols-1 gap-3 py-1 sm:grid-cols-2">
+              <div>
+                <label className="font-body text-[13px] text-text">Max Attempts</label>
+                <p className="font-body text-[11px] text-text-muted mt-0.5 mb-1.5">
+                  Re-run the full alias target list when all targets fail. Each round re-resolves
+                  candidates.
+                </p>
+                <input
+                  className="w-full py-2 px-3 font-body text-sm text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={editingAlias.max_attempts ?? 1}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value, 10);
+                    setEditingAlias({
+                      ...editingAlias,
+                      max_attempts: Number.isFinite(parsed) ? Math.min(10, Math.max(1, parsed)) : 1,
+                    });
+                  }}
+                />
+              </div>
+              <div>
+                <label className="font-body text-[13px] text-text">Retry Delay (seconds)</label>
+                <p className="font-body text-[11px] text-text-muted mt-0.5 mb-1.5">
+                  Wait time before starting the next retry round. 0 means no delay.
+                  {(editingAlias.max_attempts ?? 1) <= 1 &&
+                    ' Only applies when Max Attempts is greater than 1.'}
+                </p>
+                <input
+                  className="w-full py-2 px-3 font-body text-sm text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
+                  type="number"
+                  min={0}
+                  max={300}
+                  value={editingAlias.retry_delay_seconds ?? 0}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value, 10);
+                    setEditingAlias({
+                      ...editingAlias,
+                      retry_delay_seconds: Number.isFinite(parsed)
+                        ? Math.min(300, Math.max(0, parsed))
+                        : 0,
+                    });
+                  }}
+                />
+              </div>
+            </div>
           </div>
 
           <div className="h-px bg-border-glass"></div>

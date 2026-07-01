@@ -1,4 +1,13 @@
-import { pgTable, serial, text, boolean, bigint, jsonb, pgEnum } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  serial,
+  text,
+  boolean,
+  bigint,
+  integer,
+  jsonb,
+  pgEnum,
+} from 'drizzle-orm/pg-core';
 
 export const selectorStrategyEnum = pgEnum('selector_strategy', [
   'random',
@@ -33,6 +42,8 @@ export const modelAliases = pgTable('model_aliases', {
   modelArchitecture: jsonb('model_architecture'), // override for total_params, active_params, layers, heads, kv_lora_rank, qk_rope_head_dim, context_length, dtype
   enforceLimits: boolean('enforce_limits').notNull().default(false),
   stickySession: boolean('sticky_session').notNull().default(false),
+  maxAttempts: integer('max_attempts').notNull().default(1),
+  retryDelaySeconds: integer('retry_delay_seconds').notNull().default(0),
   preferredApi: jsonb('preferred_api'), // ('chat_completions' | 'messages' | 'gemini' | 'responses')[]
   piModel: jsonb('pi_model'), // { provider: string, model_id: string }
   targetGroups: jsonb('target_groups'), // {name, selector}[]

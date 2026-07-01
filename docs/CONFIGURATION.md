@@ -359,6 +359,8 @@ A **model alias** is a virtual model name that clients use in requests. Each ali
 | **Additional Aliases** | Alternative names that also route here | No |
 | **Priority** | Routing order: `selector` (default) or `api_match` | No |
 | **Target Groups** | Ordered groups of targets, each with its own selector | Yes |
+| **Max Attempts** | Full alias retry rounds when all targets fail (default `1`, max `10`) | No |
+| **Retry Delay (seconds)** | Fixed wait before each subsequent retry round (default `0`, max `300`) | No |
 | **Metadata** | External catalog for model info | No |
 
 ### Target Groups
@@ -378,6 +380,12 @@ This allows you to organise targets by preference. For example:
 | 3 | `backup` | `in_order` | Last-resort backup target |
 
 If no groups are explicitly configured, all targets live in a single `default` group.
+
+### Group Retry Rounds
+
+Per alias, **Max Attempts** controls how many times Plexus re-runs the full candidate list when every target in a round fails. Each round re-resolves targets (fresh selector order, cooldown/concurrency re-checked). **Retry Delay** adds a fixed pause in seconds before starting round 2 and later; it does not delay the first round.
+
+This is separate from per-target failover within a single round (controlled by the global failover policy).
 
 ### Selector Strategies
 

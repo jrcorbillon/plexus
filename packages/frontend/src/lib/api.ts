@@ -251,12 +251,39 @@ export interface Provider {
   stallWindowMs?: number | null;
   stallGracePeriodMs?: number | null;
   pi_ai_provider?: string;
+  compaction?: CompactionSettings;
 }
 
-export interface McpServer {
+export type McpServer = RemoteMcpServer | LocalMcpServer;
+
+export interface RemoteMcpServer {
+  mode?: 'remote_http';
   upstream_url: string;
   enabled: boolean;
   headers?: Record<string, string>;
+}
+
+export interface LocalMcpServer {
+  mode: 'local_http';
+  enabled: boolean;
+  launcher: 'bunx' | 'uvx';
+  package: string;
+  args?: string[];
+  env?: Record<string, string>;
+  port: number;
+  path?: string;
+  startup_timeout_ms?: number;
+  headers?: Record<string, string>;
+}
+
+export interface LocalMcpRuntimeStatus {
+  serverName: string;
+  status: 'stopped' | 'starting' | 'running' | 'failed';
+  pid: number | null;
+  url: string | null;
+  lastError: string | null;
+  startedAt: string | null;
+  exitedAt: string | null;
 }
 
 export interface McpLogRecord {
@@ -295,7 +322,7 @@ export interface Model {
   name: string;
   providerId: string;
   pricingSource?: string;
-  type?: 'chat' | 'embeddings' | 'transcriptions' | 'speech' | 'image' | 'responses';
+  type?: 'text' | 'embeddings' | 'transcriptions' | 'speech' | 'image';
 }
 
 // ─── Alias advanced behaviors ────────────────────────────────
@@ -406,11 +433,43 @@ export interface AliasTargetGroup {
 
 export type PreferredApiValue = 'chat_completions' | 'messages' | 'gemini' | 'responses';
 
+export type PiAiApi =
+  | 'openai-completions'
+  | 'openai-responses'
+  | 'openai-codex-responses'
+  | 'azure-openai-responses'
+  | 'anthropic-messages'
+  | 'google-generative-ai'
+  | 'google-generative-ai-vertex';
+
+/** Custom pi-ai provider definition (inference-v2 registry). */
+export interface PiAiCustomProviderDef {
+  api: PiAiApi;
+  display_name?: string;
+  compat?: Record<string, any>;
+}
+
+/** Custom / inherited pi-ai model definition (inference-v2 registry). */
+export interface PiAiCustomModelDef {
+  /** Custom pi-ai provider id this model belongs to (provider-scoped, required). */
+  provider: string;
+  inherits?: { provider: string; model_id: string };
+  api?: PiAiApi;
+  name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+  input?: Array<'text' | 'image'>;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  compat?: Record<string, any>;
+}
+
 export interface Alias {
   id: string;
   aliases?: string[];
   priority?: 'selector' | 'api_match';
-  type?: 'chat' | 'embeddings' | 'transcriptions' | 'speech' | 'image' | 'responses';
+  type?: 'text' | 'embeddings' | 'transcriptions' | 'speech' | 'image';
   target_groups: AliasTargetGroup[];
   advanced?: AliasBehavior[];
   metadata?: AliasMetadata;
@@ -431,6 +490,7 @@ export interface Alias {
   preferred_api?: Array<PreferredApiValue>;
   pi_model?: { provider: string; model_id: string };
   extraBody?: Record<string, any>;
+  compaction?: CompactionSettings;
 }
 
 export interface InferenceError {
@@ -1028,6 +1088,17 @@ export const STAT_LABELS = {
   TOKENS: 'Total Tokens',
   DURATION: 'Avg. Duration',
 } as const;
+
+export interface CompactionSettings {
+  enabled?: boolean;
+  strategy?: 'native' | 'headroom';
+  triggerRatio?: number;
+  absoluteTriggerTokens?: number | null;
+  minTokens?: number;
+  protectRecent?: number;
+  native?: { maxArrayItems?: number; maxStringChars?: number };
+  headroom?: { baseUrl?: string; apiKey?: string; targetRatio?: number | null; timeoutMs?: number };
+}
 
 export const api = {
   getCooldowns: async (): Promise<Cooldown[]> => {
@@ -1930,7 +2001,7 @@ export const api = {
       additional_aliases: alias.aliases,
       use_image_fallthrough: alias.use_image_fallthrough || false,
       enforce_limits: alias.enforce_limits || false,
-      sticky_session: alias.sticky_session || false,
+      sticky_session: alias.sticky_session ?? true,
       ...(alias.preferred_api &&
         alias.preferred_api.length > 0 && {
           preferred_api: alias.preferred_api,
@@ -2058,7 +2129,7 @@ export const api = {
           target_groups: targetGroups,
           use_image_fallthrough: val.use_image_fallthrough || false,
           enforce_limits: val.enforce_limits || false,
-          sticky_session: val.sticky_session || false,
+          sticky_session: val.sticky_session ?? true,
           advanced: val.advanced || [],
           metadata: val.metadata,
           model_architecture: val.model_architecture,
@@ -2687,13 +2758,85 @@ export const api = {
   getPiModels: async (
     provider: string,
     q?: string
-  ): Promise<Array<{ id: string; name: string; api: string }>> => {
+  ): Promise<Array<{ id: string; name: string; api: string; custom: boolean }>> => {
     const params = new URLSearchParams({ provider });
     if (q) params.set('q', q);
     const res = await fetchWithAuth(`${API_BASE}/v0/management/pi/models?${params}`);
     if (!res.ok) throw new Error('Failed to fetch pi models');
-    const json = (await res.json()) as { data: Array<{ id: string; name: string; api: string }> };
+    const json = (await res.json()) as {
+      data: Array<{ id: string; name: string; api: string; custom: boolean }>;
+    };
     return json.data;
+  },
+
+  // ─── pi-ai custom provider / model registries (inference-v2) ───────────────
+
+  getPiCustomProviders: async (): Promise<Record<string, PiAiCustomProviderDef>> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/pi/custom-providers`);
+    if (!res.ok) throw new Error('Failed to fetch pi custom providers');
+    return (await res.json()) as Record<string, PiAiCustomProviderDef>;
+  },
+
+  savePiCustomProvider: async (name: string, def: PiAiCustomProviderDef): Promise<void> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/pi/custom-providers/${encodeURIComponent(name)}`,
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(def) }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || 'Failed to save custom provider');
+    }
+  },
+
+  deletePiCustomProvider: async (name: string): Promise<void> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/pi/custom-providers/${encodeURIComponent(name)}`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok) throw new Error('Failed to delete custom provider');
+  },
+
+  getPiCustomModels: async (): Promise<Record<string, PiAiCustomModelDef>> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/pi/custom-models`);
+    if (!res.ok) throw new Error('Failed to fetch pi custom models');
+    return (await res.json()) as Record<string, PiAiCustomModelDef>;
+  },
+
+  savePiCustomModel: async (name: string, def: PiAiCustomModelDef): Promise<void> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/pi/custom-models/${encodeURIComponent(name)}`,
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(def) }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || 'Failed to save custom model');
+    }
+  },
+
+  deletePiCustomModel: async (name: string): Promise<void> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/pi/custom-models/${encodeURIComponent(name)}`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok) throw new Error('Failed to delete custom model');
+  },
+
+  /**
+   * Fetch a pi-ai built-in registry model projected onto a standalone
+   * PiAiCustomModelDef shape (no `inherits`). Used by the UI to clone a base
+   * model into a self-contained, editable custom model.
+   */
+  getPiRegistryModel: async (provider: string, modelId: string): Promise<PiAiCustomModelDef> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/pi/registry-model?provider=${encodeURIComponent(
+        provider
+      )}&model_id=${encodeURIComponent(modelId)}`
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || 'Failed to fetch registry model');
+    }
+    return (await res.json()) as PiAiCustomModelDef;
   },
 
   getOAuthProviderModels: async (
@@ -2723,9 +2866,7 @@ export const api = {
     return json.data || [];
   },
 
-  getMcpServers: async (): Promise<
-    Record<string, { upstream_url: string; enabled: boolean; headers?: Record<string, string> }>
-  > => {
+  getMcpServers: async (): Promise<Record<string, McpServer>> => {
     try {
       const res = await fetchWithAuth(`${API_BASE}/v0/management/mcp-servers`);
       if (!res.ok) throw new Error('Failed to fetch MCP servers');
@@ -2736,10 +2877,7 @@ export const api = {
     }
   },
 
-  saveMcpServer: async (
-    serverName: string,
-    server: { upstream_url: string; enabled?: boolean; headers?: Record<string, string> }
-  ): Promise<void> => {
+  saveMcpServer: async (serverName: string, server: McpServer): Promise<void> => {
     try {
       const res = await fetchWithAuth(
         `${API_BASE}/v0/management/mcp-servers/${encodeURIComponent(serverName)}`,
@@ -2775,6 +2913,41 @@ export const api = {
       console.error('API Error deleteMcpServer', e);
       throw e;
     }
+  },
+
+  getMcpServerStatus: async (serverName: string): Promise<LocalMcpRuntimeStatus> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/mcp-servers/${encodeURIComponent(serverName)}/status`
+    );
+    if (!res.ok) throw new Error('Failed to fetch MCP server status');
+    return await res.json();
+  },
+
+  startMcpServer: async (serverName: string): Promise<LocalMcpRuntimeStatus> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/mcp-servers/${encodeURIComponent(serverName)}/start`,
+      { method: 'POST' }
+    );
+    if (!res.ok) throw new Error('Failed to start MCP server');
+    return await res.json();
+  },
+
+  stopMcpServer: async (serverName: string): Promise<LocalMcpRuntimeStatus> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/mcp-servers/${encodeURIComponent(serverName)}/stop`,
+      { method: 'POST' }
+    );
+    if (!res.ok) throw new Error('Failed to stop MCP server');
+    return await res.json();
+  },
+
+  restartMcpServer: async (serverName: string): Promise<LocalMcpRuntimeStatus> => {
+    const res = await fetchWithAuth(
+      `${API_BASE}/v0/management/mcp-servers/${encodeURIComponent(serverName)}/restart`,
+      { method: 'POST' }
+    );
+    if (!res.ok) throw new Error('Failed to restart MCP server');
+    return await res.json();
   },
 
   getMcpLogs: async (
@@ -3357,6 +3530,26 @@ export const api = {
       body: JSON.stringify(updates),
     });
     if (!res.ok) throw new Error('Failed to update timeout settings');
+    return res.json();
+  },
+
+  // ─── Compaction Settings ─────────────────────────────────────────
+
+  /** Fetch current compaction settings. */
+  getCompactionConfig: async (): Promise<CompactionSettings> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/config/compaction`);
+    if (!res.ok) throw new Error('Failed to fetch compaction settings');
+    return res.json();
+  },
+
+  /** Patch compaction settings. */
+  patchCompactionConfig: async (updates: CompactionSettings): Promise<CompactionSettings> => {
+    const res = await fetchWithAuth(`${API_BASE}/v0/management/config/compaction`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates, (_key, value) => (value === undefined ? null : value)),
+    });
+    if (!res.ok) throw new Error('Failed to update compaction settings');
     return res.json();
   },
 

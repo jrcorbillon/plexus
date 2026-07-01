@@ -5,15 +5,50 @@ import {
   ModelConfigSchema,
   KeyConfigSchema,
   McpServerConfigSchema,
+  CompactionConfigSchema,
 } from '../../config';
 import { ConfigService } from '../../services/config-service';
 import { isValidIpRule } from '../../utils/ip-match';
 import { getCheckerDefinitions } from '../../services/quota/checker-registry';
 import { UsageStorageService } from '../../services/usage-storage';
 import { validateServerName } from '../../services/mcp-proxy/mcp-proxy-service';
+import { mcpProcessManager } from '../../services/mcp-local/mcp-process-manager';
 import { VisionDescriptorService } from '../../services/vision-descriptor-service';
 import type { GpuParams, ModelArchitecture } from '@plexus/shared';
 import { DEFAULT_GPU_PARAMS } from '@plexus/shared';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mergeCompactionPatch(
+  current: Record<string, unknown>,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...current };
+
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete merged[key];
+      continue;
+    }
+
+    if ((key === 'native' || key === 'headroom') && isRecord(value)) {
+      const currentNested = isRecord(merged[key]) ? (merged[key] as Record<string, unknown>) : {};
+      const nested = mergeCompactionPatch(currentNested, value);
+      if (Object.keys(nested).length === 0) {
+        delete merged[key];
+      } else {
+        merged[key] = nested;
+      }
+      continue;
+    }
+
+    merged[key] = value;
+  }
+
+  return merged;
+}
 
 /**
  * Build a map of provider slug -> resolved GpuParams from current config.
@@ -806,6 +841,40 @@ export async function registerConfigRoutes(
     }
   });
 
+  // ─── Compaction Config ────────────────────────────────────────────
+
+  fastify.get('/v0/management/config/compaction', async (_request, reply) => {
+    try {
+      const compaction = await configService.getRepository().getCompactionConfig();
+      return reply.send(compaction ?? {});
+    } catch (e: any) {
+      logger.error('Failed to get compaction config', e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
+  fastify.patch('/v0/management/config/compaction', async (request, reply) => {
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Object body is required' });
+    }
+    try {
+      const current = (await configService.getRepository().getCompactionConfig()) ?? {};
+      const merged = mergeCompactionPatch(current as Record<string, unknown>, body);
+      const parsed = CompactionConfigSchema.safeParse(merged);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: 'Invalid compaction config', details: parsed.error.issues });
+      }
+      await configService.setSetting('compaction', parsed.data);
+      return reply.send(parsed.data);
+    } catch (e: any) {
+      logger.error('Failed to patch compaction config', e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
   // ─── Vision Fallthrough ───────────────────────────────────────────
 
   fastify.get('/v0/management/config/vision-fallthrough', async (_request, reply) => {
@@ -936,6 +1005,49 @@ export async function registerConfigRoutes(
       logger.error(`Failed to delete MCP server '${serverName}'`, e);
       return reply.code(500).send({ error: 'Internal server error' });
     }
+  });
+
+  fastify.get('/v0/management/mcp-servers/:serverName/status', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    logger.info(`MCP local status requested for '${serverName}'`);
+    const servers = await configService.getRepository().getAllMcpServers();
+    const server = servers[serverName];
+    if (!server) return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+    return reply.send(mcpProcessManager.getStatus(serverName, server));
+  });
+
+  fastify.post('/v0/management/mcp-servers/:serverName/start', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    logger.info(`MCP local start requested for '${serverName}'`);
+    const servers = await configService.getRepository().getAllMcpServers();
+    const server = servers[serverName];
+    if (!server) return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+    if (server.mode !== 'local_http')
+      return reply.code(400).send({ error: 'MCP server is not local_http' });
+    return reply.send(await mcpProcessManager.start(serverName, server));
+  });
+
+  fastify.post('/v0/management/mcp-servers/:serverName/stop', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    logger.info(`MCP local stop requested for '${serverName}'`);
+    return reply.send(await mcpProcessManager.stop(serverName));
+  });
+
+  fastify.post('/v0/management/mcp-servers/:serverName/restart', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    logger.info(`MCP local restart requested for '${serverName}'`);
+    const servers = await configService.getRepository().getAllMcpServers();
+    const server = servers[serverName];
+    if (!server) return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+    if (server.mode !== 'local_http')
+      return reply.code(400).send({ error: 'MCP server is not local_http' });
+    return reply.send(await mcpProcessManager.restart(serverName, server));
+  });
+
+  fastify.get('/v0/management/mcp-servers/:serverName/process-logs', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    logger.info(`MCP local process logs requested for '${serverName}'`);
+    return reply.send({ data: mcpProcessManager.getLogs(serverName) });
   });
 
   // ─── MCP Server Enabled ──────────────────────────────────────────

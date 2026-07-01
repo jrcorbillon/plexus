@@ -69,6 +69,46 @@ describe('messageToGeminiResponse', () => {
     expect(fcPart?.functionCall).toMatchObject({ name: 'search', args: { q: 'cats' } });
   });
 
+  it('emits thoughtSignature on functionCall parts when present', () => {
+    const msg = makeMessage({
+      stopReason: 'toolUse',
+      content: [
+        {
+          type: 'toolCall',
+          id: 'c1',
+          name: 'bash',
+          arguments: { command: 'ls' },
+          thoughtSignature: 'SIG_A',
+        } as any,
+      ],
+    });
+    const result = messageToGeminiResponse(msg, 'gemini-3.5-flash');
+    const fcPart = (result.candidates[0]!.content.parts as any[]).find((p) => p.functionCall);
+    expect(fcPart?.thoughtSignature).toBe('SIG_A');
+  });
+
+  it('emits thoughtSignature on thought parts from thinkingSignature', () => {
+    const msg = makeMessage({
+      content: [{ type: 'thinking', thinking: 'reasoning', thinkingSignature: 'THINK_SIG' } as any],
+    });
+    const result = messageToGeminiResponse(msg, 'gemini-3.5-flash');
+    const thinkPart = (result.candidates[0]!.content.parts as any[]).find(
+      (p) => p.thought === true
+    );
+    expect(thinkPart?.thoughtSignature).toBe('THINK_SIG');
+  });
+
+  it('emits thoughtSignature on text parts from textSignature', () => {
+    const msg = makeMessage({
+      content: [{ type: 'text', text: 'answer', textSignature: 'TEXT_SIG' } as any],
+    });
+    const result = messageToGeminiResponse(msg, 'gemini-3.5-flash');
+    const textPart = (result.candidates[0]!.content.parts as any[]).find(
+      (p) => p.text && !p.thought
+    );
+    expect(textPart?.thoughtSignature).toBe('TEXT_SIG');
+  });
+
   it('sets finishReason to STOP for regular stop', () => {
     const msg = makeMessage({ stopReason: 'stop' });
     const result = messageToGeminiResponse(msg, 'gemini-2.5-pro');
@@ -173,6 +213,26 @@ describe('eventToGeminiNDJSON', () => {
     const fc = obj.candidates[0].content.parts[0].functionCall;
     expect(fc.name).toBe('search');
     expect(fc.args).toEqual({ q: 'cats' });
+  });
+
+  it('emits thoughtSignature on the streamed functionCall frame', () => {
+    const state = makeGeminiChunkSerialiserState('gemini-3.5-flash');
+    // pi-ai attaches thoughtSignature to the ToolCall in the partial at toolcall_start.
+    const partial = {
+      content: [
+        { type: 'toolCall', id: 'c1', name: 'bash', arguments: {}, thoughtSignature: 'STREAM_SIG' },
+      ],
+    };
+
+    eventToGeminiNDJSON({ type: 'toolcall_start', contentIndex: 0, partial } as any, state);
+    eventToGeminiNDJSON({ type: 'toolcall_delta', delta: '{"command":"ls"}' } as any, state);
+    const endLines = eventToGeminiNDJSON({ type: 'toolcall_end' } as any, state);
+
+    expect(endLines).toHaveLength(1);
+    const obj = parseGeminiDataFrame(endLines[0]!);
+    const part = obj.candidates[0].content.parts[0];
+    expect(part.functionCall.name).toBe('bash');
+    expect(part.thoughtSignature).toBe('STREAM_SIG');
   });
 
   it('done event emits data frame with usageMetadata and finishReason', () => {

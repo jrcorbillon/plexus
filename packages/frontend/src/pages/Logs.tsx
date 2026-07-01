@@ -4,6 +4,7 @@ import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Modal } from '../components/ui/Modal';
 import { SearchInput } from '../components/ui/SearchInput';
+import { Select } from '../components/ui/Select';
 import { CostToolTip } from '../components/ui/CostToolTip';
 import { PageHeader } from '../components/layout/PageHeader';
 import { PageContainer } from '../components/layout/PageContainer';
@@ -82,6 +83,8 @@ import antigravityLogo from '../assets/antigravity.svg';
 import chatLogo from '../assets/chat.svg';
 // @ts-ignore
 import geminiLogo from '../assets/gemini.svg';
+// @ts-ignore
+import responsesLogo from '../assets/responses.svg';
 
 interface RetryAttemptDetail {
   index: number;
@@ -147,7 +150,7 @@ const PaginationControls = ({
 }: PaginationControlsProps) => (
   <div
     className={clsx(
-      'flex items-center justify-between gap-3 px-3 py-3 sm:justify-end',
+      'flex items-center justify-between gap-2 px-2 py-2 sm:justify-end sm:gap-3 sm:px-3 sm:py-3',
       position === 'top' ? 'border-b border-border' : 'border-t border-border'
     )}
   >
@@ -182,7 +185,7 @@ export const Logs = () => {
   const [logs, setLogs] = useState<UsageRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [limit] = useState(20);
+  const [limit, setLimit] = useState(20);
   const [offset, setOffset] = useState(() => getOffsetFromSearchParams(searchParams));
   const [newestLogId, setNewestLogId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<UsageSortField>('date');
@@ -200,6 +203,8 @@ export const Logs = () => {
     antigravity: antigravityLogo,
     chat: chatLogo,
     gemini: geminiLogo,
+    responses: responsesLogo,
+    'openai-responses': responsesLogo,
     // inference-v2 (pi-ai) outgoing API types
     'google-generative-ai': geminiLogo,
     'openai-completions': chatLogo,
@@ -589,6 +594,14 @@ export const Logs = () => {
     updateOffset(0);
   };
 
+  const handleLimitChange = (value: string) => {
+    const nextLimit = Number(value);
+    if (!Number.isFinite(nextLimit) || nextLimit <= 0) return;
+    setLimit(nextLimit);
+    // Reset to the first page so we don't land on an out-of-range offset.
+    updateOffset(0);
+  };
+
   const handleSort = (field: UsageSortField) => {
     updateOffset(0);
     if (sortBy === field) {
@@ -641,6 +654,7 @@ export const Logs = () => {
   };
 
   const selectedRetryHistory = parseRetryHistory(selectedRetryLog?.retryHistory);
+  const showLiveStatus = !!adminKey && offset === 0 && sortBy === 'date' && sortDir === 'desc';
 
   return (
     <div className="flex flex-col min-h-full">
@@ -651,13 +665,14 @@ export const Logs = () => {
             ? `Scoped to key "${principal.keyName}"`
             : 'All API requests routed through the gateway'
         }
+        className="py-2.5 sm:py-4"
         actions={
           <>
             {/* SSE live-update connection status — only visible when on page 1, sorted by date desc */}
-            {!!adminKey && offset === 0 && sortBy === 'date' && sortDir === 'desc' && (
+            {showLiveStatus && (
               <span
                 className={clsx(
-                  'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border select-none',
+                  'inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-medium select-none sm:px-2.5',
                   sseStatus === 'connected' && 'bg-green-500/10 text-green-400 border-green-500/20',
                   sseStatus === 'reconnecting' &&
                     'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
@@ -701,62 +716,78 @@ export const Logs = () => {
       >
         <form
           onSubmit={handleSearch}
-          className="flex flex-col sm:flex-row sm:flex-wrap gap-2 items-stretch sm:items-end"
+          className="grid grid-cols-3 items-end gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-end"
         >
           {!isLimited && (
-            <div className="w-full sm:w-56">
+            <div className="col-span-1 sm:w-56">
               <SearchInput
-                placeholder="Filter by key…"
+                placeholder="Key…"
                 value={filters.apiKey}
                 onChange={(v) => setFilters({ ...filters, apiKey: v })}
               />
             </div>
           )}
-          <div className="w-full sm:w-56">
+          <div className="col-span-1 sm:w-56">
             <SearchInput
-              placeholder="Filter by model…"
+              placeholder="Model…"
               value={filters.incomingModelAlias}
               onChange={(v) => setFilters({ ...filters, incomingModelAlias: v })}
             />
           </div>
-          <div className="w-full sm:w-44">
+          <div className="col-span-1 sm:w-44">
             <SearchInput
-              placeholder="Filter by provider…"
+              placeholder="Provider…"
               value={filters.provider}
               onChange={(v) => setFilters({ ...filters, provider: v })}
             />
           </div>
-          <div className="w-full sm:w-auto flex items-center gap-2">
-            <div className="flex items-center gap-2">
-              <PlayCircle size={24} color="#94a3b8" />
+          <div className="hidden sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:flex-none sm:gap-2">
+              <PlayCircle size={18} className="shrink-0 text-slate-400 sm:h-6 sm:w-6" />
               <DateTimePicker
                 value={filters.startDate}
                 onChange={(v) => setFilters((prev) => ({ ...prev, startDate: v }))}
                 placeholder="Start date"
+                className="min-w-0 flex-1 sm:flex-none"
               />
             </div>
-            <div className="flex items-center gap-2">
-              <Circle size={24} color="#94a3b8" />
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:flex-none sm:gap-2">
+              <Circle size={18} className="shrink-0 text-slate-400 sm:h-6 sm:w-6" />
               <DateTimePicker
                 value={filters.endDate}
                 onChange={(v) => setFilters((prev) => ({ ...prev, endDate: v }))}
                 placeholder="End date"
+                className="min-w-0 flex-1 sm:flex-none"
               />
             </div>
             {(filters.startDate || filters.endDate) && (
               <button
                 type="button"
                 onClick={() => setFilters({ ...filters, startDate: '', endDate: '' })}
-                className="rounded-md text-text-muted hover:text-text hover:bg-bg-hover transition-colors duration-fast bg-transparent border-0 cursor-pointer"
+                className="rounded-md border-0 bg-transparent text-text-muted transition-colors duration-fast hover:bg-bg-hover hover:text-text"
                 title="Clear date filters"
               >
                 <X size={14} />
               </button>
             )}
           </div>
-          <Button type="submit" variant="primary" size="sm" className="w-full sm:w-auto">
+          <Button type="submit" variant="primary" size="sm" className="col-span-2 w-full sm:w-auto">
             Search
           </Button>
+          <div className="col-span-1 sm:w-40">
+            <Select
+              label="Per page"
+              value={String(limit)}
+              onChange={handleLimitChange}
+              className="py-1.5 sm:py-2"
+              options={[
+                { value: '20', label: '20' },
+                { value: '50', label: '50' },
+                { value: '100', label: '100' },
+                { value: '200', label: '200' },
+              ]}
+            />
+          </div>
         </form>
       </PageHeader>
 
@@ -772,7 +803,7 @@ export const Logs = () => {
             onOffsetChange={updateOffset}
           />
 
-          <div className="space-y-3 p-3 lg:hidden">
+          <div className="space-y-1.5 p-2 lg:hidden">
             {loading ? (
               <div className="rounded-lg border border-border-glass bg-bg-subtle p-4 text-center text-sm text-text-secondary">
                 Loading...
@@ -806,23 +837,21 @@ export const Logs = () => {
                   <article
                     key={log.requestId}
                     className={clsx(
-                      'rounded-lg border border-border-glass bg-bg-card p-3 shadow-sm',
+                      'rounded-lg border border-border-glass bg-bg-card p-2 shadow-sm',
                       log.requestId === newestLogId && 'animate-slide-in',
                       log.responseStatus === 'pending' && 'bg-yellow-500/5'
                     )}
                   >
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="font-mono text-xs font-medium text-text">
-                          {formatted.time}
-                        </div>
-                        <div className="font-mono text-[11px] text-text-muted">
-                          {formatted.date}
+                        <div className="font-mono text-[11px] font-medium text-text">
+                          {formatted.time}{' '}
+                          <span className="text-[10px] text-text-muted">{formatted.date}</span>
                         </div>
                       </div>
                       <span
                         className={clsx(
-                          'inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold capitalize',
+                          'inline-flex shrink-0 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold capitalize',
                           statusClass
                         )}
                       >
@@ -841,111 +870,98 @@ export const Logs = () => {
                       </span>
                     </div>
 
-                    <div className="mt-3 space-y-2">
+                    <div className="mt-1.5 space-y-1.5">
                       <div className="min-w-0">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
-                          Model
-                        </div>
-                        <div className="truncate text-sm font-medium text-text">
+                        <div className="truncate text-xs font-medium text-text">
                           {log.incomingModelAlias || '-'}
-                        </div>
-                        <div className="truncate text-xs text-text-secondary">
-                          {log.provider || '-'}:{log.selectedModelName || '-'}
+                          <span className="font-normal text-text-secondary">
+                            {' '}
+                            · {log.provider || '-'}:{log.selectedModelName || '-'}
+                          </span>
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div className="rounded-md bg-bg-subtle p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                            Key
-                          </div>
-                          <div className="truncate text-text">{log.apiKey || '-'}</div>
-                        </div>
-                        <div className="rounded-md bg-bg-subtle p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                            API
-                          </div>
+                      <div className="grid grid-cols-3 gap-1 text-[11px]">
+                        <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
                           <div className="truncate text-text">
-                            {log.incomingApiType || '?'} {'->'} {log.outgoingApiType || '?'}
+                            <span className="text-[9px] uppercase text-text-muted">Key </span>
+                            {log.apiKey || '-'}
                           </div>
                         </div>
-                        <div className="rounded-md bg-bg-subtle p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                            Tokens
+                        <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
+                          <div className="flex items-center gap-1 text-text">
+                            <div className="flex w-4 shrink-0 justify-center">
+                              {log.incomingApiType === 'embeddings' ? (
+                                <Variable size={14} className="text-green-500" />
+                              ) : log.incomingApiType === 'transcriptions' ? (
+                                <AudioLines size={14} className="text-purple-500" />
+                              ) : log.incomingApiType === 'speech' ? (
+                                <Volume2 size={14} className="text-orange-500" />
+                              ) : log.incomingApiType === 'images' ? (
+                                <ImageIcon size={14} className="text-fuchsia-500" />
+                              ) : log.incomingApiType === 'oauth' ? (
+                                <ShieldCheck size={14} className="text-emerald-500" />
+                              ) : log.incomingApiType && apiLogos[log.incomingApiType] ? (
+                                <img
+                                  src={apiLogos[log.incomingApiType]}
+                                  alt={log.incomingApiType}
+                                  className="h-3.5 w-3.5"
+                                />
+                              ) : (
+                                <span className="text-[10px] text-text-muted">?</span>
+                              )}
+                            </div>
+                            <span className="text-[10px] text-text-muted">→</span>
+                            <div className="flex w-4 shrink-0 justify-center">
+                              {log.outgoingApiType === 'embeddings' ? (
+                                <Variable size={14} className="text-green-500" />
+                              ) : log.outgoingApiType === 'transcriptions' ? (
+                                <AudioLines size={14} className="text-purple-500" />
+                              ) : log.outgoingApiType === 'speech' ? (
+                                <Volume2 size={14} className="text-orange-500" />
+                              ) : log.outgoingApiType === 'images' ? (
+                                <ImageIcon size={14} className="text-fuchsia-500" />
+                              ) : log.outgoingApiType === 'oauth' ? (
+                                <ShieldCheck size={14} className="text-emerald-500" />
+                              ) : log.outgoingApiType && apiLogos[log.outgoingApiType] ? (
+                                <img
+                                  src={apiLogos[log.outgoingApiType]}
+                                  alt={log.outgoingApiType}
+                                  className="h-3.5 w-3.5"
+                                />
+                              ) : (
+                                <span className="text-[10px] text-text-muted">?</span>
+                              )}
+                            </div>
                           </div>
-                          <div className="text-text">{formatLargeNumber(totalTokens)}</div>
                         </div>
-                        <div className="rounded-md bg-bg-subtle p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                            Cost
+                        <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
+                          <div className="truncate text-text">
+                            <span className="text-[9px] uppercase text-text-muted">Tok </span>
+                            {formatLargeNumber(totalTokens)}
                           </div>
-                          <div className="text-text">
+                        </div>
+                        <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
+                          <div className="truncate text-text">
+                            <span className="text-[9px] uppercase text-text-muted">Cost </span>
                             {log.costTotal == null || log.costTotal === 0
                               ? '-'
                               : formatCost(log.costTotal)}
                           </div>
                         </div>
-                        <div className="rounded-md bg-bg-subtle p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                            Latency
-                          </div>
-                          <div className="text-text">
-                            {(() => {
-                              const progress =
-                                log.responseStatus === 'pending'
-                                  ? progressMapRef.current.get(log.requestId)
-                                  : undefined;
-                              const rawDurationMs =
-                                log.durationMs != null && log.durationMs > 0
-                                  ? log.durationMs
-                                  : log.responseStatus === 'pending'
-                                    ? Date.now() - log.startTime
-                                    : null;
-                              const liveDuration =
-                                rawDurationMs != null ? formatMs(rawDurationMs) : '-';
-                              if (progress) {
-                                return (
-                                  <div
-                                    style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}
-                                  >
-                                    <span>Duration: {liveDuration}</span>
-                                    <span
-                                      style={{
-                                        color: 'var(--color-text-secondary)',
-                                        fontSize: '0.85em',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '4px',
-                                      }}
-                                    >
-                                      <CloudDownload size={11} className="text-yellow-400" />
-                                      <span>{formatBytes(progress.bytesReceived)}</span>
-                                    </span>
-                                    {progress.bytesPerSec != null && (
-                                      <span
-                                        style={{
-                                          color: 'var(--color-text-secondary)',
-                                          fontSize: '0.85em',
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                          gap: '4px',
-                                        }}
-                                      >
-                                        <Gauge size={11} className="text-text-secondary" />
-                                        {formatBytes(progress.bytesPerSec)}/s
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              }
-                              return liveDuration;
-                            })()}
+                        <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
+                          <div className="truncate text-text">
+                            <span className="text-[9px] uppercase text-text-muted">E2E </span>
+                            {log.durationMs != null &&
+                            log.durationMs > 0 &&
+                            log.tokensOutput &&
+                            log.tokensOutput > 0
+                              ? formatTPS(log.tokensOutput / (log.durationMs / 1000))
+                              : '-'}
                           </div>
                         </div>
-                        <div className="rounded-md bg-bg-subtle p-2">
-                          <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                            Meta
-                          </div>
-                          <div className="text-text">
+                        <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
+                          <div className="truncate text-text">
+                            <span className="text-[9px] uppercase text-text-muted">Meta </span>
                             {(log.messageCount || 0) === 0 ? '-' : log.messageCount} msg /{' '}
                             {(log.toolCallsCount || 0) === 0 ? '-' : log.toolCallsCount} tools
                           </div>
@@ -953,11 +969,8 @@ export const Logs = () => {
                       </div>
                     </div>
 
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border-glass pt-3">
-                      <span className="min-w-0 truncate font-mono text-[11px] text-text-muted">
-                        {log.requestId}
-                      </span>
-                      <div className="flex items-center gap-1.5">
+                    {(log.hasError || log.hasDebug) && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {log.hasError && (
                           <Button
                             size="sm"
@@ -982,16 +995,8 @@ export const Logs = () => {
                             Debug
                           </Button>
                         )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => handleDelete(log.requestId)}
-                          className="text-danger"
-                        >
-                          <Trash2 size={14} />
-                        </Button>
                       </div>
-                    </div>
+                    )}
                   </article>
                 );
               })
@@ -1126,8 +1131,6 @@ export const Logs = () => {
                                 <Volume2 size={16} className="text-orange-500" />
                               ) : log.incomingApiType === 'images' ? (
                                 <ImageIcon size={16} className="text-fuchsia-500" />
-                              ) : log.incomingApiType === 'responses' ? (
-                                <MessagesSquare size={16} className="text-cyan-500" />
                               ) : log.incomingApiType === 'oauth' ? (
                                 <ShieldCheck size={16} className="text-emerald-500" />
                               ) : log.incomingApiType && apiLogos[log.incomingApiType] ? (
@@ -1152,9 +1155,6 @@ export const Logs = () => {
                                 <Volume2 size={16} className="text-orange-500" />
                               ) : log.outgoingApiType === 'images' ? (
                                 <ImageIcon size={16} className="text-fuchsia-500" />
-                              ) : log.outgoingApiType === 'responses' ||
-                                log.outgoingApiType === 'openai-responses' ? (
-                                <MessagesSquare size={16} className="text-cyan-500" />
                               ) : log.outgoingApiType === 'oauth' ? (
                                 <ShieldCheck size={16} className="text-emerald-500" />
                               ) : log.outgoingApiType && apiLogos[log.outgoingApiType] ? (
@@ -1497,6 +1497,15 @@ export const Logs = () => {
                                 : null;
                           const liveDuration =
                             rawDurationMs != null ? formatMs(rawDurationMs) : '-';
+                          // End-to-end throughput: total output tokens / full request duration.
+                          // Unlike TPS (which excludes the TTFT delay), E2E includes it.
+                          const e2e =
+                            log.durationMs != null &&
+                            log.durationMs > 0 &&
+                            log.tokensOutput &&
+                            log.tokensOutput > 0
+                              ? log.tokensOutput / (log.durationMs / 1000)
+                              : null;
                           if (progress) {
                             return (
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
@@ -1554,6 +1563,15 @@ export const Logs = () => {
                                 {log.tokensPerSec && log.tokensPerSec > 0
                                   ? `TPS: ${formatTPS(log.tokensPerSec)}`
                                   : ''}
+                              </span>
+                              <span
+                                style={{
+                                  color: 'var(--color-text-secondary)',
+                                  fontSize: '0.85em',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {e2e != null ? `E2E: ${formatTPS(e2e)}` : ''}
                               </span>
                             </div>
                           );

@@ -9,7 +9,6 @@ on:
 
 jobs:
   pr-agent:
-    if: github.event.sender.type != 'Bot' || github.event.sender.login == 'github-actions[bot]'
     runs-on: ubuntu-latest
     env:
       PR_AGENT_LLM_API_KEY: ${{ secrets.LLM_API_KEY }}:${{ github.repository }}|${{ github.workflow }}|${{ github.job }}
@@ -101,7 +100,7 @@ jobs:
           OPENAI_KEY: ${{ env.PR_AGENT_LLM_API_KEY }}
           OPENAI.KEY: ${{ env.PR_AGENT_LLM_API_KEY }}
           OPENAI.API_BASE: ${{ secrets.LLM_API_HOST }}
-          config.model: ${{ vars.PR_AGENT_MODEL_ID }}
+          config.model: openai/${{ vars.PR_AGENT_MODEL_ID }}
           config.fallback_models: "[]"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"

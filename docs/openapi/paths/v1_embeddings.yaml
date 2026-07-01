@@ -1,10 +1,16 @@
 post:
   tags:
     - Inference — Embeddings
-  summary: OpenAI-compatible embeddings (always pass-through)
+  summary: OpenAI-compatible embeddings with provider-aware transformation
   description: |
-    Requires a model configured with `type: embeddings`. The request and
-    response are forwarded verbatim.
+    Requires a model configured with `type: embeddings`. Accepts requests in
+    OpenAI embeddings format. For OpenAI-compatible providers, requests and
+    responses are forwarded directly. For Gemini providers, Plexus transforms
+    the request to the Gemini `embedContent`/`batchEmbedContents` format and
+    normalises the response back to OpenAI format.
+
+    Supported provider types: `openai`, `chat` (pass-through), `gemini`
+    (transformed).
   requestBody:
     required: true
     content:

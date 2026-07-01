@@ -48,7 +48,9 @@ export function ModelMetadataEditor({ editingAlias, setEditingAlias, isModalOpen
 
   // ── Pi model selector state ──────────────────────────────────────────
   const [piProviders, setPiProviders] = useState<string[]>([]);
-  const [piModels, setPiModels] = useState<Array<{ id: string; name: string; api: string }>>([]);
+  const [piModels, setPiModels] = useState<
+    Array<{ id: string; name: string; api: string; custom: boolean }>
+  >([]);
   const [piModelsLoading, setPiModelsLoading] = useState(false);
 
   useEffect(() => {
@@ -363,8 +365,8 @@ export function ModelMetadataEditor({ editingAlias, setEditingAlias, isModalOpen
                     >
                       <option value="">Select model...</option>
                       {piModels.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name} ({m.id})
+                        <option key={m.id} value={m.id} title={m.api}>
+                          {m.name} ({m.id}){m.custom ? ' — custom' : ''}
                         </option>
                       ))}
                     </select>

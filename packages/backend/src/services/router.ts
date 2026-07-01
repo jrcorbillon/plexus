@@ -181,11 +181,12 @@ async function filterGroupTargets(
       if (!Array.isArray(providerConfig.models) && providerConfig.models) {
         const modelConfig = providerConfig.models[target.model];
         if (modelConfig?.type === 'embeddings') return true;
-        if (modelConfig?.type === 'chat') return false;
+        if (modelConfig?.type === 'text') return false;
       }
 
       if (alias.type === 'embeddings') return true;
-      return getProviderTypes(providerConfig).includes('embeddings');
+      const providerTypes = getProviderTypes(providerConfig);
+      return providerTypes.includes('embeddings') || providerTypes.includes('gemini');
     });
 
     if (embeddingsTargets.length > 0) {

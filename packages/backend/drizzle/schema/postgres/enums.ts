@@ -39,4 +39,6 @@ export const quotaCheckerTypeEnum = pgEnum('quota_checker_type', [
   'crof',
   'exedev',
   'hyper',
+  'sakana',
+  'cline',
 ]);

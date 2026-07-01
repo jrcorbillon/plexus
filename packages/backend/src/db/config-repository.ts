@@ -22,6 +22,8 @@ import type {
   TimeoutConfig,
   StallConfigType,
   MetadataOverrides,
+  PiAiCustomProvider,
+  PiAiCustomModel,
 } from '../config';
 import { resolveGpuParams } from '@plexus/shared';
 
@@ -236,6 +238,8 @@ export class ConfigRepository {
     await this.db().delete(schema.mcpServers);
     await this.db().delete(schema.oauthCredentials);
     await this.db().delete(schema.systemSettings);
+    await this.db().delete(schema.piAiCustomProviders);
+    await this.db().delete(schema.piAiCustomModels);
   }
 
   // ─── Providers ───────────────────────────────────────────────────
@@ -334,6 +338,7 @@ export class ConfigRepository {
       geminiThinkingEnabled: fromBool(config.geminiThinkingEnabled === true),
       headers: config.headers ? encryptJsonField(config.headers) : null,
       extraBody: config.extraBody ? toJson(config.extraBody) : null,
+      compaction: config.compaction ? toJson(config.compaction) : null,
       quotaCheckerType: config.quota_checker?.type ?? null,
       quotaCheckerId: config.quota_checker?.id ?? null,
       quotaCheckerEnabled: fromBool(config.quota_checker?.enabled !== false),
@@ -581,6 +586,7 @@ export class ConfigRepository {
         const eb = parseJson<Record<string, unknown>>(row.extraBody);
         return eb && typeof eb === 'object' && !Array.isArray(eb) ? { extraBody: eb } : {};
       })(),
+      ...(row.compaction ? { compaction: parseJson(row.compaction) } : {}),
       ...(quota_checker ? { quota_checker } : {}),
       model_autosync: {
         enabled: toBool(row.modelAutosyncEnabled),
@@ -774,6 +780,28 @@ export class ConfigRepository {
     return migrated;
   }
 
+  /**
+   * One-time startup migration: rewrite legacy model_type values to the
+   * canonical 'text' capability type.
+   *
+   * - 'chat'      → 'text'  (was overloaded to mean both wire protocol and capability)
+   * - 'responses' → 'text'  (was incorrectly stored as a capability type)
+   * - null / other values are left untouched.
+   *
+   * Idempotent: rows already set to 'text' (or any other valid value) are unaffected.
+   */
+  async migrateModelTypes(): Promise<number> {
+    const schema = this.schema();
+    const result = await this.db()
+      .update(schema.modelAliases)
+      .set({ modelType: 'text', updatedAt: now() })
+      .where(sql`${schema.modelAliases.modelType} IN ('chat', 'responses')`);
+    // Both SQLite (bun) and postgres-js drivers expose rowCount/changes on the result
+    const affected =
+      (result as any)?.rowsAffected ?? (result as any)?.changes ?? (result as any)?.rowCount ?? 0;
+    return Number(affected);
+  }
+
   async saveAlias(slug: string, config: ModelConfig): Promise<void> {
     const schema = this.schema();
     const timestamp = now();
@@ -795,6 +823,8 @@ export class ConfigRepository {
       preferredApi: config.preferred_api ? toJson(config.preferred_api) : null,
       piModel: config.pi_model ? toJson(config.pi_model) : null,
       extraBody: config.extraBody ? toJson(config.extraBody) : null,
+      generation: null,
+      compaction: config.compaction ? toJson(config.compaction) : null,
       targetGroups:
         config.target_groups && config.target_groups.length > 0
           ? toJson(config.target_groups.map((g) => ({ name: g.name, selector: g.selector })))
@@ -937,6 +967,7 @@ export class ConfigRepository {
       ...(row.preferredApi ? { preferred_api: parseJson(row.preferredApi) } : {}),
       ...(row.piModel ? { pi_model: parseJson(row.piModel) } : {}),
       ...(row.extraBody ? { extraBody: parseJson(row.extraBody) } : {}),
+      ...(row.compaction ? { compaction: parseJson(row.compaction) } : {}),
     };
 
     if (row.metadataSource) {
@@ -1068,6 +1099,7 @@ export class ConfigRepository {
           excludedProviders: stringifyStringArray(config.excludedProviders),
           allowedIps: stringifyStringArray(config.allowedIps),
           beta: config.beta ?? false,
+          generation: null,
           updatedAt: timestamp,
         })
         .where(eq(schema.apiKeys.name, name));
@@ -1086,6 +1118,7 @@ export class ConfigRepository {
           excludedProviders: stringifyStringArray(config.excludedProviders),
           allowedIps: stringifyStringArray(config.allowedIps),
           beta: config.beta ?? false,
+          generation: null,
           createdAt: timestamp,
           updatedAt: timestamp,
         });
@@ -1159,6 +1192,84 @@ export class ConfigRepository {
       .where(eq(schema.userQuotaDefinitions.name, name));
   }
 
+  // ─── pi-ai Custom Providers ──────────────────────────────────────
+
+  async getAllPiAiCustomProviders(): Promise<Record<string, PiAiCustomProvider>> {
+    const schema = this.schema();
+    const rows = await this.db().select().from(schema.piAiCustomProviders);
+    const result: Record<string, PiAiCustomProvider> = {};
+    for (const row of rows) {
+      const def = parseJson<PiAiCustomProvider>(row.definition);
+      if (def) result[row.name] = def;
+    }
+    return result;
+  }
+
+  async savePiAiCustomProvider(name: string, def: PiAiCustomProvider): Promise<void> {
+    const schema = this.schema();
+    const timestamp = now();
+    const existing = await this.db()
+      .select()
+      .from(schema.piAiCustomProviders)
+      .where(eq(schema.piAiCustomProviders.name, name))
+      .limit(1);
+    if (existing.length > 0) {
+      await this.db()
+        .update(schema.piAiCustomProviders)
+        .set({ definition: toJson(def), updatedAt: timestamp })
+        .where(eq(schema.piAiCustomProviders.name, name));
+    } else {
+      await this.db()
+        .insert(schema.piAiCustomProviders)
+        .values({ name, definition: toJson(def), createdAt: timestamp, updatedAt: timestamp });
+    }
+  }
+
+  async deletePiAiCustomProvider(name: string): Promise<void> {
+    const schema = this.schema();
+    await this.db()
+      .delete(schema.piAiCustomProviders)
+      .where(eq(schema.piAiCustomProviders.name, name));
+  }
+
+  // ─── pi-ai Custom Models ─────────────────────────────────────────
+
+  async getAllPiAiCustomModels(): Promise<Record<string, PiAiCustomModel>> {
+    const schema = this.schema();
+    const rows = await this.db().select().from(schema.piAiCustomModels);
+    const result: Record<string, PiAiCustomModel> = {};
+    for (const row of rows) {
+      const def = parseJson<PiAiCustomModel>(row.definition);
+      if (def) result[row.name] = def;
+    }
+    return result;
+  }
+
+  async savePiAiCustomModel(name: string, def: PiAiCustomModel): Promise<void> {
+    const schema = this.schema();
+    const timestamp = now();
+    const existing = await this.db()
+      .select()
+      .from(schema.piAiCustomModels)
+      .where(eq(schema.piAiCustomModels.name, name))
+      .limit(1);
+    if (existing.length > 0) {
+      await this.db()
+        .update(schema.piAiCustomModels)
+        .set({ definition: toJson(def), updatedAt: timestamp })
+        .where(eq(schema.piAiCustomModels.name, name));
+    } else {
+      await this.db()
+        .insert(schema.piAiCustomModels)
+        .values({ name, definition: toJson(def), createdAt: timestamp, updatedAt: timestamp });
+    }
+  }
+
+  async deletePiAiCustomModel(name: string): Promise<void> {
+    const schema = this.schema();
+    await this.db().delete(schema.piAiCustomModels).where(eq(schema.piAiCustomModels.name, name));
+  }
+
   // ─── MCP Servers ─────────────────────────────────────────────────
 
   async getAllMcpServers(): Promise<Record<string, McpServerConfig>> {
@@ -1167,6 +1278,27 @@ export class ConfigRepository {
     const result: Record<string, McpServerConfig> = {};
 
     for (const row of rows) {
+      const mode = row.mode || 'remote_http';
+
+      if (mode === 'local_http') {
+        const localConfig: McpServerConfig = {
+          mode: 'local_http',
+          enabled: toBool(row.enabled),
+          launcher: row.launcher as 'bunx' | 'uvx',
+          package: row.packageName || '',
+          args: row.args ? decryptJsonField<string[]>(row.args) || [] : [],
+          env: row.env ? decryptJsonField<Record<string, string>>(row.env) || undefined : undefined,
+          port: Number(row.port || 0),
+          path: row.path || '/mcp',
+          startup_timeout_ms: Number(row.startupTimeoutMs || 30000),
+          headers: row.headers
+            ? decryptJsonField<Record<string, string>>(row.headers) || undefined
+            : undefined,
+        };
+        result[row.name] = localConfig;
+        continue;
+      }
+
       result[row.name] = {
         upstream_url: row.upstreamUrl,
         enabled: toBool(row.enabled),
@@ -1189,13 +1321,40 @@ export class ConfigRepository {
       .where(eq(schema.mcpServers.name, name))
       .limit(1);
 
+    const isLocal = config.mode === 'local_http';
+    const upstreamUrl = isLocal
+      ? 'http://127.0.0.1:' + config.port + (config.path || '/mcp')
+      : config.upstream_url;
+    const localFields = isLocal
+      ? {
+          mode: 'local_http',
+          launcher: config.launcher,
+          packageName: config.package,
+          args: config.args ? encryptJsonField(config.args) : null,
+          env: config.env ? encryptJsonField(config.env) : null,
+          port: config.port,
+          path: config.path || '/mcp',
+          startupTimeoutMs: config.startup_timeout_ms || 30000,
+        }
+      : {
+          mode: 'remote_http',
+          launcher: null,
+          packageName: null,
+          args: null,
+          env: null,
+          port: null,
+          path: null,
+          startupTimeoutMs: null,
+        };
+
     if (existing.length > 0) {
       await this.db()
         .update(schema.mcpServers)
         .set({
-          upstreamUrl: config.upstream_url,
+          upstreamUrl,
           enabled: fromBool(config.enabled !== false),
           headers: config.headers ? encryptJsonField(config.headers) : null,
+          ...localFields,
           updatedAt: timestamp,
         })
         .where(eq(schema.mcpServers.name, name));
@@ -1204,9 +1363,10 @@ export class ConfigRepository {
         .insert(schema.mcpServers)
         .values({
           name,
-          upstreamUrl: config.upstream_url,
+          upstreamUrl,
           enabled: fromBool(config.enabled !== false),
           headers: config.headers ? encryptJsonField(config.headers) : null,
+          ...localFields,
           createdAt: timestamp,
           updatedAt: timestamp,
         });
@@ -1360,6 +1520,10 @@ export class ConfigRepository {
   async getTimeoutConfig(): Promise<TimeoutConfig> {
     const defaultSeconds = await this.getSetting<number>('timeout.defaultSeconds', 300);
     return { defaultSeconds };
+  }
+
+  async getCompactionConfig(): Promise<import('../config').CompactionSettingsConfig> {
+    return this.getSetting('compaction', {});
   }
 
   async getStallConfig(): Promise<import('../config').StallConfigType> {

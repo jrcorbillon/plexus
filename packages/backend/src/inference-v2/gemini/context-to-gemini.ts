@@ -40,8 +40,11 @@ import type {
 // ─── Gemini wire types ────────────────────────────────────────────────────────
 
 export type GeminiPart =
-  | { text: string; thought?: true }
-  | { functionCall: { name: string; args: Record<string, unknown> } };
+  | { text: string; thought?: true; thoughtSignature?: string }
+  | {
+      functionCall: { name: string; args: Record<string, unknown> };
+      thoughtSignature?: string;
+    };
 
 export interface GeminiCandidate {
   content: { role: 'model'; parts: GeminiPart[] };
@@ -95,18 +98,35 @@ function buildParts(message: AssistantMessage): GeminiPart[] {
   for (const block of message.content) {
     if (block.type === 'thinking') {
       const tc = block as ThinkingContent;
-      parts.push({ text: tc.thinking, thought: true });
+      const part: GeminiPart = { text: tc.thinking, thought: true };
+      if (typeof tc.thinkingSignature === 'string' && tc.thinkingSignature) {
+        (part as any).thoughtSignature = tc.thinkingSignature;
+      }
+      parts.push(part);
     } else if (block.type === 'text') {
       const tc = block as TextContent;
-      if (tc.text) parts.push({ text: tc.text });
+      if (tc.text) {
+        const part: GeminiPart = { text: tc.text };
+        if (typeof tc.textSignature === 'string' && tc.textSignature) {
+          (part as any).thoughtSignature = tc.textSignature;
+        }
+        parts.push(part);
+      }
     } else if (block.type === 'toolCall') {
       const tc = block as ToolCall;
-      parts.push({
+      const part: GeminiPart = {
         functionCall: {
           name: tc.name,
           args: tc.arguments ?? {},
         },
-      });
+      };
+      // Gemini 3 requires the encrypted thought signature to be echoed on
+      // functionCall parts. pi-ai stores it as `thoughtSignature` on the
+      // ToolCall; emit it on the part so the client can replay it next turn.
+      if (typeof tc.thoughtSignature === 'string' && tc.thoughtSignature) {
+        (part as any).thoughtSignature = tc.thoughtSignature;
+      }
+      parts.push(part);
     }
   }
 
@@ -157,10 +177,17 @@ export interface GeminiChunkSerialiserState {
   /** Accumulated args JSON string for the currently streaming tool call */
   pendingToolCallName: string | null;
   pendingToolCallArgs: string;
+  /** Captured thought signature for the currently streaming tool call */
+  pendingToolCallSignature: string | null;
 }
 
 export function makeGeminiChunkSerialiserState(model: string): GeminiChunkSerialiserState {
-  return { model, pendingToolCallName: null, pendingToolCallArgs: '' };
+  return {
+    model,
+    pendingToolCallName: null,
+    pendingToolCallArgs: '',
+    pendingToolCallSignature: null,
+  };
 }
 
 /**
@@ -207,6 +234,10 @@ export function eventToGeminiNDJSON(
       const tc = partial?.type === 'toolCall' ? (partial as ToolCall) : null;
       state.pendingToolCallName = tc?.name ?? '';
       state.pendingToolCallArgs = '';
+      // Capture the thought signature up front — pi-ai attaches it to the
+      // ToolCall in the partial at toolcall_start, and Gemini needs it on the
+      // emitted functionCall part so the client can replay it next turn.
+      state.pendingToolCallSignature = (tc as any)?.thoughtSignature ?? null;
       // Gemini emits the complete functionCall when args are known (at toolcall_end).
       // Emit nothing here — we'll emit on toolcall_end.
       return [];
@@ -228,9 +259,13 @@ export function eventToGeminiNDJSON(
           args = {};
         }
       }
+      const sig = state.pendingToolCallSignature;
       state.pendingToolCallName = null;
       state.pendingToolCallArgs = '';
-      return [line(partialCandidate([{ functionCall: { name, args } }]))];
+      state.pendingToolCallSignature = null;
+      const part: GeminiPart = { functionCall: { name, args } };
+      if (sig) (part as any).thoughtSignature = sig;
+      return [line(partialCandidate([part]))];
     }
 
     case 'done': {

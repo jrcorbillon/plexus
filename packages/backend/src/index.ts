@@ -70,6 +70,7 @@ import { initializeDatabase } from './db/client';
 import { runMigrations } from './db/migrate';
 import { runEncryptionMigration } from './db/encrypt-migration';
 import { isEncryptionEnabled } from './utils/encryption';
+import { mcpProcessManager } from './services/mcp-local/mcp-process-manager';
 
 /**
  * Plexus Backend Server
@@ -169,9 +170,17 @@ try {
   await configService.initialize();
   logger.debug('Configuration loaded from database');
 
+  // Register pi_ai_custom_providers with the piAiModels instance so custom
+  // providers can be dispatched directly by api type without remapping hacks.
+  const { registerCustomProvidersWithPiAi } = await import('./inference-v2/shared/pi-ai-utils');
+  await registerCustomProvidersWithPiAi();
+
   // One-time migration of legacy flat-format aliases to target groups.
   // TODO(#target-groups-cleanup): remove this after migration period.
   await configService.migrateLegacyTargetGroups();
+
+  // One-time migration: rewrite legacy model_type 'chat'/'responses' → 'text'.
+  await configService.migrateModelTypes();
 
   // Eagerly initialize OAuth auth manager so auth.json schema migration
   // runs during startup (instead of waiting for first OAuth request).
@@ -403,6 +412,7 @@ const start = async () => {
     const shutdown = async (signal: string) => {
       logger.info(`Received ${signal}, shutting down gracefully...`);
       quotaScheduler.stop();
+      await mcpProcessManager.stopAll();
       await fastify.close();
       const { closeDatabase } = await import('./db/client');
       await closeDatabase();

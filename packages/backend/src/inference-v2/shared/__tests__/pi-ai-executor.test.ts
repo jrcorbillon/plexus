@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import * as piAi from '@earendil-works/pi-ai';
+import * as piAi from '@earendil-works/pi-ai/compat';
 import { setConfigForTesting } from '../../../config';
 import { DebugManager } from '../../../services/debug-manager';
 import { enterRequestContext } from '../../../services/request-context';
@@ -83,7 +83,7 @@ describe('runPiAiExecutor streaming errors', () => {
       incomingApiType: 'responses',
       modelAlias: 'gpt-5.4',
       context: { messages: [] } as any,
-      streamOptions: {},
+      generationIntent: { reasoning: { source: 'client' } } as any,
       streaming: true,
       request: {
         body: {},
@@ -139,7 +139,7 @@ describe('runPiAiExecutor streaming errors', () => {
       incomingApiType: 'gemini',
       modelAlias: 'gpt-5.4',
       context: { messages: [] } as any,
-      streamOptions: {},
+      generationIntent: { reasoning: { source: 'client' } } as any,
       streaming: true,
       request: {
         body: {},

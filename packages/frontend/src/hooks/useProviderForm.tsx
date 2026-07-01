@@ -784,6 +784,11 @@ export function useProviderForm() {
       if (!options.authCookie || !(options.authCookie as string).trim())
         return 'Auth cookie is required for OpenCode Go quota checker';
     }
+    if (
+      quotaType === 'sakana' &&
+      (!options.sessionCookie || !(options.sessionCookie as string).trim())
+    )
+      return 'Session cookie is required for Sakana quota checker';
     return null;
   };
 

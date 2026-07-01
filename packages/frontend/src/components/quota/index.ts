@@ -6,6 +6,8 @@ export { RoutingRunQuotaConfig } from './RoutingRunQuotaConfig';
 export { CrofQuotaConfig } from './CrofQuotaConfig';
 export { ExeDevQuotaConfig } from './ExeDevQuotaConfig';
 export { HyperQuotaConfig } from './HyperQuotaConfig';
+export { SakanaQuotaConfig } from './SakanaQuotaConfig';
+export { ClineQuotaConfig } from './ClineQuotaConfig';
 export { CombinedBalancesCard } from './CombinedBalancesCard';
 export { CompactBalancesCard } from './CompactBalancesCard';
 export { CompactQuotasCard } from './CompactQuotasCard';

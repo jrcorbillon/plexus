@@ -144,9 +144,9 @@ This is still a beta. Please expect rough edges.
 
 - OAuth providers are not part of this beta path yet. Existing OAuth behavior still uses the older OAuth/pi-ai integration. Unifying OAuth with the new key-auth pi-ai executor is planned later.
 - Embeddings, transcriptions, speech, image generation, and image edits are not part of this work. Those APIs stay on the existing Transformer path because pi-ai does not support those surfaces.
-- Custom providers are entirely untested. Feedback is welcome, but please assume custom provider behavior may need fixes.
-- Custom pi-ai provider/model IDs may not work unless pi-ai's registry recognizes them.
-- Same-format passthrough is not used in the beta path. The beta path always parses the incoming request into a pi-ai Context and serializes the pi-ai result back to the client protocol.
+- Custom providers have now been tested and the known custom-provider fixes have been applied.
+- Custom pi-ai provider/model IDs are supported through the custom pi-ai registry configuration.
+- Same-format passthrough is intentionally not used in the beta path. The beta path always parses the incoming request into a pi-ai Context and serializes the pi-ai result back to the client protocol; this is the desired behavior.
 - Some provider-specific request fields may be dropped if they are not represented in pi-ai Context or ProviderStreamOptions.
 - URL image handling may not be equivalent across all formats/providers. Base64 image paths are the safer test case.
 - Anthropic-style cache-control annotations on multiple system blocks may not preserve exactly the same behavior because system content is normalized into pi-ai context.

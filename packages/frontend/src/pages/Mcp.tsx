@@ -22,6 +22,7 @@ import {
   Zap,
   ZapOff,
   Download,
+  Copy,
 } from 'lucide-react';
 import { Switch } from '../components/ui/Switch';
 import { clsx } from 'clsx';
@@ -31,9 +32,25 @@ import plexusAdminSkill from '../../../../.agents/skills/plexus-management/SKILL
   type: 'text',
 };
 
+const LOCAL_MCP_DEFAULT_PORT = 7345;
+
 const EMPTY_SERVER: McpServer = {
+  mode: 'remote_http',
   upstream_url: '',
   enabled: true,
+  headers: {},
+};
+
+const EMPTY_LOCAL_SERVER: McpServer = {
+  mode: 'local_http',
+  enabled: true,
+  launcher: 'bunx',
+  package: '',
+  args: ['--port', '{{PORT}}'],
+  env: {},
+  port: LOCAL_MCP_DEFAULT_PORT,
+  path: '/mcp',
+  startup_timeout_ms: 30000,
   headers: {},
 };
 
@@ -49,6 +66,9 @@ export const McpPage: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [headerKey, setHeaderKey] = useState('');
   const [headerValue, setHeaderValue] = useState('');
+  const [envKey, setEnvKey] = useState('');
+  const [envValue, setEnvValue] = useState('');
+  const [argsInput, setArgsInput] = useState((EMPTY_LOCAL_SERVER.args || []).join(' '));
 
   // Logs state
   const [logs, setLogs] = useState<McpLogRecord[]>([]);
@@ -157,12 +177,68 @@ export const McpPage: React.FC = () => {
     }
   };
 
+  const getNextLocalMcpPort = (): number => {
+    const usedPorts = new Set(
+      Object.entries(servers)
+        .filter(([name]) => name !== editingServerName)
+        .map(([, server]) => (server.mode === 'local_http' ? server.port : null))
+        .filter((port): port is number => typeof port === 'number')
+    );
+
+    let port = LOCAL_MCP_DEFAULT_PORT;
+    while (usedPorts.has(port) && port < 65535) {
+      port += 1;
+    }
+    return port;
+  };
+
+  const parseArguments = (input: string): string[] => {
+    const args: string[] = [];
+    let current = '';
+    let quote: 'single' | 'double' | null = null;
+    let escaping = false;
+
+    for (const char of input) {
+      if (escaping) {
+        current += char;
+        escaping = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaping = true;
+        continue;
+      }
+      if (char === '"' && quote !== 'single') {
+        quote = quote === 'double' ? null : 'double';
+        continue;
+      }
+      if (char === "'" && quote !== 'double') {
+        quote = quote === 'single' ? null : 'single';
+        continue;
+      }
+      if (/\s/.test(char) && quote === null) {
+        if (current) {
+          args.push(current);
+          current = '';
+        }
+        continue;
+      }
+      current += char;
+    }
+    if (escaping) current += '\\';
+    if (current) args.push(current);
+    return args;
+  };
+
   const handleAddNew = () => {
     setEditingServerName(null);
     setServerNameInput('');
     setEditingServer({ ...EMPTY_SERVER });
     setHeaderKey('');
     setHeaderValue('');
+    setEnvKey('');
+    setEnvValue('');
+    setArgsInput((EMPTY_LOCAL_SERVER.args || []).join(' '));
     setIsModalOpen(true);
   };
 
@@ -174,6 +250,13 @@ export const McpPage: React.FC = () => {
     setEditingServer({ ...server });
     setHeaderKey('');
     setHeaderValue('');
+    setEnvKey('');
+    setEnvValue('');
+    setArgsInput(
+      server.mode === 'local_http'
+        ? (server.args || []).join(' ')
+        : (EMPTY_LOCAL_SERVER.args || []).join(' ')
+    );
     setIsModalOpen(true);
   };
 
@@ -189,8 +272,15 @@ export const McpPage: React.FC = () => {
       );
       return;
     }
-    if (!editingServer.upstream_url || !editingServer.upstream_url.trim()) {
+    if (
+      editingServer.mode !== 'local_http' &&
+      (!editingServer.upstream_url || !editingServer.upstream_url.trim())
+    ) {
       toast.error('Upstream URL is required');
+      return;
+    }
+    if (editingServer.mode === 'local_http' && !editingServer.package.trim()) {
+      toast.error('Package name is required');
       return;
     }
 
@@ -199,14 +289,24 @@ export const McpPage: React.FC = () => {
     if (headerKey.trim() && headerValue.trim()) {
       finalHeaders[headerKey.trim()] = headerValue.trim();
     }
+    const finalEnv = editingServer.mode === 'local_http' ? { ...editingServer.env } : undefined;
+    if (finalEnv && envKey.trim()) {
+      finalEnv[envKey.trim()] = envValue;
+    }
 
     setIsSaving(true);
     try {
-      await api.saveMcpServer(nameToSave, {
-        upstream_url: editingServer.upstream_url,
-        enabled: editingServer.enabled,
-        headers: finalHeaders,
-      });
+      await api.saveMcpServer(
+        nameToSave,
+        editingServer.mode === 'local_http'
+          ? {
+              ...editingServer,
+              args: parseArguments(argsInput),
+              headers: finalHeaders,
+              env: finalEnv,
+            }
+          : { ...editingServer, headers: finalHeaders }
+      );
       await loadData();
       setIsModalOpen(false);
     } catch (e) {
@@ -288,6 +388,29 @@ export const McpPage: React.FC = () => {
     });
   };
 
+  const addEnv = () => {
+    if (editingServer.mode !== 'local_http' || !envKey.trim()) return;
+    setEditingServer({
+      ...editingServer,
+      env: {
+        ...editingServer.env,
+        [envKey.trim()]: envValue,
+      },
+    });
+    setEnvKey('');
+    setEnvValue('');
+  };
+
+  const removeEnv = (key: string) => {
+    if (editingServer.mode !== 'local_http') return;
+    const newEnv = { ...editingServer.env };
+    delete newEnv[key];
+    setEditingServer({
+      ...editingServer,
+      env: newEnv,
+    });
+  };
+
   const serverNames = Object.keys(servers);
   const logsTotalPages = Math.ceil(logsTotal / logsLimit);
   const logsCurrentPage = Math.floor(logsOffset / logsLimit) + 1;
@@ -339,6 +462,21 @@ export const McpPage: React.FC = () => {
     triggerDownload(plexusAdminSkill, 'SKILL.md', 'text/markdown');
   };
 
+  const mcpPathForServer = (name: string) => `/mcp/${name}`;
+
+  const handleCopyMcpPath = async (path: string) => {
+    if (!isClipboardAvailable()) {
+      toast.error('Copy requires HTTPS connection');
+      return;
+    }
+    const success = await copyToClipboard(path);
+    if (success) {
+      toast.success(`Copied ${path}`);
+    } else {
+      toast.error('Failed to copy path');
+    }
+  };
+
   return (
     <div className="flex flex-col min-h-full">
       <PageHeader
@@ -382,39 +520,6 @@ export const McpPage: React.FC = () => {
         <div className="flex flex-col gap-5">
           {/* Servers Config Card */}
           <Card title="MCP Servers">
-            {/* Plexus Management MCP — global enable/disable, always visible */}
-            <article className="rounded-md border border-primary/30 bg-primary/5 p-3 mb-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="truncate font-heading text-sm font-semibold text-text">
-                      Plexus Management MCP
-                    </span>
-                    <span className="shrink-0 rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-medium text-primary">
-                      ADMIN
-                    </span>
-                  </div>
-                  <div className="mt-1 break-all text-xs text-text-muted">
-                    /mcp/plexus — admin-only management endpoint
-                  </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Switch
-                    checked={mcpEnabled}
-                    onChange={(val) => handleToggleMcpEnabled(val)}
-                    size="sm"
-                  />
-                </div>
-              </div>
-              <div className="mt-3 rounded border border-border-glass bg-bg-glass px-2 py-1.5 text-xs">
-                <span className="text-text-muted">
-                  Toggle for the Plexus Management MCP only. When disabled, /mcp/plexus responds
-                  with HTTP 418, while configured gateway MCP routes under /mcp/:name continue to
-                  work.
-                </span>
-              </div>
-            </article>
-
             {serverNames.length === 0 ? (
               <div className="p-4 text-text-secondary text-center">
                 No MCP servers configured. Click "Add MCP Server" to create one.
@@ -444,7 +549,9 @@ export const McpPage: React.FC = () => {
                               </span>
                             </div>
                             <div className="mt-1 break-all text-xs text-text-muted">
-                              {server.upstream_url}
+                              {server.mode === 'local_http'
+                                ? `${server.launcher} ${server.package} → 127.0.0.1:${server.port}${server.path || '/mcp'}`
+                                : server.upstream_url}
                             </div>
                           </button>
                           <div className="flex shrink-0 items-center gap-2">
@@ -486,13 +593,13 @@ export const McpPage: React.FC = () => {
                           Name
                         </th>
                         <th className="px-4 py-3 text-left border-b border-border-glass bg-bg-hover font-semibold text-text-secondary text-[11px] uppercase tracking-wider">
-                          Upstream URL
+                          Upstream
+                        </th>
+                        <th className="px-4 py-3 text-left border-b border-border-glass bg-bg-hover font-semibold text-text-secondary text-[11px] uppercase tracking-wider">
+                          Path
                         </th>
                         <th className="px-4 py-3 text-left border-b border-border-glass bg-bg-hover font-semibold text-text-secondary text-[11px] uppercase tracking-wider">
                           Status
-                        </th>
-                        <th className="px-4 py-3 text-left border-b border-border-glass bg-bg-hover font-semibold text-text-secondary text-[11px] uppercase tracking-wider">
-                          Headers
                         </th>
                         <th
                           className="px-4 py-3 text-left border-b border-border-glass bg-bg-hover font-semibold text-text-secondary text-[11px] uppercase tracking-wider"
@@ -510,14 +617,28 @@ export const McpPage: React.FC = () => {
                           style={{ paddingLeft: '24px' }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div style={{ fontWeight: 600 }}>Plexus Management MCP</div>
-                            <span className="rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-medium text-primary">
-                              ADMIN
-                            </span>
+                            <div style={{ fontWeight: 600 }}>Plexus Management</div>
                           </div>
                         </td>
                         <td className="px-4 py-3 text-left border-b border-border-glass text-text-muted text-xs">
-                          /mcp/plexus — admin-only management endpoint
+                          —
+                        </td>
+                        <td className="px-4 py-3 text-left border-b border-border-glass text-text whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs">/mcp/plexus</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCopyMcpPath('/mcp/plexus');
+                              }}
+                              className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+                              title="Copy path"
+                              aria-label="Copy /mcp/plexus"
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-left border-b border-border-glass text-text">
                           <Switch
@@ -526,20 +647,14 @@ export const McpPage: React.FC = () => {
                             size="sm"
                           />
                         </td>
-                        <td className="px-4 py-3 text-left border-b border-border-glass text-text-muted text-xs">
-                          Disables /mcp/plexus only — gateway /mcp/:name routes still work
-                        </td>
                         <td
                           className="px-4 py-3 text-left border-b border-border-glass text-text"
                           style={{ paddingRight: '24px', textAlign: 'right' }}
-                        >
-                          —
-                        </td>
+                        />
                       </tr>
 
                       {serverNames.map((name) => {
                         const server = servers[name];
-                        const headerCount = server.headers ? Object.keys(server.headers).length : 0;
                         return (
                           <tr
                             key={name}
@@ -565,7 +680,26 @@ export const McpPage: React.FC = () => {
                                   whiteSpace: 'nowrap',
                                 }}
                               >
-                                {server.upstream_url}
+                                {server.mode === 'local_http'
+                                  ? `${server.launcher} ${server.package} → 127.0.0.1:${server.port}${server.path || '/mcp'}`
+                                  : server.upstream_url}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-left border-b border-border-glass text-text whitespace-nowrap">
+                              <div
+                                className="flex items-center gap-2"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <span className="font-mono text-xs">{mcpPathForServer(name)}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyMcpPath(mcpPathForServer(name))}
+                                  className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+                                  title="Copy path"
+                                  aria-label={`Copy ${mcpPathForServer(name)}`}
+                                >
+                                  <Copy size={13} />
+                                </button>
                               </div>
                             </td>
                             <td className="px-4 py-3 text-left border-b border-border-glass text-text">
@@ -576,9 +710,6 @@ export const McpPage: React.FC = () => {
                                   size="sm"
                                 />
                               </div>
-                            </td>
-                            <td className="px-4 py-3 text-left border-b border-border-glass text-text">
-                              {headerCount > 0 ? `${headerCount} header(s)` : '-'}
                             </td>
                             <td
                               className="px-4 py-3 text-left border-b border-border-glass text-text"
@@ -1024,14 +1155,169 @@ export const McpPage: React.FC = () => {
                 />
               )}
 
-              <Input
-                label="Upstream URL"
-                value={editingServer.upstream_url}
-                onChange={(e) =>
-                  setEditingServer({ ...editingServer, upstream_url: e.target.value })
-                }
-                placeholder="https://mcp.example.com/mcp"
-              />
+              <div>
+                <label className="mb-1 block text-sm font-medium text-text-secondary">
+                  Server Type
+                </label>
+                <select
+                  className="w-full rounded-md border border-border-glass bg-bg-surface px-3 py-2 text-sm text-text"
+                  value={editingServer.mode === 'local_http' ? 'local_http' : 'remote_http'}
+                  onChange={(e) => {
+                    if (e.target.value === 'local_http') {
+                      setArgsInput((EMPTY_LOCAL_SERVER.args || []).join(' '));
+                      setEditingServer({
+                        ...EMPTY_LOCAL_SERVER,
+                        enabled: editingServer.enabled,
+                        headers: editingServer.headers,
+                        port: getNextLocalMcpPort(),
+                      });
+                    } else {
+                      setEditingServer({
+                        ...EMPTY_SERVER,
+                        enabled: editingServer.enabled,
+                        headers: editingServer.headers,
+                      });
+                    }
+                  }}
+                >
+                  <option value="remote_http">Remote HTTP</option>
+                  <option value="local_http">Local HTTP</option>
+                </select>
+              </div>
+
+              {editingServer.mode === 'local_http' ? (
+                <>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-text-secondary">
+                      Launcher
+                    </label>
+                    <select
+                      className="w-full rounded-md border border-border-glass bg-bg-surface px-3 py-2 text-sm text-text"
+                      value={editingServer.launcher}
+                      onChange={(e) =>
+                        setEditingServer({
+                          ...editingServer,
+                          launcher: e.target.value as 'bunx' | 'uvx',
+                        })
+                      }
+                    >
+                      <option value="bunx">bunx</option>
+                      <option value="uvx">uvx</option>
+                    </select>
+                  </div>
+                  <Input
+                    label="Package"
+                    value={editingServer.package}
+                    onChange={(e) =>
+                      setEditingServer({ ...editingServer, package: e.target.value })
+                    }
+                    placeholder="@example/mcp-server"
+                  />
+                  <Input
+                    label="Arguments"
+                    value={argsInput}
+                    onChange={(e) => setArgsInput(e.target.value)}
+                    placeholder="--port {{PORT}}"
+                  />
+                  <p className="-mt-2 text-xs text-text-muted">
+                    Available interpolations: {'{{PORT}}'} for the configured port and {'{{HOST}}'}
+                    for 127.0.0.1.
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <Input
+                      label="Port"
+                      type="number"
+                      value={editingServer.port}
+                      onChange={(e) =>
+                        setEditingServer({
+                          ...editingServer,
+                          port: parseInt(e.target.value) || 7345,
+                        })
+                      }
+                    />
+                    <Input
+                      label="Path"
+                      value={editingServer.path ?? '/mcp'}
+                      onChange={(e) => setEditingServer({ ...editingServer, path: e.target.value })}
+                    />
+                    <Input
+                      label="Startup Timeout (ms)"
+                      type="number"
+                      value={editingServer.startup_timeout_ms || 30000}
+                      onChange={(e) =>
+                        setEditingServer({
+                          ...editingServer,
+                          startup_timeout_ms: parseInt(e.target.value) || 30000,
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="space-y-2 rounded-md border border-border-glass p-3">
+                    <label className="text-sm font-medium text-text-secondary">
+                      Environment Variables
+                    </label>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <div className="min-w-0 flex-1">
+                        <Input
+                          label="Env Key"
+                          value={envKey}
+                          onChange={(e) => setEnvKey(e.target.value)}
+                          placeholder="API_KEY"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <Input
+                          label="Env Value"
+                          value={envValue}
+                          onChange={(e) => setEnvValue(e.target.value)}
+                          placeholder="secret value"
+                        />
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={addEnv}
+                        className="w-full sm:w-auto"
+                      >
+                        <PlusCircle size={16} />
+                      </Button>
+                    </div>
+                    {editingServer.env && Object.keys(editingServer.env).length > 0 && (
+                      <div className="space-y-2">
+                        {Object.entries(editingServer.env).map(([key, value]) => (
+                          <div
+                            key={key}
+                            className="flex flex-col gap-2 p-2 bg-bg-hover rounded-md sm:flex-row sm:items-center"
+                          >
+                            <span className="min-w-0 flex-1 break-all font-mono text-xs">
+                              {key}
+                            </span>
+                            <span className="flex-1 font-mono text-xs text-text-secondary truncate">
+                              {value}
+                            </span>
+                            <button
+                              onClick={() => removeEnv(key)}
+                              className="p-1 hover:bg-bg-surface rounded"
+                            >
+                              <MinusCircle size={14} className="text-danger" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <Input
+                  label="Upstream URL"
+                  value={editingServer.upstream_url}
+                  onChange={(e) =>
+                    setEditingServer({ ...editingServer, upstream_url: e.target.value })
+                  }
+                  placeholder="https://mcp.example.com/mcp"
+                />
+              )}
 
               <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                 <div className="min-w-0 flex-1">

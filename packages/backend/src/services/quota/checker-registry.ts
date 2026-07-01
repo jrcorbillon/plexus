@@ -212,4 +212,6 @@ export async function loadAllCheckers(): Promise<void> {
   await import('./checkers/crof-checker');
   await import('./checkers/exedev-checker');
   await import('./checkers/hyper-checker');
+  await import('./checkers/sakana-checker');
+  await import('./checkers/cline-checker');
 }

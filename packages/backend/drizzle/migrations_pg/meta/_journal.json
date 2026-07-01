@@ -456,6 +456,41 @@
       "when": 1780638421594,
       "tag": "0064_add_api_key_beta",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1781712192210,
+      "tag": "0065_auto_mcp_local_server_support",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1782156631416,
+      "tag": "0066_add_pi_ai_custom_and_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1782276843904,
+      "tag": "0067_sakana_quota_checker",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1782437361106,
+      "tag": "0068_add_context_compaction",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1782852976170,
+      "tag": "0069_add_cline_quota_checker",
+      "breakpoints": true
     }
   ]
 }

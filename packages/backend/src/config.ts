@@ -4,7 +4,7 @@ import { DEFAULT_VISION_DESCRIPTION_PROMPT } from './utils/constants';
 import { isValidIpRule } from './utils/ip-match';
 import { resolveGpuParams, VALID_GPU_PROFILES } from '@plexus/shared';
 import type { ModelArchitecture } from '@plexus/shared';
-import { getModel } from '@earendil-works/pi-ai';
+import { getBuiltinModel } from '@earendil-works/pi-ai/providers/all';
 
 // --- Zod Schemas ---
 
@@ -186,6 +186,107 @@ export type MatchCondition = z.infer<typeof MatchConditionSchema>;
 export type ReasoningRewriteRule = z.infer<typeof ReasoningRewriteRuleSchema>;
 export type ReasoningRewriteOptions = z.infer<typeof ReasoningRewriteOptionsSchema>;
 
+// ─── pi-ai custom provider / model definitions (inference-v2) ─────────────────
+//
+// The beta (pi-ai) inference path resolves a pi-ai `Model` object for each
+// routed target. Most upstreams are in pi-ai's built-in registry, but two gaps
+// need filling without waiting for a pi-ai release:
+//
+//   1. Custom providers — a niche OpenAI/Anthropic/Gemini-compatible host that
+//      pi-ai doesn't know. We only need its wire `api` and optional `compat`
+//      overrides; everything else comes from the (inherited or custom) model.
+//
+//   2. Custom / inherited models — a model too new for the registry. Either
+//      `inherits` an existing registry model and deep-merges `overrides` (e.g.
+//      treat gpt-5.6 like gpt-5.5 with a bigger context window), or provides a
+//      full standalone spec.
+//
+// These are workspace-level registries (like user_quotas / mcp_servers),
+// reusable across any number of Plexus providers.
+
+/** pi-ai upstream wire API surfaces a custom provider/model can target. */
+const PiAiApiEnum = z.enum([
+  'openai-completions',
+  'openai-responses',
+  'openai-codex-responses',
+  'azure-openai-responses',
+  'anthropic-messages',
+  'google-generative-ai',
+  'google-generative-ai-vertex',
+]);
+
+/**
+ * Custom pi-ai provider definition. Keyed by an arbitrary provider id that
+ * Plexus providers reference via `pi_ai_provider`. `compat` is passed through
+ * to pi-ai verbatim (OpenAI/Anthropic compat shape; validated loosely here).
+ */
+export const PiAiCustomProviderSchema = z.object({
+  /** Upstream wire API this provider speaks. */
+  api: PiAiApiEnum,
+  /** Optional human label for the UI. */
+  display_name: z.string().optional(),
+  /** pi-ai compat overrides (OpenAICompletionsCompat / AnthropicMessagesCompat / …). */
+  compat: z.record(z.string(), z.any()).optional(),
+});
+
+/** Pricing block in a custom model spec (per-million-token rates). */
+const PiAiModelCostSchema = z.object({
+  input: z.number().min(0).default(0),
+  output: z.number().min(0).default(0),
+  cacheRead: z.number().min(0).default(0),
+  cacheWrite: z.number().min(0).default(0),
+});
+
+/**
+ * Custom pi-ai model definition. Keyed by an arbitrary model id that Plexus
+ * provider-models reference via `pi_ai_model_id`.
+ *
+ * A model is scoped to a single custom provider via `provider` (the custom
+ * provider id). Resolution only matches a custom model when its `provider`
+ * equals the `pi_ai_provider` of the referencing Plexus provider.
+ *
+ * Two modes (a definition may use one or both — `inherits` first, then the
+ * sibling fields deep-merge as overrides):
+ *   - `inherits`: clone a registry model `{ provider, model_id }` as the base.
+ *   - standalone: provide `api` + the model fields directly.
+ */
+export const PiAiCustomModelSchema = z.object({
+  /**
+   * The custom pi-ai provider id this model belongs to. The model only
+   * resolves for Plexus providers whose `pi_ai_provider` equals this id.
+   */
+  provider: z.string().min(1),
+  /** Clone this registry model as the base, then deep-merge the fields below. */
+  inherits: z
+    .object({
+      provider: z.string().min(1),
+      model_id: z.string().min(1),
+    })
+    .optional(),
+  /** Required when not inheriting (the base has no api to borrow). */
+  api: PiAiApiEnum.optional(),
+  /** Display name override. */
+  name: z.string().optional(),
+  /** Context window (tokens). */
+  contextWindow: z.number().int().positive().optional(),
+  /** Max output tokens. */
+  maxTokens: z.number().int().positive().optional(),
+  /** Whether the model reasons. */
+  reasoning: z.boolean().optional(),
+  /** pi-ai thinking level map (effort → provider value; null = unsupported). */
+  thinkingLevelMap: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+  /** Accepted input modalities. */
+  input: z.array(z.enum(['text', 'image'])).optional(),
+  /** Per-million-token pricing. */
+  cost: PiAiModelCostSchema.optional(),
+  /** pi-ai compat overrides (deep-merged onto the inherited model's compat). */
+  compat: z.record(z.string(), z.any()).optional(),
+});
+
+export type PiAiApi = z.infer<typeof PiAiApiEnum>;
+export type PiAiCustomProvider = z.infer<typeof PiAiCustomProviderSchema>;
+export type PiAiCustomModel = z.infer<typeof PiAiCustomModelSchema>;
+
 const ModelProviderConfigSchema = z.object({
   pricing: PricingSchema.default({
     source: 'simple',
@@ -193,7 +294,7 @@ const ModelProviderConfigSchema = z.object({
     output: 0,
   }),
   access_via: z.array(z.string()).optional(),
-  type: z.enum(['chat', 'responses', 'embeddings', 'transcriptions', 'speech', 'image']).optional(),
+  type: z.enum(['text', 'embeddings', 'transcriptions', 'speech', 'image']).optional(),
   extraBody: z.record(z.string(), z.any()).optional(),
   adapter: AdapterConfigSchema,
   maxConcurrency: z.number().int().positive().nullable().optional(),
@@ -353,6 +454,16 @@ const ExeDevQuotaCheckerOptionsSchema = z.object({
 
 const HyperQuotaCheckerOptionsSchema = z.object({
   endpoint: z.url().optional(),
+});
+
+const SakanaQuotaCheckerOptionsSchema = z.object({
+  sessionCookie: z.string().trim().min(1, 'Sakana session cookie is required'),
+  endpoint: z.string().url().optional(),
+});
+
+const ClineQuotaCheckerOptionsSchema = z.object({
+  apiKey: z.string().min(1, 'Cline API key is required'),
+  endpoint: z.string().url().optional(),
 });
 
 const ProviderQuotaCheckerSchema = z.discriminatedUnion('type', [
@@ -559,12 +670,49 @@ const ProviderQuotaCheckerSchema = z.discriminatedUnion('type', [
     id: z.string().trim().min(1).optional(),
     options: HyperQuotaCheckerOptionsSchema.optional().default({}),
   }),
+  z.object({
+    type: z.literal('sakana'),
+    enabled: z.boolean().default(true),
+    intervalMinutes: z.number().min(1).default(30),
+    id: z.string().trim().min(1).optional(),
+    options: SakanaQuotaCheckerOptionsSchema,
+  }),
+  z.object({
+    type: z.literal('cline'),
+    enabled: z.boolean().default(true),
+    intervalMinutes: z.number().min(1).default(30),
+    id: z.string().trim().min(1).optional(),
+    options: ClineQuotaCheckerOptionsSchema.optional(),
+  }),
 ]);
 
 const ModelAutosyncSchema = z.object({
   enabled: z.boolean().default(false),
   intervalMinutes: z.number().int().min(1).default(60),
 });
+
+const CompactionNativeSchema = z.object({
+  maxArrayItems: z.number().int().positive().optional(),
+  maxStringChars: z.number().int().positive().optional(),
+});
+const CompactionHeadroomSchema = z.object({
+  baseUrl: z.string().url().optional(),
+  apiKey: z.string().optional(),
+  targetRatio: z.number().min(0).max(1).nullable().optional(),
+  timeoutMs: z.number().int().min(100).max(60000).optional(),
+});
+export const CompactionOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  strategy: z.enum(['native', 'headroom']).optional(),
+  triggerRatio: z.number().min(0).max(1).optional(),
+  absoluteTriggerTokens: z.number().int().positive().nullable().optional(),
+  minTokens: z.number().int().min(0).optional(),
+  protectRecent: z.number().int().min(0).optional(),
+  native: CompactionNativeSchema.optional(),
+  headroom: CompactionHeadroomSchema.optional(),
+});
+export const CompactionConfigSchema = CompactionOverrideSchema;
+export type CompactionSettingsConfig = z.infer<typeof CompactionOverrideSchema>;
 
 export const ProviderConfigSchema = z
   .object({
@@ -610,6 +758,7 @@ export const ProviderConfigSchema = z
     stallWindowMs: z.number().int().min(3000).max(30000).nullable().optional(),
     stallGracePeriodMs: z.number().int().min(0).max(120000).nullable().optional(),
     pi_ai_provider: z.string().optional(),
+    compaction: CompactionOverrideSchema.optional(),
   })
   .refine((data) => !!data.api_key || isOAuthProviderConfig(data), {
     message: "'api_key' must be specified for provider",
@@ -769,15 +918,13 @@ export const ModelConfigSchema = z
     // previous turn of the same conversation (when still healthy and present
     // in the alias targets). Tracked in-memory only; see
     // services/sticky-session-manager.ts.
-    sticky_session: z.boolean().default(false).optional(),
+    sticky_session: z.boolean().default(true),
     // Advertised in GET /v1/models to inform clients of the preferred API surface(s)
     // for this alias, even if plexus can translate between them.
     preferred_api: z
       .array(z.enum(['chat_completions', 'messages', 'gemini', 'responses']))
       .optional(),
-    type: z
-      .enum(['chat', 'responses', 'embeddings', 'transcriptions', 'speech', 'image'])
-      .optional(),
+    type: z.enum(['text', 'embeddings', 'transcriptions', 'speech', 'image']).optional(),
     advanced: z.array(ModelBehaviorSchema).optional(),
     metadata: ModelMetadataSchema.optional(),
     // pi-ai model reference: when set, pi_options (compat) will be included in GET /v1/models
@@ -805,6 +952,7 @@ export const ModelConfigSchema = z
           .optional(),
       })
       .optional(),
+    compaction: CompactionOverrideSchema.optional(),
   })
   .transform((data) => {
     // Normalise legacy flat format to grouped format immediately.
@@ -857,11 +1005,30 @@ const QuotaConfigSchema = z.object({
   options: z.record(z.string(), z.any()).default({}),
 });
 
-export const McpServerConfigSchema = z.object({
+const RemoteHttpMcpServerConfigSchema = z.object({
+  mode: z.literal('remote_http').default('remote_http').optional(),
   upstream_url: z.string().url(),
   enabled: z.boolean().default(true),
   headers: z.record(z.string(), z.string()).optional(),
 });
+
+const LocalHttpMcpServerConfigSchema = z.object({
+  mode: z.literal('local_http'),
+  enabled: z.boolean().default(true),
+  launcher: z.enum(['bunx', 'uvx']),
+  package: z.string().trim().min(1),
+  args: z.array(z.string()).default([]).optional(),
+  env: z.record(z.string(), z.string()).default({}).optional(),
+  port: z.number().int().min(1).max(65535),
+  path: z.string().trim().min(1).default('/mcp').optional(),
+  startup_timeout_ms: z.number().int().min(1000).max(300000).default(30000).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+});
+
+export const McpServerConfigSchema = z.union([
+  LocalHttpMcpServerConfigSchema,
+  RemoteHttpMcpServerConfigSchema,
+]);
 
 const CooldownPolicySchema = z.object({
   initialMinutes: z.number().min(0.1).default(2),
@@ -904,6 +1071,10 @@ const RawPlexusConfigSchema = z
     backgroundExploration: BackgroundExplorationConfigSchema.optional(),
     mcp_servers: z.record(z.string(), McpServerConfigSchema).optional(),
     user_quotas: z.record(z.string(), QuotaDefinitionSchema).optional(),
+    // Workspace-level pi-ai custom provider / model registries (inference-v2).
+    pi_ai_custom_providers: z.record(z.string(), PiAiCustomProviderSchema).optional(),
+    pi_ai_custom_models: z.record(z.string(), PiAiCustomModelSchema).optional(),
+    compaction: CompactionOverrideSchema.optional(),
   })
   .passthrough();
 
@@ -1051,9 +1222,34 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
   }
 
   // Startup registry validation: warn (non-fatally) for any configured
-  // (pi_ai_provider, pi_ai_model_id) pair that is not in the pi-ai registry.
-  // getModel() throws on unknown pairs — downgrade to a warning so that new or
-  // unreleased model IDs don't prevent Plexus from starting.
+  // (pi_ai_provider, pi_ai_model_id) pair that resolves neither via the custom
+  // registries nor the built-in pi-ai registry. getModel() returns undefined
+  // for unknown pairs; this is a warning (not fatal) so new/unreleased model IDs
+  // or in-progress custom defs don't prevent Plexus from starting.
+  const customModels = config.pi_ai_custom_models ?? {};
+  const customProviders = config.pi_ai_custom_providers ?? {};
+  // getModel may return undefined (pi-ai 0.79.x) or throw (older versions /
+  // mocked) for unknown pairs — treat both as "not found".
+  const registryHas = (provider: string, modelId: string): boolean => {
+    try {
+      return getBuiltinModel(provider as any, modelId as any) != null;
+    } catch {
+      return false;
+    }
+  };
+  const piPairResolves = (provider: string, modelId: string): boolean => {
+    // Custom model: resolves if standalone (has api) or its inheritance base exists.
+    const compoundKey = modelId.includes(':') ? modelId : `${provider}:${modelId}`;
+    const cm = customModels[compoundKey] ?? customModels[modelId];
+    if (cm && cm.provider === provider) {
+      if (cm.inherits) return registryHas(cm.inherits.provider, cm.inherits.model_id);
+      return cm.api != null;
+    }
+    // Custom provider: resolves (supplies api/compat; base may be a skeleton).
+    if (customProviders[provider]) return true;
+    // Built-in registry.
+    return registryHas(provider, modelId);
+  };
   for (const [providerId, providerConfig] of Object.entries(resolvedProviders)) {
     const pc = providerConfig as ProviderConfig;
     if (!pc.pi_ai_provider) continue;
@@ -1063,14 +1259,12 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
     )) {
       const piAiModelId = modelCfg.pi_ai_model_id;
       if (!piAiModelId) continue;
-      try {
-        getModel(pc.pi_ai_provider as any, piAiModelId as any);
-      } catch {
+      if (!piPairResolves(pc.pi_ai_provider, piAiModelId)) {
         logger.warn(
           `pi-ai registry: provider "${providerId}" model "${modelName}" references ` +
             `pi_ai_provider="${pc.pi_ai_provider}" pi_ai_model_id="${piAiModelId}" ` +
-            `which is not in the pi-ai model registry. The beta inference path will ` +
-            `skip this provider/model combination.`
+            `which resolves via neither the custom registries nor the pi-ai model ` +
+            `registry. The beta inference path will skip this provider/model combination.`
         );
       }
     }

@@ -129,6 +129,22 @@ properties:
       When enabled, multi-turn conversations prefer the same provider/model
       from the previous turn (when still healthy) for better prompt-cache
       hit rates.
+  max_attempts:
+    type: integer
+    minimum: 1
+    maximum: 10
+    default: 1
+    description: >
+      Number of full alias retry rounds when all targets fail in a round.
+      Each round re-resolves candidates.
+  retry_delay_seconds:
+    type: integer
+    minimum: 0
+    maximum: 300
+    default: 0
+    description: >
+      Fixed wait in seconds before starting each subsequent retry round.
+      No delay before the first round.
   metadata:
     description: >
       Optional reference to an external model catalog entry. When configured,

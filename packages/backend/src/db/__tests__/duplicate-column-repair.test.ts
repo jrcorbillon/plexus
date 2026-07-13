@@ -9,7 +9,7 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const SQLITE_MIGRATIONS_DIR = path.join(moduleDir, '../../../drizzle/migrations');
 const ALIAS_RETRY_MIGRATION_TAG = '0054_add_alias_retry_rounds';
 
-describe('SQLite duplicate column migration repair', () => {
+describe('SQLite idempotent migrations', () => {
   beforeEach(async () => {
     await closeDatabase();
     process.env.DATABASE_URL = process.env.PLEXUS_TEST_DB_URL ?? process.env.DATABASE_URL;
@@ -21,7 +21,7 @@ describe('SQLite duplicate column migration repair', () => {
     await closeDatabase();
   });
 
-  it('repairs when max_attempts already exists but migration is untracked', async () => {
+  it('continues when max_attempts already exists but migration is untracked', async () => {
     if (getCurrentDialect() !== 'sqlite') {
       return;
     }

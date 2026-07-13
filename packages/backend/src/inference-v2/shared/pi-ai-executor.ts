@@ -33,7 +33,8 @@ import type {
 } from '@earendil-works/pi-ai';
 import type { FastifyRequest } from 'fastify';
 
-import { Router } from '../../services/router';
+import { Router, resolveCanonicalModel } from '../../services/router';
+import { getAliasRetryPolicy, waitForRetryRound } from '../../services/alias-retry-policy';
 import type { RouteResult } from '../../services/router';
 import { CooldownManager } from '../../services/cooldown-manager';
 import { ConcurrencyTracker } from '../../services/concurrency-tracker';
@@ -182,6 +183,7 @@ function buildNoBetaCandidatesError(): Error {
 
 interface RetryAttemptRecord {
   index: number;
+  round?: number;
   provider: string;
   model: string;
   apiType?: string;
@@ -195,10 +197,12 @@ function appendSkippedAttempt(
   history: RetryAttemptRecord[],
   route: RouteResult,
   reason: string,
-  apiType?: string
+  apiType?: string,
+  round?: number
 ): void {
   history.push({
     index: history.length + 1,
+    round,
     provider: route.provider,
     model: route.model,
     apiType,
@@ -211,10 +215,12 @@ function appendSkippedAttempt(
 function appendSuccessAttempt(
   history: RetryAttemptRecord[],
   route: RouteResult,
-  apiType?: string
+  apiType?: string,
+  round?: number
 ): void {
   history.push({
     index: history.length + 1,
+    round,
     provider: route.provider,
     model: route.model,
     apiType,
@@ -229,12 +235,14 @@ function appendFailureAttempt(
   route: RouteResult,
   error: any,
   apiType?: string,
-  retryable?: boolean
+  retryable?: boolean,
+  round?: number
 ): void {
   const statusCode = error?.routingContext?.statusCode ?? error?.status ?? error?.statusCode;
   const reason = extractPiAiErrorMessage(error) ?? error?.message ?? 'Unknown error';
   history.push({
     index: history.length + 1,
+    round,
     provider: route.provider,
     model: route.model,
     apiType,
@@ -427,335 +435,400 @@ export async function runPiAiExecutor<TResponse>(
   // e.g. "gpt-5:high" routes as "gpt-5" with a fallback intent of effort=high.
   const { alias: routingAlias, intent: suffixIntent } = splitReasoningSuffix(modelAlias);
 
-  // ── Resolve candidates ────────────────────────────────────────────────────
-  let candidates = await Router.resolveCandidates(routingAlias, incomingApiType);
-  if (candidates.length === 0) {
-    try {
-      candidates = [await Router.resolve(routingAlias, incomingApiType)];
-    } catch {
-      throw buildNoBetaCandidatesError();
-    }
-  }
+  // ── Alias retry policy ────────────────────────────────────────────────────
+  const config = getConfig();
+  const { canonicalModel } = resolveCanonicalModel(config, routingAlias);
+  const { maxAttempts, retryDelaySeconds } = getAliasRetryPolicy(config, canonicalModel);
 
-  // ── Apply key-access policy ───────────────────────────────────────────────
-  const policyReq: PolicyRequest = {
-    model: routingAlias,
-    metadata: (request.body as any)?.metadata,
-  };
-  candidates = applyKeyAccessPolicy(policyReq, candidates, incomingApiType);
-
-  // ── Filter to beta-compatible candidates ─────────────────────────────────
-  // A candidate is beta-compatible when both pi-ai hints are present AND the
-  // (provider, modelId) pair resolves to a pi-ai Model — via the custom
-  // registries or the built-in registry. resolvePiAiModel returns null (never
-  // throws) for unknown pairs, so a null check is the correct gate.
-  const betaCandidates = candidates.filter((c) => {
-    const piAiProvider = (c.config as any).pi_ai_provider as string | undefined;
-    const piAiModelId = (c.modelConfig as any)?.pi_ai_model_id as string | undefined;
-    if (!piAiProvider || !piAiModelId) return false;
-    return resolvePiAiModel(piAiProvider, piAiModelId) != null;
-  });
-
-  if (betaCandidates.length === 0) {
-    throw buildNoBetaCandidatesError();
-  }
-
-  // ── Failover loop ─────────────────────────────────────────────────────────
   const retryHistory: RetryAttemptRecord[] = [];
   const attemptedProviders: string[] = [];
   let lastError: any = null;
-  const failoverEnabled = betaCandidates.length > 1;
   const compactionMemo = new Map<string, CompactionResult>();
 
-  for (let i = 0; i < betaCandidates.length; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const route = betaCandidates[i]!;
-    const isLast = i === betaCandidates.length - 1;
-
-    // ── Abort check ────────────────────────────────────────────────────────
-    if (signal?.aborted) throw buildCancelledError(signal);
-
-    // ── Per-attempt timeout ────────────────────────────────────────────────
-    const attemptTimeout = createAttemptTimeout(signal, route.config.timeoutMs ?? null);
-
-    // ── Cooldown check ─────────────────────────────────────────────────────
-    const cooldown = CooldownManager.getInstance();
-    const healthy = await cooldown.isProviderHealthy(route.provider, route.model);
-    if (!healthy) {
-      attemptTimeout.cleanup();
-      appendSkippedAttempt(retryHistory, route, 'Provider in cooldown', incomingApiType);
-      continue;
-    }
-
-    // ── Context compaction (opt-in per alias/provider/global) ──────────────
-    // Runs before force-limit enforcement so a borderline-oversized request can
-    // be rescued by compaction before it would be rejected. Fail-open: on any
-    // error the original context is returned. Per-candidate, memoized.
-    const compaction = await compactContextForSend(
-      context,
-      route,
-      modelAlias,
-      compactionMemo,
-      attemptTimeout.signal
+  roundLoop: for (let round = 0; round < maxAttempts; round++) {
+    await waitForRetryRound(
+      round,
+      retryDelaySeconds,
+      signal,
+      signal ? () => buildCancelledError(signal) : undefined
     );
-    const sendContext = compaction.compacted ? compaction.context : context;
+    const currentRetryRound = round + 1;
 
-    // ── Force-limit enforcement (opt-in per alias) ─────────────────────────
-    // Mirrors dispatcher.ts:384-394. Checked AFTER cooldown and BEFORE
-    // acquiring a concurrency slot, so a thrown ContextLengthExceededError
-    // (client-side; failover won't help) never leaks an acquired slot.
-    const aliasForLimit = route.canonicalModel
-      ? getConfig().models?.[route.canonicalModel]
-      : undefined;
-    try {
-      enforceContextLimitForRoute(
-        sendContext,
-        route,
-        aliasForLimit,
-        generationIntent.maxTokens,
-        incomingApiType
+    if (round > 0) {
+      logger.warn(
+        `Failover: retry round ${currentRetryRound}/${maxAttempts} for ${modelAlias} (delay ${retryDelaySeconds}s)`
       );
-    } catch (limitErr) {
-      attemptTimeout.cleanup();
-      appendFailureAttempt(retryHistory, route, limitErr, incomingApiType, false);
-      throw limitErr;
+      // Allow retry rounds to re-attempt targets cooled down in earlier rounds of this request
+      const cooldownManager = CooldownManager.getInstance();
+      for (const key of attemptedProviders) {
+        const slash = key.indexOf('/');
+        if (slash <= 0) continue;
+        await cooldownManager.clearCooldown(key.slice(0, slash), key.slice(slash + 1));
+      }
     }
 
-    // ── Concurrency acquire ────────────────────────────────────────────────
-    const concurrency = ConcurrencyTracker.getInstance();
-    const acquired = concurrency.acquire(route.provider, route.model);
-    if (!acquired) {
-      attemptTimeout.cleanup();
-      appendSkippedAttempt(retryHistory, route, 'Concurrency limit reached', incomingApiType);
-      continue;
+    // ── Resolve candidates ────────────────────────────────────────────────────
+    let candidates = await Router.resolveCandidates(routingAlias, incomingApiType);
+    if (candidates.length === 0) {
+      try {
+        candidates = [await Router.resolve(routingAlias, incomingApiType)];
+      } catch {
+        if (round < maxAttempts - 1) continue roundLoop;
+        throw buildNoBetaCandidatesError();
+      }
     }
 
-    // ── Build pi-ai model (defensive check — filter should have removed invalids) ──
-    const piAiProvider = (route.config as any).pi_ai_provider as string;
-    const piAiModelId = (route.modelConfig as any)?.pi_ai_model_id as string;
-    if (!piAiProvider || !piAiModelId) {
-      concurrency.release(route.provider, route.model);
-      attemptTimeout.cleanup();
-      const err = new Error('Missing pi_ai_provider or pi_ai_model_id on route config') as any;
-      err.routingContext = { statusCode: 400, code: 'missing_pi_ai_hint' };
-      throw err;
-    }
+    // ── Apply key-access policy ───────────────────────────────────────────────
+    const policyReq: PolicyRequest = {
+      model: routingAlias,
+      metadata: (request.body as any)?.metadata,
+    };
+    candidates = applyKeyAccessPolicy(policyReq, candidates, incomingApiType);
 
-    const piModel = buildPiAiModel(route.config, piAiProvider, piAiModelId, incomingApiType);
-    if (!piModel) {
-      // Should not happen (beta filter resolves the same way) but fail closed.
-      concurrency.release(route.provider, route.model);
-      attemptTimeout.cleanup();
-      const err = new Error(
-        `pi-ai model could not be resolved for ${piAiProvider}/${piAiModelId}`
-      ) as any;
-      err.routingContext = { statusCode: 400, code: 'unresolved_pi_ai_model' };
-      throw err;
-    }
-
-    // ── Debug: set provider for this request ──────────────────────────────
-    debug.setProviderForRequest(requestId, route.provider);
-
-    // ── Emit routing update ───────────────────────────────────────────────
-    usageStorage.emitUpdatedAsync({
-      requestId,
-      provider: route.provider,
-      selectedModelName: route.model,
-      canonicalModelName: route.canonicalModel ?? null,
+    // ── Filter to beta-compatible candidates ─────────────────────────────────
+    // A candidate is beta-compatible when both pi-ai hints are present AND the
+    // (provider, modelId) pair resolves to a pi-ai Model — via the custom
+    // registries or the built-in registry. resolvePiAiModel returns null (never
+    // throws) for unknown pairs, so a null check is the correct gate.
+    const betaCandidates = candidates.filter((c) => {
+      const piAiProvider = (c.config as any).pi_ai_provider as string | undefined;
+      const piAiModelId = (c.modelConfig as any)?.pi_ai_model_id as string | undefined;
+      if (!piAiProvider || !piAiModelId) return false;
+      return resolvePiAiModel(piAiProvider, piAiModelId) != null;
     });
 
-    attemptedProviders.push(`${route.provider}/${route.model}`);
+    if (betaCandidates.length === 0) {
+      if (round < maxAttempts - 1) continue roundLoop;
+      throw buildNoBetaCandidatesError();
+    }
 
-    // ── Assemble ProviderStreamOptions ────────────────────────────────────
-    const bodyHasSignal =
-      generationIntent.reasoning.effort != null ||
-      generationIntent.reasoning.budgetTokens != null ||
-      generationIntent.reasoning.enabled != null;
-    const chosenReasoning = bodyHasSignal
-      ? generationIntent.reasoning
-      : (suffixIntent ?? generationIntent.reasoning);
-    const effectiveGeneration: GenerationIntent = {
-      ...generationIntent,
-      reasoning: chosenReasoning,
-    };
-    const generationOpts = buildGenerationOptions(piModel as any, effectiveGeneration);
-    const callOptions: ProviderStreamOptions = {
-      ...generationOpts,
-      ...(toolChoice != null ? { toolChoice } : {}),
-      ...(parallelToolCalls != null ? { parallelToolCalls } : {}),
-      apiKey: route.config.api_key,
-      headers: route.config.headers,
-      signal: attemptTimeout.signal,
-      onPayload: (payload: unknown) => {
-        // Run within the debug requestId context so the fetch tap can correlate
-        debugRequestIdStorage.run(requestId, () => {
-          debug.addTransformedRequest(requestId, payload);
-        });
-        return undefined;
-      },
-    };
+    // ── Failover loop ─────────────────────────────────────────────────────────
+    const failoverEnabled = betaCandidates.length > 1;
 
-    // ── Stall config ──────────────────────────────────────────────────────
-    // Per-provider stallTtfbMs (ms) takes precedence; fall back to global
-    // stall.ttfbSeconds (seconds, so multiply by 1000).
-    const globalStallTtfbMs =
-      getConfig().stall?.ttfbSeconds != null ? getConfig().stall!.ttfbSeconds! * 1000 : null;
-    const stallTtfbMs: number | null = (route.config as any).stallTtfbMs ?? globalStallTtfbMs;
-    const stallCooldownEnabled: boolean = route.config.stall_cooldown !== false;
+    targetLoop: for (let i = 0; i < betaCandidates.length; i++) {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const route = betaCandidates[i]!;
+      const isLast = i === betaCandidates.length - 1;
 
-    // Compaction metadata surfaced as x-plexus-compaction-* headers on BOTH the
-    // non-streaming and streaming paths.
-    const compactionMeta = compaction.compacted
-      ? {
-          strategy: compaction.strategy,
-          tokensBefore: compaction.tokensBefore,
-          tokensAfter: compaction.tokensAfter,
-        }
-      : undefined;
+      // ── Abort check ──────────────────────────────────────────────────────────
+      if (signal?.aborted) throw buildCancelledError(signal);
 
-    try {
-      if (!streaming) {
-        // ── Non-streaming ────────────────────────────────────────────────
-        const message = await debugRequestIdStorage.run(requestId, () =>
-          piAiModels.complete(toDispatchModel(piModel as any), sendContext, callOptions)
-        );
+      // ── Per-attempt timeout ──────────────────────────────────────────────────
+      const attemptTimeout = createAttemptTimeout(signal, route.config.timeoutMs ?? null);
 
-        cooldown.markProviderSuccess(route.provider, route.model);
-        appendSuccessAttempt(retryHistory, route, incomingApiType);
-        concurrency.release(route.provider, route.model);
+      // ── Cooldown check ───────────────────────────────────────────────────────
+      const cooldown = CooldownManager.getInstance();
+      const healthy = await cooldown.isProviderHealthy(route.provider, route.model);
+      if (!healthy) {
         attemptTimeout.cleanup();
-
-        // ── Build usage record ─────────────────────────────────────────
-        const ttftMs = consumeTtfb(requestId);
-        const usageData = buildUsageFromMessage(message, piModel as any, startTime, ttftMs, route);
-        const usageRecord = {
-          requestId,
-          date: new Date().toISOString(),
-          sourceIp,
-          apiKey: keyName ?? null,
-          attribution,
-          incomingApiType,
-          provider: route.provider,
-          attemptCount: i + 1,
-          retryHistory: retryHistory.length > 0 ? JSON.stringify(retryHistory) : null,
-          incomingModelAlias: modelAlias,
-          canonicalModelName: route.canonicalModel ?? null,
-          selectedModelName: route.model,
-          finalAttemptProvider: route.provider,
-          finalAttemptModel: route.model,
-          allAttemptedProviders: attemptedProviders.join(', '),
-          outgoingApiType: piModel.api,
-          isStreamed: false,
-          responseStatus: 'success',
-          costSource: 'pi-ai',
-          toolsDefined: toolsDefined ?? null,
-          messageCount: messageCount ?? null,
-          parallelToolCallsEnabled: parallelToolCalls ?? null,
-          startTime,
-          costMetadata: null,
-          tokensReasoning: null,
-          ...usageData,
-        };
-
-        debug.addTransformedResponse(requestId, message);
-        debug.addTransformedResponseSnapshot(requestId, message);
-        await usageStorage.saveRequest(usageRecord as any);
-        await usageStorage.updatePerformanceMetrics(
-          route.provider,
-          route.model,
-          route.canonicalModel ?? null,
-          null,
-          usageData.tokensOutput > 0 ? usageData.tokensOutput : null,
-          usageData.durationMs,
-          requestId
-        );
-        if (quotaEnforcer) await recordQuotaUsage(keyName, usageRecord, quotaEnforcer);
-        debug.flush(requestId);
-
-        await onSuccess?.(message);
-
-        return {
-          response: serializeMessage(message),
-          compaction: compactionMeta,
-        };
-      } else {
-        // ── Streaming ────────────────────────────────────────────────────
-        const eventStream = await debugRequestIdStorage.run(requestId, () =>
-          piAiModels.stream(toDispatchModel(piModel as any), sendContext, callOptions)
-        );
-
-        // Build and return the SSE generator — the generator owns
-        // release, timeout cleanup, usage, quota, debug flush.
-        const gen = buildSSEGenerator({
-          requestId,
-          eventStream,
-          route,
-          piModel: piModel as any,
-          attemptTimeout,
-          stallTtfbMs,
-          stallCooldownEnabled,
-          cooldown,
-          concurrency,
-          usageStorage,
-          quotaEnforcer,
-          keyName,
-          sourceIp,
-          attribution,
-          incomingApiType,
-          modelAlias,
-          attemptedProviders,
-          attemptCount: i + 1,
+        appendSkippedAttempt(
           retryHistory,
-          startTime,
-          toolsDefined: toolsDefined ?? null,
-          messageCount: messageCount ?? null,
-          parallelToolCalls: parallelToolCalls ?? null,
-          debug,
-          onSuccess,
-          serializeChunks,
-        });
-
-        return { stream: gen, compaction: compactionMeta };
-      }
-    } catch (err: any) {
-      const effectiveErr = attemptTimeout.isTimedOut() ? buildTimeoutError() : err;
-
-      // Clean up any TTFB entry that wasn't consumed (non-streaming error path)
-      consumeTtfb(requestId);
-
-      if (signal?.aborted) {
-        concurrency.release(route.provider, route.model);
-        attemptTimeout.cleanup();
-        throw buildCancelledError(signal);
-      }
-
-      // Mark cooldown
-      if ((effectiveErr as any)?.isStallError) {
-        if (stallCooldownEnabled) {
-          cooldown.markProviderStallFailure(route.provider, route.model, effectiveErr.message);
-        }
-      } else {
-        cooldown.markProviderFailure(route.provider, route.model);
-      }
-
-      concurrency.release(route.provider, route.model);
-      attemptTimeout.cleanup();
-
-      const canRetry = failoverEnabled && !isLast && isRetryable(effectiveErr, signal);
-      appendFailureAttempt(retryHistory, route, effectiveErr, incomingApiType, canRetry);
-
-      if (canRetry) {
-        if (usageStorage) {
-          usageStorage
-            .saveError(requestId, effectiveErr, { apiType: incomingApiType })
-            .catch(() => {});
-        }
-        lastError = effectiveErr;
+          route,
+          'Provider in cooldown',
+          incomingApiType,
+          currentRetryRound
+        );
         continue;
       }
 
-      lastError = effectiveErr;
-      break;
+      // ── Context compaction (opt-in per alias/provider/global) ──────────────
+      // Runs before force-limit enforcement so a borderline-oversized request can
+      // be rescued by compaction before it would be rejected. Fail-open: on any
+      // error the original context is returned. Per-candidate, memoized.
+      const compaction = await compactContextForSend(
+        context,
+        route,
+        modelAlias,
+        compactionMemo,
+        attemptTimeout.signal
+      );
+      const sendContext = compaction.compacted ? compaction.context : context;
+
+      // ── Force-limit enforcement (opt-in per alias) ─────────────────────────
+      // Mirrors dispatcher.ts:384-394. Checked AFTER cooldown and BEFORE
+      // acquiring a concurrency slot, so a thrown ContextLengthExceededError
+      // (client-side; failover won't help) never leaks an acquired slot.
+      const aliasForLimit = route.canonicalModel
+        ? getConfig().models?.[route.canonicalModel]
+        : undefined;
+      try {
+        enforceContextLimitForRoute(
+          sendContext,
+          route,
+          aliasForLimit,
+          generationIntent.maxTokens,
+          incomingApiType
+        );
+      } catch (limitErr) {
+        attemptTimeout.cleanup();
+        appendFailureAttempt(
+          retryHistory,
+          route,
+          limitErr,
+          incomingApiType,
+          false,
+          currentRetryRound
+        );
+        throw limitErr;
+      }
+
+      // ── Concurrency acquire ────────────────────────────────────────────────
+      const concurrency = ConcurrencyTracker.getInstance();
+      const acquired = concurrency.acquire(route.provider, route.model);
+      if (!acquired) {
+        attemptTimeout.cleanup();
+        appendSkippedAttempt(
+          retryHistory,
+          route,
+          'Concurrency limit reached',
+          incomingApiType,
+          currentRetryRound
+        );
+        continue;
+      }
+
+      // ── Build pi-ai model (defensive check — filter should have removed invalids) ──
+      const piAiProvider = (route.config as any).pi_ai_provider as string;
+      const piAiModelId = (route.modelConfig as any)?.pi_ai_model_id as string;
+      if (!piAiProvider || !piAiModelId) {
+        concurrency.release(route.provider, route.model);
+        attemptTimeout.cleanup();
+        const err = new Error('Missing pi_ai_provider or pi_ai_model_id on route config') as any;
+        err.routingContext = { statusCode: 400, code: 'missing_pi_ai_hint' };
+        throw err;
+      }
+
+      const piModel = buildPiAiModel(route.config, piAiProvider, piAiModelId, incomingApiType);
+      if (!piModel) {
+        // Should not happen (beta filter resolves the same way) but fail closed.
+        concurrency.release(route.provider, route.model);
+        attemptTimeout.cleanup();
+        const err = new Error(
+          `pi-ai model could not be resolved for ${piAiProvider}/${piAiModelId}`
+        ) as any;
+        err.routingContext = { statusCode: 400, code: 'unresolved_pi_ai_model' };
+        throw err;
+      }
+
+      // ── Debug: set provider for this request ──────────────────────────────
+      debug.setProviderForRequest(requestId, route.provider);
+
+      // ── Emit routing update ───────────────────────────────────────────────
+      usageStorage.emitUpdatedAsync({
+        requestId,
+        provider: route.provider,
+        selectedModelName: route.model,
+        canonicalModelName: route.canonicalModel ?? null,
+      });
+
+      attemptedProviders.push(`${route.provider}/${route.model}`);
+
+      // ── Assemble ProviderStreamOptions ────────────────────────────────────
+      const bodyHasSignal =
+        generationIntent.reasoning.effort != null ||
+        generationIntent.reasoning.budgetTokens != null ||
+        generationIntent.reasoning.enabled != null;
+      const chosenReasoning = bodyHasSignal
+        ? generationIntent.reasoning
+        : (suffixIntent ?? generationIntent.reasoning);
+      const effectiveGeneration: GenerationIntent = {
+        ...generationIntent,
+        reasoning: chosenReasoning,
+      };
+      const generationOpts = buildGenerationOptions(piModel as any, effectiveGeneration);
+      const callOptions: ProviderStreamOptions = {
+        ...generationOpts,
+        ...(toolChoice != null ? { toolChoice } : {}),
+        ...(parallelToolCalls != null ? { parallelToolCalls } : {}),
+        apiKey: route.config.api_key,
+        headers: route.config.headers,
+        signal: attemptTimeout.signal,
+        onPayload: (payload: unknown) => {
+          // Run within the debug requestId context so the fetch tap can correlate
+          debugRequestIdStorage.run(requestId, () => {
+            debug.addTransformedRequest(requestId, payload);
+          });
+          return undefined;
+        },
+      };
+
+      // ── Stall config ──────────────────────────────────────────────────────
+      // Per-provider stallTtfbMs (ms) takes precedence; fall back to global
+      // stall.ttfbSeconds (seconds, so multiply by 1000).
+      const globalStallTtfbMs =
+        getConfig().stall?.ttfbSeconds != null ? getConfig().stall!.ttfbSeconds! * 1000 : null;
+      const stallTtfbMs: number | null = (route.config as any).stallTtfbMs ?? globalStallTtfbMs;
+      const stallCooldownEnabled: boolean = route.config.stall_cooldown !== false;
+
+      // Compaction metadata surfaced as x-plexus-compaction-* headers on BOTH the
+      // non-streaming and streaming paths.
+      const compactionMeta = compaction.compacted
+        ? {
+            strategy: compaction.strategy,
+            tokensBefore: compaction.tokensBefore,
+            tokensAfter: compaction.tokensAfter,
+          }
+        : undefined;
+
+      try {
+        if (!streaming) {
+          // ── Non-streaming ────────────────────────────────────────────────
+          const message = await debugRequestIdStorage.run(requestId, () =>
+            piAiModels.complete(toDispatchModel(piModel as any), sendContext, callOptions)
+          );
+
+          cooldown.markProviderSuccess(route.provider, route.model);
+          appendSuccessAttempt(retryHistory, route, incomingApiType, currentRetryRound);
+          concurrency.release(route.provider, route.model);
+          attemptTimeout.cleanup();
+
+          // ── Build usage record ─────────────────────────────────────────
+          const ttftMs = consumeTtfb(requestId);
+          const usageData = buildUsageFromMessage(message, piModel as any, startTime, ttftMs, route);
+          const usageRecord = {
+            requestId,
+            date: new Date().toISOString(),
+            sourceIp,
+            apiKey: keyName ?? null,
+            attribution,
+            incomingApiType,
+            provider: route.provider,
+            attemptCount: i + 1,
+            retryHistory: retryHistory.length > 0 ? JSON.stringify(retryHistory) : null,
+            incomingModelAlias: modelAlias,
+            canonicalModelName: route.canonicalModel ?? null,
+            selectedModelName: route.model,
+            finalAttemptProvider: route.provider,
+            finalAttemptModel: route.model,
+            allAttemptedProviders: attemptedProviders.join(', '),
+            outgoingApiType: piModel.api,
+            isStreamed: false,
+            responseStatus: 'success',
+            costSource: 'pi-ai',
+            toolsDefined: toolsDefined ?? null,
+            messageCount: messageCount ?? null,
+            parallelToolCallsEnabled: parallelToolCalls ?? null,
+            startTime,
+            costMetadata: null,
+            tokensReasoning: null,
+            ...usageData,
+          };
+
+          debug.addTransformedResponse(requestId, message);
+          debug.addTransformedResponseSnapshot(requestId, message);
+          await usageStorage.saveRequest(usageRecord as any);
+          await usageStorage.updatePerformanceMetrics(
+            route.provider,
+            route.model,
+            route.canonicalModel ?? null,
+            null,
+            usageData.tokensOutput > 0 ? usageData.tokensOutput : null,
+            usageData.durationMs,
+            requestId
+          );
+          if (quotaEnforcer) await recordQuotaUsage(keyName, usageRecord, quotaEnforcer);
+          debug.flush(requestId);
+
+          await onSuccess?.(message);
+
+          return {
+            response: serializeMessage(message),
+            compaction: compactionMeta,
+          };
+        } else {
+          // ── Streaming ────────────────────────────────────────────────────
+          const eventStream = await debugRequestIdStorage.run(requestId, () =>
+            piAiModels.stream(toDispatchModel(piModel as any), sendContext, callOptions)
+          );
+
+          // Build and return the SSE generator — the generator owns
+          // release, timeout cleanup, usage, quota, debug flush.
+          const gen = buildSSEGenerator({
+            requestId,
+            eventStream,
+            route,
+            piModel: piModel as any,
+            attemptTimeout,
+            stallTtfbMs,
+            stallCooldownEnabled,
+            cooldown,
+            concurrency,
+            usageStorage,
+            quotaEnforcer,
+            keyName,
+            sourceIp,
+            attribution,
+            incomingApiType,
+            modelAlias,
+            attemptedProviders,
+            attemptCount: i + 1,
+            currentRetryRound,
+            retryHistory,
+            startTime,
+            toolsDefined: toolsDefined ?? null,
+            messageCount: messageCount ?? null,
+            parallelToolCalls: parallelToolCalls ?? null,
+            debug,
+            onSuccess,
+            serializeChunks,
+          });
+
+          return { stream: gen, compaction: compactionMeta };
+        }
+      } catch (err: any) {
+        const effectiveErr = attemptTimeout.isTimedOut() ? buildTimeoutError() : err;
+
+        // Clean up any TTFB entry that wasn't consumed (non-streaming error path)
+        consumeTtfb(requestId);
+
+        if (signal?.aborted) {
+          concurrency.release(route.provider, route.model);
+          attemptTimeout.cleanup();
+          throw buildCancelledError(signal);
+        }
+
+        // Mark cooldown
+        if ((effectiveErr as any)?.isStallError) {
+          if (stallCooldownEnabled) {
+            cooldown.markProviderStallFailure(route.provider, route.model, effectiveErr.message);
+          }
+        } else {
+          cooldown.markProviderFailure(route.provider, route.model);
+        }
+
+        concurrency.release(route.provider, route.model);
+        attemptTimeout.cleanup();
+
+        const canRetry = failoverEnabled && !isLast && isRetryable(effectiveErr, signal);
+        appendFailureAttempt(
+          retryHistory,
+          route,
+          effectiveErr,
+          incomingApiType,
+          canRetry,
+          currentRetryRound
+        );
+
+        if (canRetry) {
+          if (usageStorage) {
+            usageStorage
+              .saveError(requestId, effectiveErr, { apiType: incomingApiType })
+              .catch(() => {});
+          }
+          lastError = effectiveErr;
+          continue;
+        }
+
+        lastError = effectiveErr;
+        if (!isRetryable(effectiveErr, signal)) {
+          throw effectiveErr;
+        }
+        break targetLoop;
+      }
+    }
+
+    if (round < maxAttempts - 1) {
+      continue roundLoop;
     }
   }
 
@@ -783,6 +856,7 @@ interface SSEGeneratorParams {
   modelAlias: string;
   attemptedProviders: string[];
   attemptCount: number;
+  currentRetryRound: number;
   retryHistory: RetryAttemptRecord[];
   startTime: number;
   toolsDefined: number | null;
@@ -813,6 +887,7 @@ async function* buildSSEGenerator(p: SSEGeneratorParams): AsyncGenerator<string>
     modelAlias,
     attemptedProviders,
     attemptCount,
+    currentRetryRound,
     retryHistory,
     startTime,
     toolsDefined,
@@ -890,7 +965,7 @@ async function* buildSSEGenerator(p: SSEGeneratorParams): AsyncGenerator<string>
       if (event.type === 'done') {
         const msg = event.message;
         await cooldown.markProviderSuccess(route.provider, route.model);
-        appendSuccessAttempt(retryHistory, route, incomingApiType);
+        appendSuccessAttempt(retryHistory, route, incomingApiType, currentRetryRound);
         doRelease();
 
         const usageData = buildUsageFromMessage(msg, piModel, startTime, ttftMs, route);

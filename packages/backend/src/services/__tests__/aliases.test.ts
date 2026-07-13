@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from 'vitest';
 import { registerSpy } from '../../../test/test-utils';
-import { Router } from '../router';
-import { setConfigForTesting } from '../../config';
+import { Router, resolveCanonicalModel } from '../router';
+import { getConfig, setConfigForTesting } from '../../config';
 import { CooldownManager } from '../cooldown-manager';
 
 describe('Router Aliases', () => {
@@ -206,6 +206,21 @@ describe('Router Direct Alias/Target Group Routing', () => {
     expect(result.canonicalModel).toBe('smart-model');
   });
 
+  test('resolveCanonicalModel maps direct/alias/group to the alias slug', () => {
+    const { alias, canonicalModel } = resolveCanonicalModel(
+      getConfig(),
+      'direct/smart-model/primary'
+    );
+    expect(canonicalModel).toBe('smart-model');
+    expect(alias).toBeDefined();
+  });
+
+  test('resolveCanonicalModel leaves direct/provider/model unchanged when not an alias', () => {
+    const { alias, canonicalModel } = resolveCanonicalModel(getConfig(), 'direct/p1/m1');
+    expect(canonicalModel).toBe('direct/p1/m1');
+    expect(alias).toBeUndefined();
+  });
+
   test('resolveCandidates returns only targets from specified group', async () => {
     const result = await Router.resolveCandidates('direct/smart-model/primary');
     expect(result).toHaveLength(2);
@@ -371,6 +386,12 @@ describe('Router.resolveCandidates', () => {
   });
 
   test('returns only healthy enabled candidates in selector order with alias metadata', async () => {
+    const targets = [
+      { provider: 'p1', model: 'm1' },
+      { provider: 'p2', model: 'm2', enabled: false },
+      { provider: 'p3', model: 'm3' },
+    ];
+
     setConfigForTesting({
       providers: {
         p1: {
@@ -395,21 +416,18 @@ describe('Router.resolveCandidates', () => {
       models: {
         'canonical-candidates': {
           selector: 'in_order',
-          targets: [
-            { provider: 'p1', model: 'm1' },
-            { provider: 'p2', model: 'm2', enabled: false },
-            { provider: 'p3', model: 'm3' },
-          ],
+          targets,
           additional_aliases: ['candidates-alias'],
         },
       },
       keys: {},
     } as any);
 
-    // Simulate p1 being unhealthy after disabled filtering
-    registerSpy(cooldownManager, 'filterHealthyTargets').mockResolvedValue([
-      { provider: 'p3', model: 'm3' },
-    ] as any);
+    // filterHealthyTargets must return the same object refs it received —
+    // filterGroupTargets merges via Set identity.
+    registerSpy(cooldownManager, 'filterHealthyTargets').mockImplementation(async (eligible) =>
+      eligible.filter((t) => t.provider === 'p3' && t.model === 'm3')
+    );
 
     const result = await Router.resolveCandidates('candidates-alias');
 

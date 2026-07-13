@@ -53,6 +53,22 @@ function findAlias(config: ReturnType<typeof getConfig>, modelName: string) {
   return { alias, canonicalModel };
 }
 
+/** Resolve the canonical alias slug for a client-facing model name. */
+export function resolveCanonicalModel(
+  config: ReturnType<typeof getConfig>,
+  modelName: string
+): { alias: ModelConfig | undefined; canonicalModel: string } {
+  // direct/<alias>/<group> must resolve via the alias slug, same as resolve/resolveCandidates
+  const parsed = tryParseDirectGroup(modelName);
+  if (parsed) {
+    const resolved = findAlias(config, parsed.aliasName);
+    if (resolved.alias) {
+      return resolved;
+    }
+  }
+  return findAlias(config, modelName);
+}
+
 async function filterGroupTargets(
   groupTargets: ModelTarget[],
   config: ReturnType<typeof getConfig>,

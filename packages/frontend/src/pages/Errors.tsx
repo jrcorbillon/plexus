@@ -522,7 +522,7 @@ const AccordionPanel: React.FC<{
         {isOpen && (
           <div className="h-[280px] overflow-auto bg-[#1e1e1e] sm:h-[400px]">
             <pre className="m-0 p-2.5 text-xs leading-relaxed font-mono text-[#d4d4d4] whitespace-pre-wrap break-words">
-              {content}
+              {editorContent}
             </pre>
           </div>
         )}

@@ -145,10 +145,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                   max={10}
                   value={editingAlias.max_attempts ?? 1}
                   onChange={(e) => {
-                    const parsed = parseInt(e.target.value, 10);
+                    const parsed = e.currentTarget.valueAsNumber;
                     setEditingAlias({
                       ...editingAlias,
-                      max_attempts: Number.isFinite(parsed) ? Math.min(10, Math.max(1, parsed)) : 1,
+                      max_attempts:
+                        Number.isFinite(parsed) && Number.isInteger(parsed)
+                          ? Math.min(10, Math.max(1, parsed))
+                          : 1,
                     });
                   }}
                 />
@@ -167,12 +170,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                   max={300}
                   value={editingAlias.retry_delay_seconds ?? 0}
                   onChange={(e) => {
-                    const parsed = parseInt(e.target.value, 10);
+                    const parsed = e.currentTarget.valueAsNumber;
                     setEditingAlias({
                       ...editingAlias,
-                      retry_delay_seconds: Number.isFinite(parsed)
-                        ? Math.min(300, Math.max(0, parsed))
-                        : 0,
+                      retry_delay_seconds:
+                        Number.isFinite(parsed) && Number.isInteger(parsed)
+                          ? Math.min(300, Math.max(0, parsed))
+                          : 0,
                     });
                   }}
                 />

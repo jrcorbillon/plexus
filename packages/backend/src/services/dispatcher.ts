@@ -289,6 +289,7 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for ${request.model} (delay ${retryDelaySeconds}s)`
         );
+        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
       let candidates = await Router.resolveCandidates(
@@ -1064,9 +1065,10 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1) {
+      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
         continue roundLoop;
       }
+      break roundLoop;
     }
 
     throw this.buildAllTargetsFailedError(lastError, attemptedProviders, retryHistory);
@@ -1074,6 +1076,31 @@ export class Dispatcher {
 
   private isRetryableStatus(statusCode: number, retryableStatusCodes: number[]): boolean {
     return retryableStatusCodes.includes(statusCode);
+  }
+
+  /** Clear cooldowns set during earlier rounds so a retry round can re-attempt the same targets. */
+  private async clearCooldownsForAttempts(attemptedProviders: string[]): Promise<void> {
+    const cooldownManager = CooldownManager.getInstance();
+    for (const key of attemptedProviders) {
+      const slash = key.indexOf('/');
+      if (slash <= 0) continue;
+      await cooldownManager.clearCooldown(key.slice(0, slash), key.slice(slash + 1));
+    }
+  }
+
+  /** Only start another alias round when the last failure is still considered retryable. */
+  private shouldStartRetryRound(
+    lastError: any,
+    failover: { retryableStatusCodes?: number[]; retryableErrors?: string[] } | undefined
+  ): boolean {
+    const statusCode = lastError?.routingContext?.statusCode;
+    if (typeof statusCode === 'number') {
+      return this.isRetryableStatus(statusCode, failover?.retryableStatusCodes || []);
+    }
+    return (
+      this.isRetryableNetworkError(lastError, failover?.retryableErrors || []) ||
+      lastError?.message?.includes('stalled') === true
+    );
   }
 
   /**
@@ -3252,6 +3279,7 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for embeddings ${request.model} (delay ${retryDelaySeconds}s)`
         );
+        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
       let candidates = await Router.resolveCandidates(request.model, 'embeddings');
@@ -3484,9 +3512,10 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1) {
+      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
         continue roundLoop;
       }
+      break roundLoop;
     }
 
     throw this.buildAllTargetsFailedError(lastError, attemptedProviders, retryHistory);
@@ -3520,6 +3549,7 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for transcriptions ${request.model} (delay ${retryDelaySeconds}s)`
         );
+        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
       let candidates = await Router.resolveCandidates(request.model, 'transcriptions');
@@ -3754,9 +3784,10 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1) {
+      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
         continue roundLoop;
       }
+      break roundLoop;
     }
 
     throw this.buildAllTargetsFailedError(lastError, attemptedProviders, retryHistory);
@@ -3789,6 +3820,7 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for speech ${request.model} (delay ${retryDelaySeconds}s)`
         );
+        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
       let candidates = await Router.resolveCandidates(request.model, 'speech');
@@ -4064,9 +4096,10 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1) {
+      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
         continue roundLoop;
       }
+      break roundLoop;
     }
 
     throw this.buildAllTargetsFailedError(lastError, attemptedProviders, retryHistory);
@@ -4100,6 +4133,7 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for image generation ${request.model} (delay ${retryDelaySeconds}s)`
         );
+        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
       let candidates = await Router.resolveCandidates(request.model, 'images');
@@ -4330,9 +4364,10 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1) {
+      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
         continue roundLoop;
       }
+      break roundLoop;
     }
 
     throw this.buildAllTargetsFailedError(lastError, attemptedProviders, retryHistory);
@@ -4365,6 +4400,7 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for image edit ${request.model} (delay ${retryDelaySeconds}s)`
         );
+        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
       let candidates = await Router.resolveCandidates(request.model, 'images');
@@ -4588,9 +4624,10 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1) {
+      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
         continue roundLoop;
       }
+      break roundLoop;
     }
 
     throw this.buildAllTargetsFailedError(lastError, attemptedProviders, retryHistory);

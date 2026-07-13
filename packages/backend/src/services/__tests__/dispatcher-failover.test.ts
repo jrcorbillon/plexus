@@ -110,6 +110,7 @@ describe('Dispatcher Failover', () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await CooldownManager.getInstance().clearCooldown();
   });
 
@@ -716,7 +717,6 @@ describe('Dispatcher Failover', () => {
     await dispatchPromise;
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    vi.useRealTimers();
   });
 
   test('non-retryable 400 does not start a second alias round', async () => {
@@ -743,6 +743,5 @@ describe('Dispatcher Failover', () => {
 
     await expect(dispatchPromise).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 });

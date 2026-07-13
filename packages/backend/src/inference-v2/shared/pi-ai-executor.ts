@@ -438,6 +438,13 @@ export async function runPiAiExecutor<TResponse>(
       logger.warn(
         `Failover: retry round ${currentRetryRound}/${maxAttempts} for ${modelAlias} (delay ${retryDelaySeconds}s)`
       );
+      // Allow retry rounds to re-attempt targets cooled down in earlier rounds of this request
+      const cooldownManager = CooldownManager.getInstance();
+      for (const key of attemptedProviders) {
+        const slash = key.indexOf('/');
+        if (slash <= 0) continue;
+        await cooldownManager.clearCooldown(key.slice(0, slash), key.slice(slash + 1));
+      }
     }
 
     // ── Resolve candidates ──────────────────────────────────────────────────

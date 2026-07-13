@@ -120,11 +120,15 @@ function isIgnorableSqliteDdlError(error: any): boolean {
 /**
  * Apply SQLite migrations statement-by-statement without wrapping in a transaction.
  *
- * Drizzle's built-in migrator runs each migration inside BEGIN/COMMIT and ROLLBACKs
- * on failure. SQLite can still leave ALTER TABLE ADD COLUMN effects behind after a
- * failed multi-statement migration, which then crashes every subsequent startup with
- * "duplicate column name". Running statements outside a transaction and ignoring
- * duplicate-column / already-exists errors makes startup self-healing.
+ * Drizzle's built-in migrator:
+ * 1. Wraps each migration in BEGIN/COMMIT and ROLLBACKs on failure — SQLite can still
+ *    leave ALTER TABLE ADD COLUMN effects behind, causing "duplicate column" on retry.
+ * 2. Tracks progress via max(created_at) only — if a later migration hash is recorded
+ *    while earlier ones never ran (partial repair / drift), those earlier migrations
+ *    are skipped forever (e.g. missing pi_ai_custom_providers after 0054 was marked).
+ *
+ * This runner applies any migration whose hash is not yet recorded, ignores duplicate
+ * column / already-exists DDL conflicts, and records the hash afterward.
  */
 function runSqliteMigrationsIdempotently(
   db: any,
@@ -141,26 +145,19 @@ function runSqliteMigrationsIdempotently(
     )
   `);
 
-  // Match drizzle-orm's pending check: only compare against the latest created_at.
-  const lastDbMigration = sqlite
-    .query(
-      `SELECT id, hash, created_at FROM ${DRIZZLE_MIGRATIONS_TABLE} ORDER BY created_at DESC LIMIT 1`
-    )
-    .get() as { created_at: number | string } | null;
-  const lastCreatedAt = lastDbMigration ? Number(lastDbMigration.created_at) : 0;
+  // Hash-based pending check — do NOT use max(created_at), which skips holes in history.
+  const appliedHashes = new Set(
+    (
+      sqlite.query(`SELECT hash FROM ${DRIZZLE_MIGRATIONS_TABLE}`).all() as Array<{ hash: string }>
+    ).map((row) => row.hash)
+  );
 
   for (let i = 0; i < migrations.length; i++) {
     const migration = migrations[i]!;
     const entry = journal.entries[i]!;
-    if (lastCreatedAt && lastCreatedAt >= migration.folderMillis) continue;
+    if (appliedHashes.has(migration.hash)) continue;
 
-    // Also skip if this exact hash was already recorded (repair / partial bookkeeping).
-    const alreadyByHash = sqlite
-      .query(`SELECT 1 as found FROM ${DRIZZLE_MIGRATIONS_TABLE} WHERE hash = ?`)
-      .get(migration.hash);
-    if (alreadyByHash) continue;
-
-    logger.debug(`Applying SQLite migration ${entry.tag}`);
+    logger.info(`Applying SQLite migration ${entry.tag}`);
 
     for (const statement of migration.sql) {
       const trimmed = statement.trim();
@@ -182,6 +179,7 @@ function runSqliteMigrationsIdempotently(
     sqlite
       .prepare(`INSERT INTO ${DRIZZLE_MIGRATIONS_TABLE} (hash, created_at) VALUES (?, ?)`)
       .run(migration.hash, migration.folderMillis);
+    appliedHashes.add(migration.hash);
   }
 }
 

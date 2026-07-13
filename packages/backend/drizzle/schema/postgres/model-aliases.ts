@@ -32,7 +32,7 @@ export const modelAliases = pgTable('model_aliases', {
   slug: text('slug').notNull().unique(),
   selector: selectorStrategyEnum('selector'),
   priority: aliasPriorityEnum('priority').notNull().default('selector'),
-  modelType: text('model_type'), // reuse model_type values but as text to avoid enum conflict
+  modelType: text('model_type'), // 'text' | 'embeddings' | 'transcriptions' | 'speech' | 'image'
   additionalAliases: jsonb('additional_aliases'), // string[]
   advanced: jsonb('advanced'), // behavior objects array
   metadataSource: metadataSourceEnum('metadata_source'),
@@ -48,6 +48,8 @@ export const modelAliases = pgTable('model_aliases', {
   piModel: jsonb('pi_model'), // { provider: string, model_id: string }
   targetGroups: jsonb('target_groups'), // {name, selector}[]
   extraBody: jsonb('extra_body'), // Record<string, any>
+  generation: jsonb('generation'), // { reasoning?, maxTokens?, verbosity?, serviceTier? }
+  compaction: jsonb('compaction'), // compaction config
   createdAt: bigint('created_at', { mode: 'number' }).notNull(),
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
 });

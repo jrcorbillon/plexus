@@ -14,6 +14,9 @@ export interface ImageContent {
     url: string;
   };
   media_type?: string;
+  cache_control?: {
+    type?: string;
+  };
 }
 
 export type MessageContent = TextContent | ImageContent;
@@ -282,7 +285,7 @@ export interface UnifiedEmbeddingsResponse {
     index: number;
   }>;
   model: string;
-  usage: {
+  usage?: {
     prompt_tokens: number;
     total_tokens: number;
   };

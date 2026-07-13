@@ -5,7 +5,7 @@ export const modelAliases = sqliteTable('model_aliases', {
   slug: text('slug').notNull().unique(),
   selector: text('selector'), // 'random' | 'in_order' | 'cost' | 'latency' | 'usage' | 'performance'
   priority: text('priority').notNull().default('selector'), // 'selector' | 'api_match'
-  modelType: text('model_type'), // 'chat' | 'embeddings' | 'transcriptions' | 'speech' | 'image' | 'responses'
+  modelType: text('model_type'), // 'text' | 'embeddings' | 'transcriptions' | 'speech' | 'image'
   additionalAliases: text('additional_aliases'), // JSON: string[]
   advanced: text('advanced'), // JSON: behavior objects array
   metadataSource: text('metadata_source'), // 'openrouter' | 'models.dev' | 'catwalk' | 'custom'
@@ -21,6 +21,8 @@ export const modelAliases = sqliteTable('model_aliases', {
   piModel: text('pi_model'), // JSON: { provider: string, model_id: string }
   targetGroups: text('target_groups'), // JSON: {name, selector}[]
   extraBody: text('extra_body'), // JSON: Record<string, any>
+  generation: text('generation'), // JSON: { reasoning?, maxTokens?, verbosity?, serviceTier? }
+  compaction: text('compaction'), // JSON: compaction config
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 });

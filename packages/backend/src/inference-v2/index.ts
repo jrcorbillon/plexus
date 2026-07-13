@@ -73,6 +73,20 @@ export interface BetaInferenceDeps {
   responsesStorage?: ResponsesStorageService;
 }
 
+interface CompactionHeaderMetadata {
+  strategy: string | null;
+  tokensBefore: number;
+  tokensAfter: number;
+}
+
+function applyCompactionHeaders(reply: FastifyReply, compaction?: CompactionHeaderMetadata): void {
+  if (!compaction) return;
+  reply
+    .header('x-plexus-compaction-strategy', String(compaction.strategy ?? ''))
+    .header('x-plexus-compaction-tokens-before', String(compaction.tokensBefore))
+    .header('x-plexus-compaction-tokens-after', String(compaction.tokensAfter));
+}
+
 function saveBetaErrorUsage(
   usageStorage: UsageStorageService,
   request: FastifyRequest,
@@ -164,8 +178,7 @@ export async function handleBetaChatCompletions(
       incomingApiType: 'chat',
       modelAlias,
       context: parsed.context,
-      streamOptions: parsed.streamOptions,
-      reasoningEffort: parsed.reasoningEffort,
+      generationIntent: parsed.generationIntent,
       toolChoice: parsed.toolChoice,
       parallelToolCalls: parsed.parallelToolCalls,
       streaming: parsed.streaming,
@@ -194,11 +207,13 @@ export async function handleBetaChatCompletions(
 
     if (result.response != null) {
       // Non-streaming
+      applyCompactionHeaders(reply, result.compaction);
       return reply.code(200).header('content-type', 'application/json').send(result.response);
     }
 
     if (result.stream != null) {
-      // Streaming — SSE
+      // Streaming — SSE. Compaction headers must be set before the stream starts.
+      applyCompactionHeaders(reply, result.compaction);
       reply
         .code(200)
         .header('content-type', 'text/event-stream; charset=utf-8')
@@ -326,8 +341,7 @@ export async function handleBetaMessages(
       incomingApiType: 'messages',
       modelAlias,
       context: parsed.context,
-      streamOptions: parsed.streamOptions,
-      reasoningEffort: parsed.reasoningEffort,
+      generationIntent: parsed.generationIntent,
       toolChoice: parsed.toolChoice,
       streaming: parsed.streaming,
       request,
@@ -346,10 +360,13 @@ export async function handleBetaMessages(
     earlyDisconnect.cleanup();
 
     if (result.response != null) {
+      applyCompactionHeaders(reply, result.compaction);
       return reply.code(200).header('content-type', 'application/json').send(result.response);
     }
 
     if (result.stream != null) {
+      // Compaction headers must be set before the stream starts.
+      applyCompactionHeaders(reply, result.compaction);
       reply
         .code(200)
         .header('content-type', 'text/event-stream; charset=utf-8')
@@ -501,8 +518,7 @@ export async function handleBetaResponses(
       incomingApiType: 'responses',
       modelAlias,
       context: parsed.context,
-      streamOptions: parsed.streamOptions,
-      reasoningEffort: parsed.reasoningEffort,
+      generationIntent: parsed.generationIntent,
       toolChoice: parsed.toolChoice,
       streaming: parsed.streaming,
       request,
@@ -520,10 +536,13 @@ export async function handleBetaResponses(
     earlyDisconnect.cleanup();
 
     if (result.response != null) {
+      applyCompactionHeaders(reply, result.compaction);
       return reply.code(200).header('content-type', 'application/json').send(result.response);
     }
 
     if (result.stream != null) {
+      // Compaction headers must be set before the stream starts.
+      applyCompactionHeaders(reply, result.compaction);
       reply
         .code(200)
         .header('content-type', 'text/event-stream; charset=utf-8')
@@ -630,8 +649,7 @@ export async function handleBetaGeminiRequest(
       incomingApiType: 'gemini',
       modelAlias,
       context: parsed.context,
-      streamOptions: parsed.streamOptions,
-      reasoningEffort: parsed.reasoningEffort,
+      generationIntent: parsed.generationIntent,
       streaming: parsed.streaming,
       request,
       usageStorage,
@@ -649,11 +667,13 @@ export async function handleBetaGeminiRequest(
     earlyDisconnect.cleanup();
 
     if (result.response != null) {
+      applyCompactionHeaders(reply, result.compaction);
       return reply.code(200).header('content-type', 'application/json').send(result.response);
     }
 
     if (result.stream != null) {
       // Gemini streamGenerateContent uses data-prefixed JSON frames.
+      applyCompactionHeaders(reply, result.compaction);
       reply
         .code(200)
         .header('content-type', 'text/event-stream')

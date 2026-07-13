@@ -9,13 +9,13 @@ Use the Plexus management API through portable `curl` and `jq` commands. Do not 
 
 ## First Steps
 
-1. Require a base URL. Prefer `PLEXUS_BASE_URL`; if absent, ask the user for the Plexus URL.
-2. Require an admin key. All admin requests need `x-admin-key`; prefer `PLEXUS_ADMIN_KEY`. If absent, ask the user for it and do not proceed with admin calls until provided.
+1. Require a base URL. Prefer `PLEXUS_STAGING_URL`; if absent, ask the user for the Plexus URL and do not proceed until provided.
+2. Require an admin key. All admin requests need `x-admin-key`; prefer `PLEXUS_STAGING_ADMIN_KEY`. If absent, ask the user for it and do not proceed with admin calls until provided.
 3. Verify access before making changes:
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/auth/verify" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" | jq .
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/auth/verify" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
 ```
 
 4. For read operations, use `GET` first and summarize findings. For write/delete/restore operations, inspect current state first and explain the intended change before issuing the mutating request.
@@ -23,11 +23,11 @@ curl -fsS "$PLEXUS_BASE_URL/v0/management/auth/verify" \
 Use this short helper pattern in the shell when running several commands interactively:
 
 ```bash
-: "${PLEXUS_BASE_URL:?Set PLEXUS_BASE_URL}"
-: "${PLEXUS_ADMIN_KEY:?Set PLEXUS_ADMIN_KEY}"
+: "${PLEXUS_STAGING_URL:?Set PLEXUS_STAGING_URL}"
+: "${PLEXUS_STAGING_ADMIN_KEY:?Set PLEXUS_STAGING_ADMIN_KEY}"
 
-curl -fsS "$PLEXUS_BASE_URL/v0/management/providers" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" | jq .
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/providers" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
 ```
 
 ## Safety Rules
@@ -45,8 +45,8 @@ curl -fsS "$PLEXUS_BASE_URL/v0/management/providers" \
 Prefer the summary endpoint whenever the user wants totals, rollups, dashboards, or time-window aggregates. It performs aggregation server-side and avoids undercounting that can happen if you inspect only the first page of raw usage rows.
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/usage/summary?range=week" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" | jq .
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/usage/summary?range=week" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
 ```
 
 Use `range=hour|day|week|month`, or `range=custom&startDate=...&endDate=...` when the user needs a specific window.
@@ -56,23 +56,23 @@ Use `range=hour|day|week|month`, or `range=custom&startDate=...&endDate=...` whe
 Use raw usage reads for request-level inspection, spot checks, and debugging individual calls.
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/usage?limit=20&sortDir=desc" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" | jq .
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/usage?limit=20&sortDir=desc" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
 ```
 
 ### Redacted Key Listing
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/keys" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" \
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/keys" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
   | jq 'with_entries(.value.secret = "<redacted>")'
 ```
 
 ### JSON Write
 
 ```bash
-curl -fsS -X PATCH "$PLEXUS_BASE_URL/v0/management/config/failover" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" \
+curl -fsS -X PATCH "$PLEXUS_STAGING_URL/v0/management/config/failover" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
   -H "content-type: application/json" \
   --data '{"enabled":true}' | jq .
 ```
@@ -82,8 +82,8 @@ curl -fsS -X PATCH "$PLEXUS_BASE_URL/v0/management/config/failover" \
 Use this when making a precise edit to a larger object. Review the generated payload before sending it.
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/aliases" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" \
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/aliases" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
   | jq '."my-alias" | .target_groups[0].targets += [{"provider":"openai","model":"gpt-4o-mini"}]'
 ```
 
@@ -102,8 +102,8 @@ curl -fsS "$PLEXUS_BASE_URL/v0/management/aliases" \
 - Check state with `GET /v0/management/debug`.
 - Enable globally with `PATCH /v0/management/debug` and `{"enabled":true,"providers":null}` or set `providers` to an array of provider slugs.
 - Disable with `PATCH /v0/management/debug` and `{"enabled":false}`.
-- List captures with `GET /v0/management/debug-logs?limit=50`.
-- Fetch a full trace with `GET /v0/management/debug-logs/{requestId}`.
+- List captures with `GET /v0/management/debug/logs?limit=50`.
+- Fetch a full trace with `GET /v0/management/debug/logs/{requestId}`.
 
 ### Manage Providers And Model Targets
 

@@ -425,8 +425,9 @@ describe('Router.resolveCandidates', () => {
 
     // filterHealthyTargets must return the same object refs it received —
     // filterGroupTargets merges via Set identity.
-    registerSpy(cooldownManager, 'filterHealthyTargets').mockImplementation(async (eligible) =>
-      eligible.filter((t) => t.provider === 'p3' && t.model === 'm3')
+    registerSpy(cooldownManager, 'filterHealthyTargets').mockImplementation(
+      async (eligible: any[]) =>
+        eligible.filter((t: any) => t.provider === 'p3' && t.model === 'm3')
     );
 
     const result = await Router.resolveCandidates('candidates-alias');

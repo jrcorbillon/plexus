@@ -113,6 +113,7 @@ interface Props {
   onOpenFetchModels: () => void;
   onTestModel: (providerId: string, modelId: string, modelType?: string) => void;
   getApiBaseUrlMap: () => Record<string, string>;
+  isNewProvider: boolean;
 }
 
 export function ProviderModelsEditor({
@@ -136,12 +137,15 @@ export function ProviderModelsEditor({
   onTestModel,
   onDismissTestMessage,
   getApiBaseUrlMap,
+  isNewProvider,
 }: Props) {
   const [modelAdaptersOpen, setModelAdaptersOpen] = useState<Record<string, boolean>>({});
   const [modelAdvancedOpen, setModelAdvancedOpen] = useState<Record<string, boolean>>({});
 
   // pi-ai model dropdown state — shared across all models (same provider)
-  const [piModels, setPiModels] = useState<Array<{ id: string; name: string; api: string }>>([]);
+  const [piModels, setPiModels] = useState<
+    Array<{ id: string; name: string; api: string; custom: boolean }>
+  >([]);
   const [piModelCustom, setPiModelCustom] = useState<Record<string, boolean>>({});
 
   const piAiProvider = editingProvider.pi_ai_provider;
@@ -236,11 +240,20 @@ export function ProviderModelsEditor({
                     <span style={{ fontWeight: 600, fontSize: '12px', flex: 1 }}>{mId}</span>
                     <div
                       onClick={(e) => {
+                        if (isNewProvider) return;
                         e.stopPropagation();
                         onTestModel(editingProvider.id, mId, mCfg.type);
                       }}
-                      className="flex items-center cursor-pointer"
-                      title="Test this model"
+                      className={
+                        isNewProvider
+                          ? 'flex items-center cursor-not-allowed opacity-40'
+                          : 'flex items-center cursor-pointer'
+                      }
+                      title={
+                        isNewProvider
+                          ? 'Save the provider first to probe models'
+                          : 'Test this model'
+                      }
                     >
                       {testState?.loading ? (
                         <Loader2 size={14} className="animate-spin text-text-secondary" />
@@ -320,10 +333,14 @@ export function ProviderModelsEditor({
                             </label>
                             <select
                               className={FIELD_CLS}
-                              value={mCfg.type || 'chat'}
+                              value={mCfg.type === 'chat' ? 'text' : mCfg.type || 'text'}
                               onChange={(e) => {
-                                const newType = e.target.value as
-                                  | 'chat'
+                                const raw = e.target.value;
+                                // Map legacy 'chat' to 'text' on edit.
+                                const newType = (
+                                  raw === 'chat' ? 'text' : raw
+                                ) as
+                                  | 'text'
                                   | 'embeddings'
                                   | 'transcriptions'
                                   | 'speech'
@@ -345,7 +362,7 @@ export function ProviderModelsEditor({
                                 else updateModelConfig(mId, { type: newType });
                               }}
                             >
-                              <option value="chat">Chat</option>
+                              <option value="text">Text</option>
                               <option value="embeddings">Embeddings</option>
                               <option value="transcriptions">Transcriptions</option>
                               <option value="speech">Speech</option>
@@ -353,7 +370,7 @@ export function ProviderModelsEditor({
                             </select>
                           </div>
 
-                          {(!mCfg.type || mCfg.type === 'chat') && (
+                          {(!mCfg.type || mCfg.type === 'text' || mCfg.type === 'chat') && (
                             <div className="flex flex-col gap-1">
                               <label className="font-body text-[11px] font-medium text-text-secondary">
                                 Access Via
@@ -457,8 +474,13 @@ export function ProviderModelsEditor({
                               >
                                 <option value="">— none —</option>
                                 {piModels.map((m) => (
-                                  <option key={m.id} value={m.id} title={m.api}>
+                                  <option
+                                    key={m.id}
+                                    value={m.id}
+                                    title={`${m.api}${m.custom ? ' · custom model' : ''}`}
+                                  >
                                     {m.id}
+                                    {m.custom ? ' (custom)' : ''}
                                   </option>
                                 ))}
                                 <option value="__custom__">custom...</option>

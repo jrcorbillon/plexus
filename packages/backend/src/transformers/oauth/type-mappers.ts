@@ -240,15 +240,17 @@ export function jsonSchemaToTypeBox(schema: any): any {
   // Handle enum → Type.Union(Type.Literal(...))
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     const literals = schema.enum.map((v: any) => Type.Literal(v));
-    return literals.length === 1 ? { ...literals[0], ...opts } : Type.Union(literals, opts);
+    const converted =
+      literals.length === 1 ? { ...literals[0], ...opts } : Type.Union(literals, opts);
+    return preserveSchemaMeta(schema, converted);
   }
 
   // Handle anyOf / oneOf passthrough (already in the right format)
-  if (Array.isArray(schema.anyOf)) {
-    return { anyOf: schema.anyOf.map(jsonSchemaToTypeBox), ...opts };
-  }
-  if (Array.isArray(schema.oneOf)) {
-    return { oneOf: schema.oneOf.map(jsonSchemaToTypeBox), ...opts };
+  if (Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf)) {
+    const converted = Array.isArray(schema.anyOf)
+      ? { anyOf: schema.anyOf.map(jsonSchemaToTypeBox), ...opts }
+      : { oneOf: schema.oneOf.map(jsonSchemaToTypeBox), ...opts };
+    return preserveSchemaMeta(schema, converted);
   }
 
   switch (schema.type) {
@@ -269,24 +271,45 @@ export function jsonSchemaToTypeBox(schema: any): any {
       if (schema.additionalProperties !== undefined) {
         obj.additionalProperties = schema.additionalProperties;
       }
-      return obj;
+      return preserveSchemaMeta(schema, obj);
     }
     case 'array': {
       const items = schema.items ? jsonSchemaToTypeBox(schema.items) : Type.Any();
-      return Type.Array(items, opts);
+      return preserveSchemaMeta(schema, Type.Array(items, opts));
     }
     case 'string':
-      return Type.String(opts);
+      return preserveSchemaMeta(schema, Type.String(opts));
     case 'number':
-      return Type.Number(opts);
+      return preserveSchemaMeta(schema, Type.Number(opts));
     case 'integer':
-      return Type.Integer(opts);
+      return preserveSchemaMeta(schema, Type.Integer(opts));
     case 'boolean':
-      return Type.Boolean(opts);
+      return preserveSchemaMeta(schema, Type.Boolean(opts));
     default:
       // Fallback: wrap as-is for unknown/complex schemas
       return Type.Unsafe(schema);
   }
+}
+
+/** Preserve $defs / $schema / title that TypeBox helpers drop. */
+function preserveSchemaMeta(schema: any, obj: any): any {
+  // Preserve JSON Schema keywords that Type.Object / Union helpers drop. `$defs`
+  // holds definitions that `$ref` pointers resolve against; dropping it while
+  // leaving `$ref` intact produces unresolved references.
+  if (schema.$defs !== undefined && schema.$defs !== null) {
+    const convertedDefs: Record<string, any> = {};
+    for (const [key, val] of Object.entries(schema.$defs)) {
+      convertedDefs[key] = jsonSchemaToTypeBox(val);
+    }
+    obj.$defs = convertedDefs;
+  }
+  if (schema.$schema !== undefined) {
+    obj.$schema = schema.$schema;
+  }
+  if (schema.title !== undefined) {
+    obj.title = schema.title;
+  }
+  return obj;
 }
 
 function unifiedToolToPiAi(tool: UnifiedTool): PiAiTool {

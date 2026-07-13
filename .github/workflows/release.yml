@@ -1,25 +1,19 @@
 name: Release
-run-name: Release ${{ inputs.tag || github.ref_name }}
+run-name: Release ${{ github.event_name == 'push' && github.ref_name || 'auto-calculated tag' }}
 
 on:
   push:
     tags:
       - '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]+'  # CalVer: YYYY.MM.DD.N
   workflow_dispatch:
-    inputs:
-      tag:
-        required: true
-        type: string
-        description: "The release tag to publish (will be created on main if it doesn't exist)"
+    # No inputs — the tag is auto-calculated (CalVer YYYY.MM.DD.N) from
+    # existing git tags, mirroring scripts/release.ts.
 
 permissions:
   contents: write
   packages: write
   id-token: write
   pull-requests: read
-
-env:
-  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # ── Setup: resolve/create the tag ──────────────────────────────────────
@@ -30,14 +24,47 @@ jobs:
       tag: ${{ steps.release_tag.outputs.tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Get tag from ref and create if missing
+      - name: Resolve release tag and create if missing
         id: release_tag
         run: |
-          TAG="${{ env.TAG }}"
+          set -euo pipefail
+
+          EVENT="${{ github.event_name }}"
+
+          # For tag-push events, use the pushed tag ref directly.
+          # Otherwise (workflow_dispatch) auto-calculate the next CalVer
+          # tag (YYYY.MM.DD.N) from existing git tags, mirroring
+          # scripts/release.ts: highest existing counter for today + 1,
+          # else .1 for a new day. UTC is used for determinism in CI.
+          if [ "$EVENT" = "push" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TODAY=$(date -u +'%Y.%m.%d')
+
+            # Highest existing CalVer counter for today (if any), across
+            # all tags fetched by the fetch-depth: 0 checkout above.
+            # grep exits 1 when no tags match; with pipefail that would abort
+            # before the ${TODAY}.1 fallback below.
+            HIGHEST_TODAY=$(git tag --list \
+              | grep -E '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$' \
+              | while IFS=. read -r y m d n; do
+                  if [ "$y.$m.$d" = "$TODAY" ]; then echo "$n"; fi
+                done \
+              | sort -n \
+              | tail -1 || true)
+
+            if [ -n "$HIGHEST_TODAY" ]; then
+              TAG="${TODAY}.$((HIGHEST_TODAY + 1))"
+            else
+              TAG="${TODAY}.1"
+            fi
+
+            echo "Auto-calculated release tag: $TAG"
+          fi
 
           # If the tag doesn't exist, create it on HEAD of main
           if ! git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -57,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -104,7 +131,7 @@ jobs:
         run: echo "::add-mask::$LLM_API_KEY"
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -249,6 +276,8 @@ jobs:
         if: always()
         run: |
           if [ -f release-notes.md ]; then
+            # Ensure the file ends with a newline to prevent delimiter parser issues
+            [[ -n "$(tail -c1 release-notes.md)" ]] && echo "" >> release-notes.md
             {
               echo 'notes<<RELEASE_NOTES_EOF'
               cat release-notes.md
@@ -278,7 +307,7 @@ jobs:
       APP_VERSION: ${{ needs.setup.outputs.tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -322,7 +351,7 @@ jobs:
         platform: [linux/amd64, linux/arm64]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

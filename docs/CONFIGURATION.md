@@ -103,7 +103,7 @@ Some providers support multiple API formats (OpenAI chat, Anthropic messages, em
 |----------|----------|
 | `chat` | OpenAI-compatible chat completions |
 | `messages` | Anthropic Claude Messages API |
-| `embeddings` | OpenAI-compatible embeddings |
+| `embeddings` | OpenAI-compatible embeddings (Gemini providers auto-transformed) |
 | `image` | Image generation (DALL-E, etc.) |
 | `transcriptions` | Speech-to-text (Whisper) |
 | `speech` | Text-to-speech |

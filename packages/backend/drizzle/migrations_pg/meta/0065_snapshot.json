@@ -1,5 +1,5 @@
 {
-  "id": "3381db0f-c640-4bcb-b194-0d9bbadb5ce1",
+  "id": "bb9a3d58-cf04-48eb-9b99-56c35e93829c",
   "prevId": "b173ec82-475c-4cfb-be0f-003faa904d6f",
   "version": "7",
   "dialect": "postgresql",
@@ -2737,20 +2737,6 @@
           "notNull": true,
           "default": false
         },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "retry_delay_seconds": {
-          "name": "retry_delay_seconds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
         "preferred_api": {
           "name": "preferred_api",
           "type": "jsonb",
@@ -2988,6 +2974,55 @@
         "headers": {
           "name": "headers",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mode": {
+          "name": "mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'remote_http'"
+        },
+        "launcher": {
+          "name": "launcher",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_name": {
+          "name": "package_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "args": {
+          "name": "args",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "env": {
+          "name": "env",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "port": {
+          "name": "port",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "startup_timeout_ms": {
+          "name": "startup_timeout_ms",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },

@@ -5,10 +5,10 @@ This map summarizes the management endpoints commonly needed by agents. Prefer t
 All admin calls require:
 
 ```bash
--H "x-admin-key: $PLEXUS_ADMIN_KEY"
+-H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY"
 ```
 
-Use `PLEXUS_BASE_URL` as the instance root, for example `https://plexus.example.com`.
+Use `PLEXUS_STAGING_URL` as the instance root, for example `https://plexus.example.com`.
 
 ## Authentication
 
@@ -39,10 +39,10 @@ Useful usage query params include `limit`, `offset`, `sortBy`, `sortDir`, `start
 | Get debug state | `GET` | `/v0/management/debug` |
 | Update global debug state | `PATCH` | `/v0/management/debug` |
 | Toggle current key debug | `POST` | `/v0/management/self/debug/toggle` |
-| List debug logs | `GET` | `/v0/management/debug-logs` |
-| Get one debug log | `GET` | `/v0/management/debug-logs/{requestId}` |
-| Delete one debug log | `DELETE` | `/v0/management/debug-logs/{requestId}` |
-| Delete all debug logs | `DELETE` | `/v0/management/debug-logs` |
+| List debug logs | `GET` | `/v0/management/debug/logs` |
+| Get one debug log | `GET` | `/v0/management/debug/logs/{requestId}` |
+| Delete one debug log | `DELETE` | `/v0/management/debug/logs/{requestId}` |
+| Delete all debug logs | `DELETE` | `/v0/management/debug/logs` |
 
 Debug state body examples:
 
@@ -213,8 +213,8 @@ Set log level body:
 System logs are Server-Sent Events. Example:
 
 ```bash
-curl -N "$PLEXUS_BASE_URL/v0/system/logs/stream" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY"
+curl -N "$PLEXUS_STAGING_URL/v0/system/logs/stream" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY"
 ```
 
 ## Backup And Restore

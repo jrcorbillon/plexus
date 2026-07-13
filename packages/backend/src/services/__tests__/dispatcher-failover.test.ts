@@ -700,6 +700,60 @@ describe('Dispatcher Failover', () => {
     expect(retryHistory.some((entry: any) => entry.round === 2)).toBe(true);
   });
 
+  test('retry round re-attempts without clearing shared cooldown state', async () => {
+    setConfigForTesting(makeConfig({ targetCount: 1, maxAttempts: 2 }));
+    fetchMock.mockImplementation(async () => errorResponse(503, 'always fail'));
+
+    const dispatcher = new Dispatcher();
+    await expect(dispatcher.dispatch(makeChatRequest())).rejects.toThrow();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const cm = CooldownManager.getInstance();
+    expect(await cm.isProviderHealthy('p1', 'model-1')).toBe(false);
+    expect(cm.getCooldowns().some((c) => c.provider === 'p1' && c.model === 'model-1')).toBe(true);
+  });
+
+  test('max_attempts does not start another round when failover is disabled', async () => {
+    setConfigForTesting(makeConfig({ targetCount: 1, maxAttempts: 2, failoverEnabled: false }));
+    fetchMock.mockImplementation(async () => errorResponse(503, 'fail'));
+
+    const dispatcher = new Dispatcher();
+    await expect(dispatcher.dispatch(makeChatRequest())).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('upstream_timeout starts a second alias round even when 504 is not retryable', async () => {
+    const config = makeConfig({ targetCount: 1, maxAttempts: 2 });
+    config.failover.retryableStatusCodes = [500, 502, 503, 429];
+    config.providers.p1.timeoutMs = 20;
+    setConfigForTesting(config);
+
+    fetchMock
+      .mockImplementationOnce(async (_url: string, init?: RequestInit) => {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(), 100);
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(init.signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+            },
+            { once: true }
+          );
+        });
+        return successChatResponse('model-1');
+      })
+      .mockImplementationOnce(async () => successChatResponse('model-1'));
+
+    const dispatcher = new Dispatcher();
+    const response = await dispatcher.dispatch(makeChatRequest());
+    const meta = (response as any).plexus;
+
+    expect(meta?.attemptCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   test('max_attempts 2 waits retry_delay_seconds between rounds', async () => {
     vi.useFakeTimers();
     setConfigForTesting(makeConfig({ targetCount: 1, maxAttempts: 2, retryDelaySeconds: 2 }));

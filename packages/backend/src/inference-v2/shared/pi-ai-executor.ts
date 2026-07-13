@@ -22,7 +22,9 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { stream, complete, calculateCost, getModel } from '@earendil-works/pi-ai';
+import { calculateCost } from '@earendil-works/pi-ai';
+import { getBuiltinModel } from '@earendil-works/pi-ai/providers/all';
+import { piAiModels, toDispatchModel } from './pi-ai-utils';
 import type {
   Context,
   ProviderStreamOptions,
@@ -32,7 +34,11 @@ import type {
 import type { FastifyRequest } from 'fastify';
 
 import { Router, resolveCanonicalModel } from '../../services/router';
-import { getAliasRetryPolicy, waitForRetryRound } from '../../services/alias-retry-policy';
+import {
+  cooldownBypassKeysForRound,
+  getAliasRetryPolicy,
+  waitForRetryRound,
+} from '../../services/alias-retry-policy';
 import type { RouteResult } from '../../services/router';
 import { CooldownManager } from '../../services/cooldown-manager';
 import { ConcurrencyTracker } from '../../services/concurrency-tracker';
@@ -45,12 +51,18 @@ import { getConfig } from '../../config';
 import { applyKeyAccessPolicy, type PolicyRequest } from '../../services/key-access-policy';
 import {
   buildPiAiModel,
-  buildReasoningOptions,
+  resolvePiAiModel,
+  buildGenerationOptions,
   buildGpuParams,
   computeKwhUsed,
 } from './pi-ai-utils';
+import type { GenerationIntent } from './generation';
+import { splitReasoningSuffix } from './reasoning';
 import { consumeTtfb } from './fetch-tap';
 import { extractPiAiErrorMessage } from '../../transformers/oauth/type-mappers';
+import { enforceContextLimitForRoute } from '../../services/enforce-limits';
+import { compactContextForSend } from '../../services/compaction/compaction-service';
+import type { CompactionResult, CompactionStrategyName } from '../../services/compaction/types';
 
 // ─── AsyncLocalStorage for debug raw-capture correlation ─────────────────────
 
@@ -66,10 +78,12 @@ export interface PiAiExecutorInput<TResponse, TChunk extends string = string> {
   modelAlias: string;
   /** Built by the inbound parser */
   context: Context;
-  /** Options from the inbound parser (sans apiKey / signal) */
-  streamOptions: Omit<ProviderStreamOptions, 'apiKey' | 'signal' | 'onPayload' | 'headers'>;
-  /** reasoning_effort string, if present in the request */
-  reasoningEffort?: string;
+  /**
+   * Canonical generation intent from the inbound parser: reasoning + maxTokens,
+   * temperature, verbosity, serviceTier. Re-expanded against model capabilities
+   * by buildGenerationOptions() at egress.
+   */
+  generationIntent: GenerationIntent;
   /** tool_choice forwarded verbatim */
   toolChoice?: unknown;
   /** parallel_tool_calls forwarded verbatim */
@@ -96,6 +110,12 @@ export interface PiAiExecutorResult<TResponse> {
   response?: TResponse;
   /** Set for streaming — async generator of wire-format frame strings */
   stream?: AsyncGenerator<string>;
+  /** Set for non-streaming when compaction actually ran and reduced tokens */
+  compaction?: {
+    strategy: CompactionStrategyName | null;
+    tokensBefore: number;
+    tokensAfter: number;
+  };
 }
 
 // ─── Attempt-timeout helper (mirrors Dispatcher.createAttemptTimeout) ─────────
@@ -303,7 +323,7 @@ function nextWithTtfbTimeout<T>(
 
 function buildUsageFromMessage(
   msg: AssistantMessage,
-  piModel: ReturnType<typeof getModel>,
+  piModel: ReturnType<typeof getBuiltinModel>,
   startTime: number,
   ttftMs: number | null,
   route: RouteResult
@@ -377,8 +397,7 @@ export async function runPiAiExecutor<TResponse>(
     incomingApiType,
     modelAlias,
     context,
-    streamOptions,
-    reasoningEffort,
+    generationIntent,
     toolChoice,
     parallelToolCalls,
     streaming,
@@ -416,14 +435,19 @@ export async function runPiAiExecutor<TResponse>(
     parallelToolCallsEnabled: parallelToolCalls ?? null,
   });
 
+  // ── Strip reasoning suffix from the alias (Layer 4) ───────────────────────
+  // e.g. "gpt-5:high" routes as "gpt-5" with a fallback intent of effort=high.
+  const { alias: routingAlias, intent: suffixIntent } = splitReasoningSuffix(modelAlias);
+
   // ── Alias retry policy ────────────────────────────────────────────────────
   const config = getConfig();
-  const { canonicalModel } = resolveCanonicalModel(config, modelAlias);
+  const { canonicalModel } = resolveCanonicalModel(config, routingAlias);
   const { maxAttempts, retryDelaySeconds } = getAliasRetryPolicy(config, canonicalModel);
 
   const retryHistory: RetryAttemptRecord[] = [];
   const attemptedProviders: string[] = [];
   let lastError: any = null;
+  const compactionMemo = new Map<string, CompactionResult>();
 
   roundLoop: for (let round = 0; round < maxAttempts; round++) {
     await waitForRetryRound(
@@ -438,44 +462,49 @@ export async function runPiAiExecutor<TResponse>(
       logger.warn(
         `Failover: retry round ${currentRetryRound}/${maxAttempts} for ${modelAlias} (delay ${retryDelaySeconds}s)`
       );
-      // Allow retry rounds to re-attempt targets cooled down in earlier rounds of this request
-      const cooldownManager = CooldownManager.getInstance();
-      for (const key of attemptedProviders) {
-        const slash = key.indexOf('/');
-        if (slash <= 0) continue;
-        await cooldownManager.clearCooldown(key.slice(0, slash), key.slice(slash + 1));
-      }
     }
 
-    // ── Resolve candidates ──────────────────────────────────────────────────
-    let candidates = await Router.resolveCandidates(modelAlias, incomingApiType);
+    const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
+    // ── Resolve candidates ────────────────────────────────────────────────────
+    let candidates = await Router.resolveCandidates(
+      routingAlias,
+      incomingApiType,
+      undefined,
+      cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+    );
     if (candidates.length === 0) {
       try {
-        candidates = [await Router.resolve(modelAlias, incomingApiType)];
+        candidates = [
+          await Router.resolve(
+            routingAlias,
+            incomingApiType,
+            cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+          ),
+        ];
       } catch {
         if (round < maxAttempts - 1) continue roundLoop;
         throw buildNoBetaCandidatesError();
       }
     }
 
-    // ── Apply key-access policy ─────────────────────────────────────────────
+    // ── Apply key-access policy ───────────────────────────────────────────────
     const policyReq: PolicyRequest = {
-      model: modelAlias,
+      model: routingAlias,
       metadata: (request.body as any)?.metadata,
     };
     candidates = applyKeyAccessPolicy(policyReq, candidates, incomingApiType);
 
-    // ── Filter to beta-compatible candidates ───────────────────────────────
+    // ── Filter to beta-compatible candidates ─────────────────────────────────
+    // A candidate is beta-compatible when both pi-ai hints are present AND the
+    // (provider, modelId) pair resolves to a pi-ai Model — via the custom
+    // registries or the built-in registry. resolvePiAiModel returns null (never
+    // throws) for unknown pairs, so a null check is the correct gate.
     const betaCandidates = candidates.filter((c) => {
       const piAiProvider = (c.config as any).pi_ai_provider as string | undefined;
       const piAiModelId = (c.modelConfig as any)?.pi_ai_model_id as string | undefined;
       if (!piAiProvider || !piAiModelId) return false;
-      try {
-        getModel(piAiProvider as any, piAiModelId as any);
-        return true;
-      } catch {
-        return false;
-      }
+      return resolvePiAiModel(piAiProvider, piAiModelId) != null;
     });
 
     if (betaCandidates.length === 0) {
@@ -483,6 +512,7 @@ export async function runPiAiExecutor<TResponse>(
       throw buildNoBetaCandidatesError();
     }
 
+    // ── Failover loop ─────────────────────────────────────────────────────────
     const failoverEnabled = betaCandidates.length > 1;
 
     targetLoop: for (let i = 0; i < betaCandidates.length; i++) {
@@ -490,15 +520,19 @@ export async function runPiAiExecutor<TResponse>(
       const route = betaCandidates[i]!;
       const isLast = i === betaCandidates.length - 1;
 
-      // ── Abort check ────────────────────────────────────────────────────────
+      // ── Abort check ──────────────────────────────────────────────────────────
       if (signal?.aborted) throw buildCancelledError(signal);
 
-      // ── Per-attempt timeout ────────────────────────────────────────────────
+      // ── Per-attempt timeout ──────────────────────────────────────────────────
       const attemptTimeout = createAttemptTimeout(signal, route.config.timeoutMs ?? null);
 
-      // ── Cooldown check ─────────────────────────────────────────────────────
+      // ── Cooldown check ───────────────────────────────────────────────────────
       const cooldown = CooldownManager.getInstance();
-      const healthy = await cooldown.isProviderHealthy(route.provider, route.model);
+      const healthy = await cooldown.isProviderHealthy(
+        route.provider,
+        route.model,
+        cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
+      );
       if (!healthy) {
         attemptTimeout.cleanup();
         appendSkippedAttempt(
@@ -509,6 +543,47 @@ export async function runPiAiExecutor<TResponse>(
           currentRetryRound
         );
         continue;
+      }
+
+      // ── Context compaction (opt-in per alias/provider/global) ──────────────
+      // Runs before force-limit enforcement so a borderline-oversized request can
+      // be rescued by compaction before it would be rejected. Fail-open: on any
+      // error the original context is returned. Per-candidate, memoized.
+      const compaction = await compactContextForSend(
+        context,
+        route,
+        modelAlias,
+        compactionMemo,
+        attemptTimeout.signal
+      );
+      const sendContext = compaction.compacted ? compaction.context : context;
+
+      // ── Force-limit enforcement (opt-in per alias) ─────────────────────────
+      // Mirrors dispatcher.ts:384-394. Checked AFTER cooldown and BEFORE
+      // acquiring a concurrency slot, so a thrown ContextLengthExceededError
+      // (client-side; failover won't help) never leaks an acquired slot.
+      const aliasForLimit = route.canonicalModel
+        ? getConfig().models?.[route.canonicalModel]
+        : undefined;
+      try {
+        enforceContextLimitForRoute(
+          sendContext,
+          route,
+          aliasForLimit,
+          generationIntent.maxTokens,
+          incomingApiType
+        );
+      } catch (limitErr) {
+        attemptTimeout.cleanup();
+        appendFailureAttempt(
+          retryHistory,
+          route,
+          limitErr,
+          incomingApiType,
+          false,
+          currentRetryRound
+        );
+        throw limitErr;
       }
 
       // ── Concurrency acquire ────────────────────────────────────────────────
@@ -538,6 +613,16 @@ export async function runPiAiExecutor<TResponse>(
       }
 
       const piModel = buildPiAiModel(route.config, piAiProvider, piAiModelId, incomingApiType);
+      if (!piModel) {
+        // Should not happen (beta filter resolves the same way) but fail closed.
+        concurrency.release(route.provider, route.model);
+        attemptTimeout.cleanup();
+        const err = new Error(
+          `pi-ai model could not be resolved for ${piAiProvider}/${piAiModelId}`
+        ) as any;
+        err.routingContext = { statusCode: 400, code: 'unresolved_pi_ai_model' };
+        throw err;
+      }
 
       // ── Debug: set provider for this request ──────────────────────────────
       debug.setProviderForRequest(requestId, route.provider);
@@ -553,10 +638,20 @@ export async function runPiAiExecutor<TResponse>(
       attemptedProviders.push(`${route.provider}/${route.model}`);
 
       // ── Assemble ProviderStreamOptions ────────────────────────────────────
-      const reasoningOpts = buildReasoningOptions(piModel.api, piAiModelId, reasoningEffort);
+      const bodyHasSignal =
+        generationIntent.reasoning.effort != null ||
+        generationIntent.reasoning.budgetTokens != null ||
+        generationIntent.reasoning.enabled != null;
+      const chosenReasoning = bodyHasSignal
+        ? generationIntent.reasoning
+        : (suffixIntent ?? generationIntent.reasoning);
+      const effectiveGeneration: GenerationIntent = {
+        ...generationIntent,
+        reasoning: chosenReasoning,
+      };
+      const generationOpts = buildGenerationOptions(piModel as any, effectiveGeneration);
       const callOptions: ProviderStreamOptions = {
-        ...streamOptions,
-        ...reasoningOpts,
+        ...generationOpts,
         ...(toolChoice != null ? { toolChoice } : {}),
         ...(parallelToolCalls != null ? { parallelToolCalls } : {}),
         apiKey: route.config.api_key,
@@ -579,11 +674,21 @@ export async function runPiAiExecutor<TResponse>(
       const stallTtfbMs: number | null = (route.config as any).stallTtfbMs ?? globalStallTtfbMs;
       const stallCooldownEnabled: boolean = route.config.stall_cooldown !== false;
 
+      // Compaction metadata surfaced as x-plexus-compaction-* headers on BOTH the
+      // non-streaming and streaming paths.
+      const compactionMeta = compaction.compacted
+        ? {
+            strategy: compaction.strategy,
+            tokensBefore: compaction.tokensBefore,
+            tokensAfter: compaction.tokensAfter,
+          }
+        : undefined;
+
       try {
         if (!streaming) {
           // ── Non-streaming ────────────────────────────────────────────────
           const message = await debugRequestIdStorage.run(requestId, () =>
-            complete(piModel as any, context, callOptions)
+            piAiModels.complete(toDispatchModel(piModel as any), sendContext, callOptions)
           );
 
           cooldown.markProviderSuccess(route.provider, route.model);
@@ -646,11 +751,14 @@ export async function runPiAiExecutor<TResponse>(
 
           await onSuccess?.(message);
 
-          return { response: serializeMessage(message) };
+          return {
+            response: serializeMessage(message),
+            compaction: compactionMeta,
+          };
         } else {
           // ── Streaming ────────────────────────────────────────────────────
           const eventStream = await debugRequestIdStorage.run(requestId, () =>
-            stream(piModel as any, context, callOptions)
+            piAiModels.stream(toDispatchModel(piModel as any), sendContext, callOptions)
           );
 
           // Build and return the SSE generator — the generator owns
@@ -685,7 +793,7 @@ export async function runPiAiExecutor<TResponse>(
             serializeChunks,
           });
 
-          return { stream: gen };
+          return { stream: gen, compaction: compactionMeta };
         }
       } catch (err: any) {
         const effectiveErr = attemptTimeout.isTimedOut() ? buildTimeoutError() : err;

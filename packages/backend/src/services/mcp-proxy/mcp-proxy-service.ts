@@ -2,6 +2,7 @@ import { getConfig } from '../../config';
 import { logger } from '../../utils/logger';
 import { McpServerConfig } from '../../types/mcp';
 import { getClientIp } from '../../utils/ip';
+import { mcpProcessManager } from '../mcp-local/mcp-process-manager';
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -48,6 +49,13 @@ export function getMcpServerConfig(serverName: string): McpServerConfig | null {
 export function validateServerName(name: string): boolean {
   const slugRegex = /^[a-z0-9][a-z0-9-_]{1,62}$/;
   return slugRegex.test(name) && !RESERVED_SERVER_NAMES.has(name);
+}
+
+export function getEffectiveUpstreamUrl(serverConfig: McpServerConfig): string {
+  if (serverConfig.mode === 'local_http') {
+    return mcpProcessManager.getLocalUrl(serverConfig) || '';
+  }
+  return serverConfig.upstream_url;
 }
 
 export function filterHopByHopHeaders(
@@ -183,8 +191,22 @@ export async function proxyMcpRequest(
     };
   }
 
-  const upstreamUrl = serverConfig.upstream_url;
+  if (serverConfig.mode === 'local_http') {
+    try {
+      await mcpProcessManager.ensureRunning(serverName, serverConfig);
+    } catch (error) {
+      logger.error(`[mcp-proxy:${serverName}] local MCP server failed to start`, error);
+      return {
+        status: 502,
+        headers: {},
+        error: (error as Error).message || 'Local MCP server failed to start',
+      };
+    }
+  }
+
+  const upstreamUrl = getEffectiveUpstreamUrl(serverConfig);
   const staticHeaders = serverConfig.headers || {};
+  logger.info('[mcp-proxy:' + serverName + '] proxying ' + method + ' request to ' + upstreamUrl);
 
   logger.silly(`Server config: ${JSON.stringify({ upstreamUrl, staticHeaders })}`);
 
@@ -232,7 +254,9 @@ export async function proxyMcpRequest(
 
     logger.silly(`Starting fetch to ${url} with method ${method}`);
     const response = await fetch(url, fetchOptions);
-    logger.silly(`Fetch completed, status: ${response.status}`);
+    logger.info(
+      '[mcp-proxy:' + serverName + '] upstream fetch completed with status ' + response.status
+    );
 
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
@@ -247,7 +271,7 @@ export async function proxyMcpRequest(
     logger.silly(`Content-Type: ${contentType}`);
 
     if (contentType?.includes('text/event-stream') || (method === 'GET' && response.ok)) {
-      logger.debug(`Streaming response detected`);
+      logger.info('[mcp-proxy:' + serverName + '] upstream streaming response detected');
       if (response.body) {
         return {
           status: response.status,
@@ -270,7 +294,12 @@ export async function proxyMcpRequest(
       logger.silly(`Response body (text): ${responseText.substring(0, 500)}`);
     }
 
-    logger.silly(`Returning status: ${response.status}`);
+    logger.info(
+      '[mcp-proxy:' +
+        serverName +
+        '] returning buffered upstream response with status ' +
+        response.status
+    );
 
     return {
       status: response.status,

@@ -34,6 +34,15 @@ interface MigrationMeta {
 
 type Journal = { entries: Array<{ tag: string; when: number; breakpoints: boolean }> };
 
+type SqliteClient = {
+  run: (sql: string) => void;
+  query: (sql: string) => {
+    get: (...args: unknown[]) => unknown;
+    all: (...args: unknown[]) => unknown[];
+  };
+  prepare: (sql: string) => { run: (...args: unknown[]) => void };
+};
+
 async function readSql(
   tag: string,
   devDir: string
@@ -75,16 +84,6 @@ function isDuplicateColumnError(error: any): boolean {
   return error?.cause?.code === '42701' || error?.code === '42701';
 }
 
-function isSQLiteAlreadyExistsError(error: any): boolean {
-  const msg = (error?.cause?.message ?? '').toLowerCase();
-  return error?.cause?.name === 'SQLiteError' && msg.includes('already exists');
-}
-
-function isSQLiteDuplicateColumnError(error: any): boolean {
-  const msg = (error?.cause?.message ?? '').toLowerCase();
-  return error?.cause?.name === 'SQLiteError' && msg.includes('duplicate column name');
-}
-
 function toIdempotentStatement(statement: string): string {
   if (
     /ALTER\s+TABLE[\s\S]+ADD\s+COLUMN/i.test(statement) &&
@@ -95,11 +94,9 @@ function toIdempotentStatement(statement: string): string {
   return statement;
 }
 
-// Make a SQLite DDL statement idempotent by inserting IF NOT EXISTS guards.
-// Only handles CREATE TABLE and CREATE [UNIQUE] INDEX — ALTER TABLE ADD COLUMN
-// is left unchanged because bun:sqlite doesn't support ADD COLUMN IF NOT EXISTS
-// (despite underlying SQLite supporting it). Duplicate-column errors are caught
-// and handled in the catch block via the repair function.
+// Make a SQLite DDL statement safer by inserting IF NOT EXISTS guards.
+// ALTER TABLE ADD COLUMN is left unchanged because bun:sqlite doesn't support
+// ADD COLUMN IF NOT EXISTS; duplicate-column errors are ignored by the runner.
 function toIdempotentSQLiteStatement(statement: string): string {
   let s = statement;
   s = s.replace(/(CREATE\s+TABLE\s+)(`[\w]+`|\w+)/i, '$1IF NOT EXISTS $2');
@@ -107,153 +104,77 @@ function toIdempotentSQLiteStatement(statement: string): string {
   return s;
 }
 
-function isSQLiteDuplicateColumnName(cause: any): boolean {
-  const msg = (cause?.message ?? '').toLowerCase();
-  return cause?.name === 'SQLiteError' && msg.includes('duplicate column name');
+function getSqliteClient(db: any): SqliteClient {
+  const sqlite = db?.session?.client as SqliteClient | undefined;
+  if (!sqlite?.run || !sqlite?.query || !sqlite?.prepare) {
+    throw new Error('Cannot access underlying Bun SQLite client via db.session.client');
+  }
+  return sqlite;
 }
 
-function getSQLiteDuplicateColumnName(cause: any): string | null {
-  const match = (cause?.message ?? '').match(/duplicate column name:\s*[`']?(\w+)[`']?/i);
-  return match ? match[1]! : null;
+function isIgnorableSqliteDdlError(error: any): boolean {
+  const msg = String(error?.message ?? error?.cause?.message ?? '').toLowerCase();
+  return msg.includes('already exists') || msg.includes('duplicate column');
 }
 
-function attemptSQLiteAlreadyExistsRepair(
+/**
+ * Apply SQLite migrations statement-by-statement without wrapping in a transaction.
+ *
+ * Drizzle's built-in migrator runs each migration inside BEGIN/COMMIT and ROLLBACKs
+ * on failure. SQLite can still leave ALTER TABLE ADD COLUMN effects behind after a
+ * failed multi-statement migration, which then crashes every subsequent startup with
+ * "duplicate column name". Running statements outside a transaction and ignoring
+ * duplicate-column / already-exists errors makes startup self-healing.
+ */
+function runSqliteMigrationsIdempotently(
   db: any,
   migrations: MigrationMeta[],
-  journal: Journal,
-  migrationError: any
-): boolean {
-  const errorMsg = migrationError?.cause?.message ?? '';
-  const nameMatch = errorMsg.match(/(?:table|index)\s+[`']?(\w+)[`']?\s+already exists/i);
-  if (!nameMatch) return false;
-  const objectName = nameMatch[1]!.toLowerCase();
-
-  // Reach the underlying Bun SQLite Database through the drizzle session
-  const sqlite = db?.session?.client;
-  if (!sqlite?.run) {
-    logger.warn(
-      'SQLite repair skipped: could not access underlying Database client via db.session.client'
-    );
-    return false;
-  }
+  journal: Journal
+): void {
+  const sqlite = getSqliteClient(db);
 
   sqlite.run(`
     CREATE TABLE IF NOT EXISTS ${DRIZZLE_MIGRATIONS_TABLE} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       hash TEXT NOT NULL,
-      created_at INTEGER
+      created_at numeric
     )
   `);
+
+  // Match drizzle-orm's pending check: only compare against the latest created_at.
+  const lastDbMigration = sqlite
+    .query(
+      `SELECT id, hash, created_at FROM ${DRIZZLE_MIGRATIONS_TABLE} ORDER BY created_at DESC LIMIT 1`
+    )
+    .get() as { created_at: number | string } | null;
+  const lastCreatedAt = lastDbMigration ? Number(lastDbMigration.created_at) : 0;
 
   for (let i = 0; i < migrations.length; i++) {
     const migration = migrations[i]!;
     const entry = journal.entries[i]!;
-    const statements = migration.sql.map((s) => s.trim()).filter((s) => s.length > 0);
+    if (lastCreatedAt && lastCreatedAt >= migration.folderMillis) continue;
 
-    const refersToObject = statements.some((s) =>
-      s.toLowerCase().replace(/\s+/g, ' ').includes(`\`${objectName}\``)
-    );
-    if (!refersToObject) {
-      logger.silly(
-        `SQLite repair: migration ${entry.tag} does not reference ${objectName}, skipping`
-      );
-      continue;
-    }
-
-    const alreadyApplied = sqlite
+    // Also skip if this exact hash was already recorded (repair / partial bookkeeping).
+    const alreadyByHash = sqlite
       .query(`SELECT 1 as found FROM ${DRIZZLE_MIGRATIONS_TABLE} WHERE hash = ?`)
       .get(migration.hash);
-    if (alreadyApplied) continue;
+    if (alreadyByHash) continue;
 
-    logger.warn(
-      `Detected SQLite "already exists" migration drift in ${entry.tag}; applying idempotent repair`
-    );
+    logger.debug(`Applying SQLite migration ${entry.tag}`);
 
-    for (const statement of statements) {
-      const idempotent = toIdempotentSQLiteStatement(statement);
+    for (const statement of migration.sql) {
+      const trimmed = statement.trim();
+      if (!trimmed) continue;
+      const idempotent = toIdempotentSQLiteStatement(trimmed);
       try {
         sqlite.run(idempotent);
       } catch (err: any) {
-        const msg = (err?.message ?? '').toLowerCase();
-        if (msg.includes('already exists') || msg.includes('duplicate column')) continue;
-        throw err;
-      }
-    }
-
-    // alreadyApplied check above ensures we only reach here when the migration
-    // isn't tracked yet, so a plain INSERT is safe.
-    sqlite
-      .prepare(`INSERT INTO ${DRIZZLE_MIGRATIONS_TABLE} (hash, created_at) VALUES (?, ?)`)
-      .run(migration.hash, migration.folderMillis);
-
-    return true;
-  }
-
-  return false;
-}
-
-async function attemptSQLiteDuplicateColumnRepair(
-  db: any,
-  migrations: MigrationMeta[],
-  journal: Journal,
-  migrationError: any
-): Promise<boolean> {
-  const columnName = getSQLiteDuplicateColumnName(migrationError?.cause);
-  if (!columnName) return false;
-
-  // Reach the underlying Bun SQLite Database through the drizzle session
-  const sqlite = db?.session?.client;
-  if (!sqlite?.run) {
-    logger.warn(
-      'SQLite duplicate column repair skipped: could not access underlying Database client'
-    );
-    return false;
-  }
-
-  // Ensure migrations table exists
-  sqlite.run(`
-    CREATE TABLE IF NOT EXISTS ${DRIZZLE_MIGRATIONS_TABLE} (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      hash TEXT NOT NULL,
-      created_at INTEGER
-    )
-  `);
-
-  // Find the migration that adds this column
-  for (let i = 0; i < migrations.length; i++) {
-    const migration = migrations[i]!;
-    const entry = journal.entries[i]!;
-    const statements = migration.sql.map((s) => s.trim()).filter((s) => s.length > 0);
-
-    // Check if this migration adds this column (Drizzle SQLite uses ADD, not ADD COLUMN)
-    const hasColumn = statements.some((s) => {
-      const lower = s.toLowerCase().replace(/\s+/g, ' ');
-      return (
-        (lower.includes('add column') || /\balter\s+table\b.+\badd\b/.test(lower)) &&
-        lower.includes(`\`${columnName.toLowerCase()}\``)
-      );
-    });
-    if (!hasColumn) continue;
-
-    const alreadyApplied = sqlite
-      .query(`SELECT 1 as found FROM ${DRIZZLE_MIGRATIONS_TABLE} WHERE hash = ?`)
-      .get(migration.hash);
-    if (alreadyApplied) continue;
-
-    logger.warn(
-      `Detected duplicate column "${columnName}" migration drift in ${entry.tag}; applying idempotent repair`
-    );
-
-    // Apply remaining statements, ignoring duplicate-column / already-exists errors.
-    // Multi-statement migrations (e.g. max_attempts + retry_delay_seconds) must still
-    // run later statements even when an earlier ADD COLUMN already exists.
-    for (const statement of statements) {
-      const idempotent = toIdempotentSQLiteStatement(statement);
-      try {
-        sqlite.run(idempotent);
-      } catch (err: any) {
-        const msg = (err?.message ?? '').toLowerCase();
-        if (msg.includes('already exists') || msg.includes('duplicate column')) continue;
+        if (isIgnorableSqliteDdlError(err)) {
+          logger.warn(
+            `Ignoring idempotent DDL conflict in ${entry.tag}: ${err?.message ?? String(err)}`
+          );
+          continue;
+        }
         throw err;
       }
     }
@@ -261,11 +182,7 @@ async function attemptSQLiteDuplicateColumnRepair(
     sqlite
       .prepare(`INSERT INTO ${DRIZZLE_MIGRATIONS_TABLE} (hash, created_at) VALUES (?, ?)`)
       .run(migration.hash, migration.folderMillis);
-
-    return true;
   }
-
-  return false;
 }
 
 async function attemptPostgresDuplicateColumnRepair(
@@ -350,39 +267,7 @@ export async function runMigrations() {
               await Bun.file(path.join(DEV_MIGRATIONS_DIR.sqlite, 'meta', '_journal.json')).text()
             ) as Journal);
       const migrations = await buildMigrations(journal, DEV_MIGRATIONS_DIR.sqlite);
-      // Make all CREATE TABLE/INDEX statements idempotent before running so that
-      // schema drift (tables created outside the migration system) never causes a
-      // fatal startup failure. The hash field is computed from the original file
-      // content and is not affected by this transformation, so migration tracking
-      // remains correct.
-      const idempotentMigrations = migrations.map((m) => ({
-        ...m,
-        sql: m.sql.map(toIdempotentSQLiteStatement),
-      }));
-      try {
-        (db as any).dialect.migrate(idempotentMigrations, (db as any).session, {
-          migrationsFolder: '',
-        });
-      } catch (error: any) {
-        if (isSQLiteAlreadyExistsError(error) || isSQLiteDuplicateColumnError(error)) {
-          // Both "already exists" and "duplicate column name" indicate the schema
-          // has drifted (e.g. from a restored backup). Try to repair and retry.
-          let repaired = attemptSQLiteAlreadyExistsRepair(db, migrations, journal, error);
-          if (!repaired && isSQLiteDuplicateColumnError(error)) {
-            repaired = await attemptSQLiteDuplicateColumnRepair(db, migrations, journal, error);
-          }
-          if (repaired) {
-            logger.warn('Retrying SQLite migrations after drift repair');
-            (db as any).dialect.migrate(idempotentMigrations, (db as any).session, {
-              migrationsFolder: '',
-            });
-          } else {
-            throw error;
-          }
-        } else {
-          throw error;
-        }
-      }
+      runSqliteMigrationsIdempotently(db, migrations, journal);
     } else {
       const journal =
         embedded.size > 0

@@ -161,10 +161,9 @@ function attemptSQLiteAlreadyExistsRepair(
     }
 
     const alreadyApplied = sqlite
-      .query(`SELECT id FROM ${DRIZZLE_MIGRATIONS_TABLE} WHERE hash = ?`)
+      .query(`SELECT 1 as found FROM ${DRIZZLE_MIGRATIONS_TABLE} WHERE hash = ?`)
       .get(migration.hash);
-    // Check id is not null - row exists with matching hash
-    if (alreadyApplied && alreadyApplied.id !== null) continue;
+    if (alreadyApplied) continue;
 
     logger.warn(
       `Detected SQLite "already exists" migration drift in ${entry.tag}; applying idempotent repair`
@@ -223,39 +222,42 @@ async function attemptSQLiteDuplicateColumnRepair(
   // Find the migration that adds this column
   for (let i = 0; i < migrations.length; i++) {
     const migration = migrations[i]!;
+    const entry = journal.entries[i]!;
     const statements = migration.sql.map((s) => s.trim()).filter((s) => s.length > 0);
 
-    // Check if this migration adds this column
+    // Check if this migration adds this column (Drizzle SQLite uses ADD, not ADD COLUMN)
     const hasColumn = statements.some((s) => {
-      const lower = s.toLowerCase();
-      return lower.includes('add ') && lower.includes(`\`${columnName.toLowerCase()}\``);
-    });
-    if (!hasColumn) continue;
-
-    // This migration adds the column - now verify it uses ADD syntax (with or without COLUMN keyword)
-    const addColumnStmt = statements.find((s) => {
-      const lower = s.toLowerCase();
+      const lower = s.toLowerCase().replace(/\s+/g, ' ');
       return (
-        (lower.replace(/\s+/g, ' ').includes('add column') || /\badd\b/i.test(s)) &&
+        (lower.includes('add column') || /\balter\s+table\b.+\badd\b/.test(lower)) &&
         lower.includes(`\`${columnName.toLowerCase()}\``)
       );
     });
-    if (!addColumnStmt) continue;
+    if (!hasColumn) continue;
 
-    // Check if already recorded as applied
-    try {
-      const alreadyApplied = sqlite;
-      // Check id is not null - row exists with matching hash
-      if (alreadyApplied && alreadyApplied.id !== null) continue;
-    } catch {
-      // Table may not exist yet, ignore
-    }
+    const alreadyApplied = sqlite
+      .query(`SELECT 1 as found FROM ${DRIZZLE_MIGRATIONS_TABLE} WHERE hash = ?`)
+      .get(migration.hash);
+    if (alreadyApplied) continue;
 
     logger.warn(
-      `Detected duplicate column "${columnName}" migration drift; marking migration as applied`
+      `Detected duplicate column "${columnName}" migration drift in ${entry.tag}; applying idempotent repair`
     );
 
-    // Mark as applied
+    // Apply remaining statements, ignoring duplicate-column / already-exists errors.
+    // Multi-statement migrations (e.g. max_attempts + retry_delay_seconds) must still
+    // run later statements even when an earlier ADD COLUMN already exists.
+    for (const statement of statements) {
+      const idempotent = toIdempotentSQLiteStatement(statement);
+      try {
+        sqlite.run(idempotent);
+      } catch (err: any) {
+        const msg = (err?.message ?? '').toLowerCase();
+        if (msg.includes('already exists') || msg.includes('duplicate column')) continue;
+        throw err;
+      }
+    }
+
     sqlite
       .prepare(`INSERT INTO ${DRIZZLE_MIGRATIONS_TABLE} (hash, created_at) VALUES (?, ?)`)
       .run(migration.hash, migration.folderMillis);

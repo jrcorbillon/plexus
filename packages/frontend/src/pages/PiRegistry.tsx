@@ -1048,7 +1048,7 @@ function ModelRow({
             onChange={(e) => setMaxTokens(e.target.value)}
           />
         </div>
-        <label className="flex flex-col gap-0.5 justify-end pb-0.5">
+        <div className="flex flex-col gap-0.5 justify-end pb-0.5">
           <span className="font-body text-[11px] text-text-secondary">
             Reasoning {mode === 'inherit' ? '(override)' : ''}
           </span>
@@ -1075,7 +1075,7 @@ function ModelRow({
               <span className="font-body text-[12px] text-text">Enabled</span>
             </label>
           )}
-        </label>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>

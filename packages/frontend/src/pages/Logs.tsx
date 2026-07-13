@@ -741,7 +741,7 @@ export const Logs = () => {
               onChange={(v) => setFilters({ ...filters, provider: v })}
             />
           </div>
-          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <div className="col-span-3 flex w-full flex-wrap items-center gap-2 sm:col-auto sm:w-auto">
             <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:flex-none sm:gap-2">
               <PlayCircle size={18} className="shrink-0 text-slate-400 sm:h-6 sm:w-6" />
               <DateTimePicker
@@ -979,7 +979,8 @@ export const Logs = () => {
                       </div>
                     </div>
 
-                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    {(log.hasError || log.hasDebug) && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {log.hasError && (
                           <Button
                             size="sm"
@@ -1004,16 +1005,8 @@ export const Logs = () => {
                             Debug
                           </Button>
                         )}
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => handleDelete(log.requestId)}
-                          title="Delete log"
-                        >
-                          <Trash2 size={12} />
-                          Delete
-                        </Button>
                       </div>
+                    )}
                   </article>
                 );
               })

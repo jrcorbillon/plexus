@@ -74,7 +74,8 @@ async function filterGroupTargets(
   config: ReturnType<typeof getConfig>,
   alias: ModelConfig,
   incomingApiType?: string,
-  logModelName?: string
+  logModelName?: string,
+  cooldownBypassKeys?: ReadonlySet<string>
 ): Promise<EnrichedModelTarget[]> {
   if (groupTargets.length === 0) return [];
 
@@ -95,8 +96,10 @@ async function filterGroupTargets(
     (t) => config.providers[t.provider]?.disable_cooldown !== true
   );
 
-  const healthyEligible =
-    await CooldownManager.getInstance().filterHealthyTargets(cooldownEligible);
+  const healthyEligible = await CooldownManager.getInstance().filterHealthyTargets(
+    cooldownEligible,
+    cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
+  );
 
   if (logModelName) {
     if (healthyEligible.length < cooldownEligible.length) {
@@ -294,9 +297,11 @@ export class Router {
   static async resolveCandidates(
     modelName: string,
     incomingApiType?: string,
-    sessionKey?: string | null
+    sessionKey?: string | null,
+    options?: { cooldownBypassKeys?: ReadonlySet<string> }
   ): Promise<RouteResult[]> {
     const config = getConfig();
+    const cooldownBypassKeys = options?.cooldownBypassKeys;
 
     // Direct target group routing: direct/alias/target_group
     const parsed = tryParseDirectGroup(modelName);
@@ -312,7 +317,8 @@ export class Router {
             config,
             alias,
             incomingApiType,
-            modelName
+            modelName,
+            cooldownBypassKeys
           );
 
           if (enriched.length === 0) return [];
@@ -372,7 +378,8 @@ export class Router {
         config,
         alias,
         incomingApiType,
-        modelName
+        modelName,
+        cooldownBypassKeys
       );
 
       if (enriched.length === 0) continue;
@@ -422,8 +429,13 @@ export class Router {
     return orderedCandidates;
   }
 
-  static async resolve(modelName: string, incomingApiType?: string): Promise<RouteResult> {
+  static async resolve(
+    modelName: string,
+    incomingApiType?: string,
+    options?: { cooldownBypassKeys?: ReadonlySet<string> }
+  ): Promise<RouteResult> {
     const config = getConfig();
+    const cooldownBypassKeys = options?.cooldownBypassKeys;
 
     // Direct routing bypass
     if (modelName.startsWith('direct/')) {
@@ -440,7 +452,8 @@ export class Router {
               config,
               alias,
               incomingApiType,
-              modelName
+              modelName,
+              cooldownBypassKeys
             );
 
             if (enriched.length === 0) {
@@ -502,7 +515,14 @@ export class Router {
 
     if (alias && alias.target_groups && alias.target_groups.length > 0) {
       for (const group of alias.target_groups) {
-        const enriched = await filterGroupTargets(group.targets, config, alias, incomingApiType);
+        const enriched = await filterGroupTargets(
+          group.targets,
+          config,
+          alias,
+          incomingApiType,
+          undefined,
+          cooldownBypassKeys
+        );
 
         if (enriched.length === 0) continue;
 

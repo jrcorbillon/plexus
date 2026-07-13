@@ -34,7 +34,11 @@ import type {
 import type { FastifyRequest } from 'fastify';
 
 import { Router, resolveCanonicalModel } from '../../services/router';
-import { getAliasRetryPolicy, waitForRetryRound } from '../../services/alias-retry-policy';
+import {
+  cooldownBypassKeysForRound,
+  getAliasRetryPolicy,
+  waitForRetryRound,
+} from '../../services/alias-retry-policy';
 import type { RouteResult } from '../../services/router';
 import { CooldownManager } from '../../services/cooldown-manager';
 import { ConcurrencyTracker } from '../../services/concurrency-tracker';
@@ -458,20 +462,26 @@ export async function runPiAiExecutor<TResponse>(
       logger.warn(
         `Failover: retry round ${currentRetryRound}/${maxAttempts} for ${modelAlias} (delay ${retryDelaySeconds}s)`
       );
-      // Allow retry rounds to re-attempt targets cooled down in earlier rounds of this request
-      const cooldownManager = CooldownManager.getInstance();
-      for (const key of attemptedProviders) {
-        const slash = key.indexOf('/');
-        if (slash <= 0) continue;
-        await cooldownManager.clearCooldown(key.slice(0, slash), key.slice(slash + 1));
-      }
     }
 
+    const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
     // ── Resolve candidates ────────────────────────────────────────────────────
-    let candidates = await Router.resolveCandidates(routingAlias, incomingApiType);
+    let candidates = await Router.resolveCandidates(
+      routingAlias,
+      incomingApiType,
+      undefined,
+      cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+    );
     if (candidates.length === 0) {
       try {
-        candidates = [await Router.resolve(routingAlias, incomingApiType)];
+        candidates = [
+          await Router.resolve(
+            routingAlias,
+            incomingApiType,
+            cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+          ),
+        ];
       } catch {
         if (round < maxAttempts - 1) continue roundLoop;
         throw buildNoBetaCandidatesError();
@@ -518,7 +528,11 @@ export async function runPiAiExecutor<TResponse>(
 
       // ── Cooldown check ───────────────────────────────────────────────────────
       const cooldown = CooldownManager.getInstance();
-      const healthy = await cooldown.isProviderHealthy(route.provider, route.model);
+      const healthy = await cooldown.isProviderHealthy(
+        route.provider,
+        route.model,
+        cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
+      );
       if (!healthy) {
         attemptTimeout.cleanup();
         appendSkippedAttempt(
@@ -684,7 +698,13 @@ export async function runPiAiExecutor<TResponse>(
 
           // ── Build usage record ─────────────────────────────────────────
           const ttftMs = consumeTtfb(requestId);
-          const usageData = buildUsageFromMessage(message, piModel as any, startTime, ttftMs, route);
+          const usageData = buildUsageFromMessage(
+            message,
+            piModel as any,
+            startTime,
+            ttftMs,
+            route
+          );
           const usageRecord = {
             requestId,
             date: new Date().toISOString(),

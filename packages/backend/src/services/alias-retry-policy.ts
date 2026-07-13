@@ -17,6 +17,18 @@ export function getAliasRetryPolicy(
 }
 
 /**
+ * Keys (`provider/model`) this request may re-attempt despite shared cooldowns.
+ * Only applies on retry rounds (round > 0); leaves global cooldown state intact.
+ */
+export function cooldownBypassKeysForRound(
+  round: number,
+  attemptedProviders: readonly string[]
+): ReadonlySet<string> | undefined {
+  if (round <= 0 || attemptedProviders.length === 0) return undefined;
+  return new Set(attemptedProviders);
+}
+
+/**
  * Sleep before starting a retry round. No delay before round 1 (round index 0).
  * Aborts cleanly when the client disconnects.
  */

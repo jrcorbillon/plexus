@@ -305,4 +305,41 @@ describe('CooldownManager', () => {
       expect(cm.getCooldowns()).toHaveLength(0);
     });
   });
+
+  describe('request-local bypassKeys', () => {
+    test('bypassKeys treats model-specific cooldown as healthy without clearing it', async () => {
+      setConfigForTesting({
+        providers: {},
+        models: {},
+        keys: {},
+        failover: { enabled: false, retryableStatusCodes: [], retryableErrors: [] },
+        quotas: [],
+      } as any);
+
+      const cm = CooldownManager.getInstance();
+      await cm.markProviderFailure('p1', 'm1');
+
+      expect(await cm.isProviderHealthy('p1', 'm1')).toBe(false);
+      expect(await cm.isProviderHealthy('p1', 'm1', { bypassKeys: new Set(['p1/m1']) })).toBe(true);
+      expect(await cm.isProviderHealthy('p1', 'm1')).toBe(false);
+      expect(cm.getCooldowns().some((c) => c.provider === 'p1' && c.model === 'm1')).toBe(true);
+    });
+
+    test('bypassKeys still honors provider-wide quota cooldown', async () => {
+      setConfigForTesting({
+        providers: {},
+        models: {},
+        keys: {},
+        failover: { enabled: false, retryableStatusCodes: [], retryableErrors: [] },
+        quotas: [],
+      } as any);
+
+      const cm = CooldownManager.getInstance();
+      await cm.markProviderFailure('p1', '');
+
+      expect(await cm.isProviderHealthy('p1', 'm1', { bypassKeys: new Set(['p1/m1']) })).toBe(
+        false
+      );
+    });
+  });
 });

@@ -1,5 +1,9 @@
 import { describe, expect, test, vi, afterEach } from 'vitest';
-import { getAliasRetryPolicy, waitForRetryRound } from '../alias-retry-policy';
+import {
+  cooldownBypassKeysForRound,
+  getAliasRetryPolicy,
+  waitForRetryRound,
+} from '../alias-retry-policy';
 import type { PlexusConfig } from '../../config';
 
 describe('alias-retry-policy', () => {
@@ -33,6 +37,14 @@ describe('alias-retry-policy', () => {
       maxAttempts: 3,
       retryDelaySeconds: 5,
     });
+  });
+
+  test('cooldownBypassKeysForRound is empty on first round', () => {
+    expect(cooldownBypassKeysForRound(0, ['p1/m1'])).toBeUndefined();
+  });
+
+  test('cooldownBypassKeysForRound returns attempted keys on retry rounds', () => {
+    expect(cooldownBypassKeysForRound(1, ['p1/m1', 'p2/m2'])).toEqual(new Set(['p1/m1', 'p2/m2']));
   });
 
   test('waitForRetryRound skips delay for round 0', async () => {

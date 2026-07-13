@@ -12,7 +12,11 @@ import {
   KeyAccessPolicy,
 } from '../types/unified';
 import { Router, resolveCanonicalModel } from './router';
-import { getAliasRetryPolicy, waitForRetryRound } from './alias-retry-policy';
+import {
+  cooldownBypassKeysForRound,
+  getAliasRetryPolicy,
+  waitForRetryRound,
+} from './alias-retry-policy';
 import { TransformerFactory } from './transformer-factory';
 import { logger } from '../utils/logger';
 import { QUOTA_ERROR_PATTERNS } from '../utils/constants';
@@ -303,18 +307,24 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for ${request.model} (delay ${retryDelaySeconds}s)`
         );
-        await this.clearCooldownsForAttempts(attemptedProviders);
       }
+
+      const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
 
       let candidates = await Router.resolveCandidates(
         request.model,
         request.incomingApiType,
-        sessionKey
+        sessionKey,
+        cooldownBypassKeys ? { cooldownBypassKeys } : undefined
       );
 
       // Fallback for direct/provider/model syntax and legacy single-route behavior
       if (candidates.length === 0) {
-        const singleRoute = await Router.resolve(request.model, request.incomingApiType);
+        const singleRoute = await Router.resolve(
+          request.model,
+          request.incomingApiType,
+          cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+        );
         candidates = [singleRoute];
       }
 
@@ -400,7 +410,8 @@ export class Dispatcher {
         // Re-check cooldown status before attempting this target
         const isHealthy = await CooldownManager.getInstance().isProviderHealthy(
           route.provider,
-          route.model
+          route.model,
+          cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
         );
         if (!isHealthy) {
           attemptTimeout.cleanup();
@@ -1079,7 +1090,11 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
+      if (
+        round < maxAttempts - 1 &&
+        failoverEnabled &&
+        this.shouldStartRetryRound(lastError, failover)
+      ) {
         continue roundLoop;
       }
       break roundLoop;
@@ -1092,21 +1107,15 @@ export class Dispatcher {
     return retryableStatusCodes.includes(statusCode);
   }
 
-  /** Clear cooldowns set during earlier rounds so a retry round can re-attempt the same targets. */
-  private async clearCooldownsForAttempts(attemptedProviders: string[]): Promise<void> {
-    const cooldownManager = CooldownManager.getInstance();
-    for (const key of attemptedProviders) {
-      const slash = key.indexOf('/');
-      if (slash <= 0) continue;
-      await cooldownManager.clearCooldown(key.slice(0, slash), key.slice(slash + 1));
-    }
-  }
-
   /** Only start another alias round when the last failure is still considered retryable. */
   private shouldStartRetryRound(
     lastError: any,
     failover: { retryableStatusCodes?: number[]; retryableErrors?: string[] } | undefined
   ): boolean {
+    // Match intra-round failover: attempt timeouts are always retryable at the round layer.
+    if (lastError?.routingContext?.code === 'upstream_timeout') {
+      return true;
+    }
     const statusCode = lastError?.routingContext?.statusCode;
     if (typeof statusCode === 'number') {
       return this.isRetryableStatus(statusCode, failover?.retryableStatusCodes || []);
@@ -3298,12 +3307,22 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for embeddings ${request.model} (delay ${retryDelaySeconds}s)`
         );
-        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
-      let candidates = await Router.resolveCandidates(request.model, 'embeddings');
+      const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
+      let candidates = await Router.resolveCandidates(
+        request.model,
+        'embeddings',
+        undefined,
+        cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+      );
       if (candidates.length === 0) {
-        const singleRoute = await Router.resolve(request.model, 'embeddings');
+        const singleRoute = await Router.resolve(
+          request.model,
+          'embeddings',
+          cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+        );
         candidates = [singleRoute];
       }
 
@@ -3317,7 +3336,8 @@ export class Dispatcher {
         // Re-check cooldown status before attempting this target
         const isHealthy = await CooldownManager.getInstance().isProviderHealthy(
           route.provider,
-          route.model
+          route.model,
+          cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
         );
         if (!isHealthy) {
           logger.warn(`Skipping ${route.provider}/${route.model} - provider is on cooldown`);
@@ -3401,7 +3421,9 @@ export class Dispatcher {
             }
           }
 
-          logger.info(`Dispatching embeddings ${request.model} to ${route.provider}:${route.model}`);
+          logger.info(
+            `Dispatching embeddings ${request.model} to ${route.provider}:${route.model}`
+          );
           logger.silly('Embeddings Request Payload', payload);
 
           if (request.requestId) {
@@ -3547,7 +3569,11 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
+      if (
+        round < maxAttempts - 1 &&
+        failoverEnabled &&
+        this.shouldStartRetryRound(lastError, failover)
+      ) {
         continue roundLoop;
       }
       break roundLoop;
@@ -3584,12 +3610,22 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for transcriptions ${request.model} (delay ${retryDelaySeconds}s)`
         );
-        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
-      let candidates = await Router.resolveCandidates(request.model, 'transcriptions');
+      const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
+      let candidates = await Router.resolveCandidates(
+        request.model,
+        'transcriptions',
+        undefined,
+        cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+      );
       if (candidates.length === 0) {
-        const singleRoute = await Router.resolve(request.model, 'transcriptions');
+        const singleRoute = await Router.resolve(
+          request.model,
+          'transcriptions',
+          cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+        );
         candidates = [singleRoute];
       }
 
@@ -3603,7 +3639,8 @@ export class Dispatcher {
         // Re-check cooldown status before attempting this target
         const isHealthy = await CooldownManager.getInstance().isProviderHealthy(
           route.provider,
-          route.model
+          route.model,
+          cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
         );
         if (!isHealthy) {
           logger.warn(`Skipping ${route.provider}/${route.model} - provider is on cooldown`);
@@ -3819,7 +3856,11 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
+      if (
+        round < maxAttempts - 1 &&
+        failoverEnabled &&
+        this.shouldStartRetryRound(lastError, failover)
+      ) {
         continue roundLoop;
       }
       break roundLoop;
@@ -3855,12 +3896,22 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for speech ${request.model} (delay ${retryDelaySeconds}s)`
         );
-        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
-      let candidates = await Router.resolveCandidates(request.model, 'speech');
+      const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
+      let candidates = await Router.resolveCandidates(
+        request.model,
+        'speech',
+        undefined,
+        cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+      );
       if (candidates.length === 0) {
-        const singleRoute = await Router.resolve(request.model, 'speech');
+        const singleRoute = await Router.resolve(
+          request.model,
+          'speech',
+          cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+        );
         candidates = [singleRoute];
       }
 
@@ -3874,7 +3925,8 @@ export class Dispatcher {
         // Re-check cooldown status before attempting this target
         const isHealthy = await CooldownManager.getInstance().isProviderHealthy(
           route.provider,
-          route.model
+          route.model,
+          cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
         );
         if (!isHealthy) {
           logger.warn(`Skipping ${route.provider}/${route.model} - provider is on cooldown`);
@@ -4131,7 +4183,11 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
+      if (
+        round < maxAttempts - 1 &&
+        failoverEnabled &&
+        this.shouldStartRetryRound(lastError, failover)
+      ) {
         continue roundLoop;
       }
       break roundLoop;
@@ -4168,12 +4224,22 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for image generation ${request.model} (delay ${retryDelaySeconds}s)`
         );
-        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
-      let candidates = await Router.resolveCandidates(request.model, 'images');
+      const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
+      let candidates = await Router.resolveCandidates(
+        request.model,
+        'images',
+        undefined,
+        cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+      );
       if (candidates.length === 0) {
-        const singleRoute = await Router.resolve(request.model, 'images');
+        const singleRoute = await Router.resolve(
+          request.model,
+          'images',
+          cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+        );
         candidates = [singleRoute];
       }
 
@@ -4187,7 +4253,8 @@ export class Dispatcher {
         // Re-check cooldown status before attempting this target
         const isHealthy = await CooldownManager.getInstance().isProviderHealthy(
           route.provider,
-          route.model
+          route.model,
+          cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
         );
         if (!isHealthy) {
           logger.warn(`Skipping ${route.provider}/${route.model} - provider is on cooldown`);
@@ -4399,7 +4466,11 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
+      if (
+        round < maxAttempts - 1 &&
+        failoverEnabled &&
+        this.shouldStartRetryRound(lastError, failover)
+      ) {
         continue roundLoop;
       }
       break roundLoop;
@@ -4435,12 +4506,22 @@ export class Dispatcher {
         logger.warn(
           `Failover: retry round ${round + 1}/${maxAttempts} for image edit ${request.model} (delay ${retryDelaySeconds}s)`
         );
-        await this.clearCooldownsForAttempts(attemptedProviders);
       }
 
-      let candidates = await Router.resolveCandidates(request.model, 'images');
+      const cooldownBypassKeys = cooldownBypassKeysForRound(round, attemptedProviders);
+
+      let candidates = await Router.resolveCandidates(
+        request.model,
+        'images',
+        undefined,
+        cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+      );
       if (candidates.length === 0) {
-        const singleRoute = await Router.resolve(request.model, 'images');
+        const singleRoute = await Router.resolve(
+          request.model,
+          'images',
+          cooldownBypassKeys ? { cooldownBypassKeys } : undefined
+        );
         candidates = [singleRoute];
       }
 
@@ -4454,7 +4535,8 @@ export class Dispatcher {
         // Re-check cooldown status before attempting this target
         const isHealthy = await CooldownManager.getInstance().isProviderHealthy(
           route.provider,
-          route.model
+          route.model,
+          cooldownBypassKeys ? { bypassKeys: cooldownBypassKeys } : undefined
         );
         if (!isHealthy) {
           logger.warn(`Skipping ${route.provider}/${route.model} - provider is on cooldown`);
@@ -4659,7 +4741,11 @@ export class Dispatcher {
         }
       }
 
-      if (round < maxAttempts - 1 && this.shouldStartRetryRound(lastError, failover)) {
+      if (
+        round < maxAttempts - 1 &&
+        failoverEnabled &&
+        this.shouldStartRetryRound(lastError, failover)
+      ) {
         continue roundLoop;
       }
       break roundLoop;

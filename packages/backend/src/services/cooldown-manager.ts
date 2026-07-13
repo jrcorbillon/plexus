@@ -258,7 +258,16 @@ export class CooldownManager {
     }
   }
 
-  public async isProviderHealthy(provider: string, model: string): Promise<boolean> {
+  /**
+   * @param options.bypassKeys Request-local set of `provider/model` keys that should
+   *   ignore model-specific cooldowns (e.g. alias retry rounds). Provider-wide quota
+   *   cooldowns are still honored. Does not mutate shared cooldown state.
+   */
+  public async isProviderHealthy(
+    provider: string,
+    model: string,
+    options?: { bypassKeys?: ReadonlySet<string> }
+  ): Promise<boolean> {
     // First check for a provider-wide cooldown (keyed with empty model string).
     // This is set by the quota scheduler when any checker detects utilization at or above its threshold,
     // and blocks all models under the provider until the quota window resets.
@@ -270,6 +279,11 @@ export class CooldownManager {
         );
         return false;
       }
+    }
+
+    // Request-local bypass for model-specific cooldown only (alias retry rounds).
+    if (options?.bypassKeys?.has(`${provider}/${model}`)) {
+      return true;
     }
 
     const key = CooldownManager.makeCooldownKey(provider, model);
@@ -305,11 +319,14 @@ export class CooldownManager {
     return false;
   }
 
-  public async filterHealthyTargets(targets: Target[]): Promise<Target[]> {
+  public async filterHealthyTargets(
+    targets: Target[],
+    options?: { bypassKeys?: ReadonlySet<string> }
+  ): Promise<Target[]> {
     const healthyTargets: Target[] = [];
 
     for (const target of targets) {
-      const isHealthy = await this.isProviderHealthy(target.provider, target.model);
+      const isHealthy = await this.isProviderHealthy(target.provider, target.model, options);
       if (isHealthy) {
         healthyTargets.push(target);
       }

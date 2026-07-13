@@ -98,6 +98,16 @@ class McpProcessManager {
         logger.info(`[mcp-local:${serverName}] stopping local MCP process`, { pid: child.pid });
         child.kill('SIGTERM');
         await Promise.race([child.exited, Bun.sleep(3000)]);
+        if (child.exitCode === null) {
+          logger.warn(`[mcp-local:${serverName}] process did not exit after SIGTERM, sending SIGKILL`, {
+            pid: child.pid,
+          });
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // Process may have exited between the check and kill.
+          }
+        }
       } catch (error) {
         logger.warn(`[mcp-local:${serverName}] failed to stop local MCP process`, error);
         this.appendLog(state, 'Failed to stop process: ' + (error as Error).message);
@@ -189,6 +199,7 @@ class McpProcessManager {
     this.consumeStream(state, child.stderr, 'stderr');
 
     child.exited.then((code) => {
+      const previousStatus = state.status;
       if (state.process === child) {
         state.process = null;
         state.status = code === 0 ? 'stopped' : 'failed';
@@ -198,7 +209,7 @@ class McpProcessManager {
       const level = code === 0 ? 'info' : 'warn';
       logger[level](`[mcp-local:${serverName}] local MCP process exited`, {
         code,
-        previousStatus: state.status,
+        previousStatus,
       });
       this.appendLog(state, 'Process exited with code ' + code);
     });

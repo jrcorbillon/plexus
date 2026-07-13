@@ -444,17 +444,18 @@ describe('registerCustomProvidersWithPiAi', () => {
     expect(registeredProviders['my-anthropic-proxy']).toBeDefined();
   });
 
-  it('does not re-register a provider already present in piAiModels', async () => {
+  it('re-registers an existing provider so api changes take effect', async () => {
     configWith({
       providers: { neuralwatt: { api: 'openai-completions' } },
     });
-    // Pre-populate as if already registered.
+    // Pre-populate as if already registered with a stale definition.
     registeredProviders['neuralwatt'] = { id: 'neuralwatt', sentinel: true };
 
     await registerCustomProvidersWithPiAi();
 
-    // The original sentinel object must survive — setProvider was not called again.
-    expect(registeredProviders['neuralwatt'].sentinel).toBe(true);
+    // setProvider must overwrite the stale entry with a fresh provider.
+    expect(registeredProviders['neuralwatt'].sentinel).toBeUndefined();
+    expect(registeredProviders['neuralwatt'].id).toBe('neuralwatt');
   });
 
   it('is a no-op when pi_ai_custom_providers is empty', async () => {

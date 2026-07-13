@@ -2018,6 +2018,10 @@ sticky_session: alias.sticky_session ?? true,
       ...(alias.model_architecture && { model_architecture: alias.model_architecture }),
       ...(alias.extraBody &&
         Object.keys(alias.extraBody).length > 0 && { extraBody: alias.extraBody }),
+      ...(alias.compaction &&
+        Object.values(alias.compaction).some((v) => v != null) && {
+          compaction: alias.compaction,
+        }),
       target_groups: alias.target_groups.map((g) => ({
         name: g.name,
         selector: g.selector,
@@ -2145,6 +2149,7 @@ sticky_session: val.sticky_session ?? true,
             val.extraBody && typeof val.extraBody === 'object' && !Array.isArray(val.extraBody)
               ? val.extraBody
               : {},
+          compaction: val.compaction,
         });
       });
       return aliases;

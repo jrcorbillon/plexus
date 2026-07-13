@@ -230,6 +230,19 @@ export const McpPage: React.FC = () => {
     return args;
   };
 
+  const serializeArguments = (args: string[]): string =>
+    args
+      .map((arg) => {
+        if (/\s/.test(arg)) {
+          if (arg.includes('"')) {
+            return `'${arg.replace(/'/g, "'\\''")}'`;
+          }
+          return `"${arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+        }
+        return arg;
+      })
+      .join(' ');
+
   const handleAddNew = () => {
     setEditingServerName(null);
     setServerNameInput('');
@@ -238,7 +251,7 @@ export const McpPage: React.FC = () => {
     setHeaderValue('');
     setEnvKey('');
     setEnvValue('');
-    setArgsInput((EMPTY_LOCAL_SERVER.args || []).join(' '));
+    setArgsInput(serializeArguments(EMPTY_LOCAL_SERVER.args || []));
     setIsModalOpen(true);
   };
 
@@ -254,8 +267,8 @@ export const McpPage: React.FC = () => {
     setEnvValue('');
     setArgsInput(
       server.mode === 'local_http'
-        ? (server.args || []).join(' ')
-        : (EMPTY_LOCAL_SERVER.args || []).join(' ')
+        ? serializeArguments(server.args || [])
+        : serializeArguments(EMPTY_LOCAL_SERVER.args || [])
     );
     setIsModalOpen(true);
   };
@@ -1164,7 +1177,7 @@ export const McpPage: React.FC = () => {
                   value={editingServer.mode === 'local_http' ? 'local_http' : 'remote_http'}
                   onChange={(e) => {
                     if (e.target.value === 'local_http') {
-                      setArgsInput((EMPTY_LOCAL_SERVER.args || []).join(' '));
+                      setArgsInput(serializeArguments(EMPTY_LOCAL_SERVER.args || []));
                       setEditingServer({
                         ...EMPTY_LOCAL_SERVER,
                         enabled: editingServer.enabled,

@@ -792,14 +792,14 @@ export class ConfigRepository {
    */
   async migrateModelTypes(): Promise<number> {
     const schema = this.schema();
-    const result = await this.db()
+    // Use returning() so both SQLite and postgres-js report affected row count
+    // (postgres-js update results do not expose rowCount/changes reliably).
+    const updated = await this.db()
       .update(schema.modelAliases)
       .set({ modelType: 'text', updatedAt: now() })
-      .where(sql`${schema.modelAliases.modelType} IN ('chat', 'responses')`);
-    // Both SQLite (bun) and postgres-js drivers expose rowCount/changes on the result
-    const affected =
-      (result as any)?.rowsAffected ?? (result as any)?.changes ?? (result as any)?.rowCount ?? 0;
-    return Number(affected);
+      .where(sql`${schema.modelAliases.modelType} IN ('chat', 'responses')`)
+      .returning({ id: schema.modelAliases.id });
+    return updated.length;
   }
 
   async saveAlias(slug: string, config: ModelConfig): Promise<void> {

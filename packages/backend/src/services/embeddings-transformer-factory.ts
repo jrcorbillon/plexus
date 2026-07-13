@@ -33,12 +33,11 @@ export class EmbeddingsTransformerFactory {
         return new GeminiEmbeddingsTransformer();
       case 'openai':
       case 'chat':
+        return new OpenAIEmbeddingsTransformer();
       default:
-        if (!['openai', 'chat'].includes(providerType.toLowerCase())) {
-          logger.warn(
-            `Unknown embeddings provider type '${providerType}', defaulting to OpenAI format`
-          );
-        }
+        logger.warn(
+          `Unknown embeddings provider type '${providerType}', defaulting to OpenAI format`
+        );
         return new OpenAIEmbeddingsTransformer();
     }
   }

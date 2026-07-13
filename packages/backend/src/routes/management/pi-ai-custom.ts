@@ -46,9 +46,9 @@ export async function registerPiAiCustomRoutes(fastify: FastifyInstance) {
       }
       try {
         await configService.savePiAiCustomProvider(name, result.data);
-        // Await re-registration so the provider is available in piAiModels before
-        // we respond — avoids a race where a request arrives before registration
-        // completes and toDispatchModel falls back to the wrong builtin API path.
+        // rebuildCache() is coalesced/deferred — flush so getConfig() sees the
+        // new provider before we register it with pi-ai.
+        await configService.flush();
         await registerCustomProvidersWithPiAi();
         return reply.send({ success: true, name, definition: result.data });
       } catch (e: any) {

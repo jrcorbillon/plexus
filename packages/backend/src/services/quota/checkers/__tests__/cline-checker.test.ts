@@ -160,6 +160,16 @@ describe('cline checker', () => {
     expect(meters.find((m) => m.key === 'subscription_plan')).toBeUndefined();
   });
 
+  it('throws when apiKey option is missing', async () => {
+    const ctx = createMeterContext('no-key', 'cline', {});
+    await expect(checkerDef.check(ctx)).rejects.toThrow("Required option 'apiKey' not provided");
+  });
+
+  it('throws when apiKey option is missing', async () => {
+    const ctx = createMeterContext('cline-test', 'cline', {});
+    await expect(checkerDef.check(ctx)).rejects.toThrow("Required option 'apiKey' not provided");
+  });
+
   it('throws for non-200 HTTP response', async () => {
     setFetchMock([new Response('unauthorized', { status: 401, statusText: 'Unauthorized' })]);
 

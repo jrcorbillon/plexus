@@ -738,7 +738,7 @@ export function ProviderAdvancedEditor({
                     <DebouncedInput
                       type="number"
                       placeholder="Inherit"
-                      min={0}
+                      min={1}
                       step={1}
                       value={
                         editingProvider.compaction?.absoluteTriggerTokens != null
@@ -748,7 +748,12 @@ export function ProviderAdvancedEditor({
                       onChange={(val: string) => {
                         const num = Number(val);
                         const absoluteTriggerTokens =
-                          val === '' || !Number.isFinite(num) ? undefined : num;
+                          val === '' ||
+                          !Number.isFinite(num) ||
+                          !Number.isInteger(num) ||
+                          num < 1
+                            ? undefined
+                            : num;
                         setEditingProvider({
                           ...editingProvider,
                           compaction: {
@@ -776,7 +781,13 @@ export function ProviderAdvancedEditor({
                       }
                       onChange={(val: string) => {
                         const num = Number(val);
-                        const minTokens = val === '' || !Number.isFinite(num) ? undefined : num;
+                        const minTokens =
+                          val === '' ||
+                          !Number.isFinite(num) ||
+                          !Number.isInteger(num) ||
+                          num < 0
+                            ? undefined
+                            : num;
                         setEditingProvider({
                           ...editingProvider,
                           compaction: {

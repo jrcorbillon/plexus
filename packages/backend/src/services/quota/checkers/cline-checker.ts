@@ -85,16 +85,17 @@ export default defineChecker({
       apiKey
     );
 
-    if (Number.isFinite(balance.balance)) {
-      meters.push(
-        ctx.balance({
-          key: 'balance',
-          label: 'Cost balance',
-          unit: 'usd',
-          remaining: balance.balance / MICROCREDITS_PER_USD,
-        })
-      );
+    if (!Number.isFinite(balance.balance)) {
+      throw new Error(`Invalid balance: ${String(balance.balance)}`);
     }
+    meters.push(
+      ctx.balance({
+        key: 'balance',
+        label: 'Cost balance',
+        unit: 'usd',
+        remaining: balance.balance / MICROCREDITS_PER_USD,
+      })
+    );
 
     logger.silly(`Fetching Cline subscription plan`);
     const plan = await clineRequest<ClineUserCurrentPlan | null>(

@@ -63,6 +63,7 @@ const DESTRUCTIVE_OPERATIONS = new Set([
   'delete_all_logs',
   'restore',
   'restart',
+  'stop',
   'rotate',
   'truncate',
   'import',

@@ -45,8 +45,8 @@ curl -fsS "$PLEXUS_STAGING_URL/v0/management/providers" \
 Prefer the summary endpoint whenever the user wants totals, rollups, dashboards, or time-window aggregates. It performs aggregation server-side and avoids undercounting that can happen if you inspect only the first page of raw usage rows.
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/usage/summary?range=week" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" | jq .
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/usage/summary?range=week" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
 ```
 
 Use `range=hour|day|week|month`, or `range=custom&startDate=...&endDate=...` when the user needs a specific window.
@@ -56,23 +56,23 @@ Use `range=hour|day|week|month`, or `range=custom&startDate=...&endDate=...` whe
 Use raw usage reads for request-level inspection, spot checks, and debugging individual calls.
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/usage?limit=20&sortDir=desc" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" | jq .
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/usage?limit=20&sortDir=desc" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
 ```
 
 ### Redacted Key Listing
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/keys" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" \
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/keys" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
   | jq 'with_entries(.value.secret = "<redacted>")'
 ```
 
 ### JSON Write
 
 ```bash
-curl -fsS -X PATCH "$PLEXUS_BASE_URL/v0/management/config/failover" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" \
+curl -fsS -X PATCH "$PLEXUS_STAGING_URL/v0/management/config/failover" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
   -H "content-type: application/json" \
   --data '{"enabled":true}' | jq .
 ```
@@ -82,8 +82,8 @@ curl -fsS -X PATCH "$PLEXUS_BASE_URL/v0/management/config/failover" \
 Use this when making a precise edit to a larger object. Review the generated payload before sending it.
 
 ```bash
-curl -fsS "$PLEXUS_BASE_URL/v0/management/aliases" \
-  -H "x-admin-key: $PLEXUS_ADMIN_KEY" \
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/aliases" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
   | jq '."my-alias" | .target_groups[0].targets += [{"provider":"openai","model":"gpt-4o-mini"}]'
 ```
 

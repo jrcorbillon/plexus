@@ -245,8 +245,11 @@ export async function buildGeminiRequest(
     // responseLogprobs, logprobs) that the explicit mapping above didn't set.
     const originalGenConfig = request.originalBody.generationConfig;
     if (originalGenConfig && typeof originalGenConfig === 'object') {
-      const mergedGenConfig: any = { ...originalGenConfig, ...req.generationConfig };
-      req.generationConfig = mergedGenConfig;
+      const mapped = req.generationConfig ?? {};
+      const definedMapped = Object.fromEntries(
+        Object.entries(mapped).filter(([, v]) => v !== undefined)
+      );
+      req.generationConfig = { ...originalGenConfig, ...definedMapped };
     }
   }
 

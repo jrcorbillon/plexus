@@ -55,11 +55,15 @@ jobs:
             });
             core.setOutput('check_id', check.id);
 
+      # Intentionally checks out PR head (incl. forks) to run tests. Opting into
+      # allow-unsafe-pr-checkout after reviewing https://gh.io/securely-using-pull_request_target.
+      # Token is limited to contents:read + checks:write; do not add secrets access.
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || steps.get-pr.outputs.head_repo_full_name }}
           ref: ${{ github.event.pull_request.head.sha || steps.get-pr.outputs.head_sha }}
+          allow-unsafe-pr-checkout: true
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

@@ -401,7 +401,11 @@ function compatValueForSave(
   for (const [k, v] of Object.entries(raw)) {
     if (v === undefined || v === '') continue;
     const f = fieldMap.get(k);
-    if (!f) continue;
+    if (!f) {
+      // Preserve unknown/pass-through compat keys the API accepts.
+      out[k] = v;
+      continue;
+    }
     if (f.control === 'json' && typeof v === 'string') {
       const t = v.trim();
       if (!t) continue;
@@ -830,7 +834,9 @@ function ModelRow({
   const [apiVal, setApiVal] = useState<PiAiApi>(def.api ?? 'openai-completions');
   const [contextWindow, setContextWindow] = useState(def.contextWindow?.toString() ?? '');
   const [maxTokens, setMaxTokens] = useState(def.maxTokens?.toString() ?? '');
-  const [reasoning, setReasoning] = useState(def.reasoning ?? false);
+  const [reasoning, setReasoning] = useState<boolean | undefined>(
+    def.reasoning === undefined ? undefined : def.reasoning
+  );
   const [compat, setCompat] = useState<Record<string, any>>(def.compat ?? {});
   const [tlm, setTlm] = useState<Record<string, string | null>>(def.thinkingLevelMap ?? {});
   const [displayName, setDisplayName] = useState(def.name ?? '');
@@ -892,7 +898,7 @@ function ModelRow({
       setDisplayName(spec.name ?? '');
       if (typeof spec.contextWindow === 'number') setContextWindow(String(spec.contextWindow));
       if (typeof spec.maxTokens === 'number') setMaxTokens(String(spec.maxTokens));
-      setReasoning(spec.reasoning ?? false);
+      setReasoning(spec.reasoning === undefined ? undefined : spec.reasoning);
       setTlm(spec.thinkingLevelMap ?? {});
       setCompat(spec.compat ?? {});
       setInputText(spec.input?.includes('text') ?? false);
@@ -1042,13 +1048,33 @@ function ModelRow({
             onChange={(e) => setMaxTokens(e.target.value)}
           />
         </div>
-        <label className="flex items-end gap-1.5 cursor-pointer pb-1.5">
-          <input
-            type="checkbox"
-            checked={reasoning}
-            onChange={(e) => setReasoning(e.target.checked)}
-          />
-          <span className="font-body text-[12px] text-text">Reasoning</span>
+        <label className="flex flex-col gap-0.5 justify-end pb-0.5">
+          <span className="font-body text-[11px] text-text-secondary">
+            Reasoning {mode === 'inherit' ? '(override)' : ''}
+          </span>
+          {mode === 'inherit' ? (
+            <select
+              className={selectClass}
+              value={reasoning === undefined ? '' : reasoning ? 'true' : 'false'}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setReasoning(raw === '' ? undefined : raw === 'true');
+              }}
+            >
+              <option value="">— inherit —</option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          ) : (
+            <label className="flex items-center gap-1.5 cursor-pointer h-[27px]">
+              <input
+                type="checkbox"
+                checked={reasoning === true}
+                onChange={(e) => setReasoning(e.target.checked)}
+              />
+              <span className="font-body text-[12px] text-text">Enabled</span>
+            </label>
+          )}
         </label>
       </div>
 
@@ -1140,7 +1166,11 @@ function ModelRow({
       <ThinkingLevelMapEditor value={tlm} onChange={setTlm} />
       <label className={`${labelClass} mt-2`}>compat overrides (optional)</label>
       <CompatEditor
-        api={mode === 'standalone' ? apiVal : undefined}
+        api={
+          mode === 'standalone'
+            ? apiVal
+            : (inheritModels.find((m) => m.id === inheritModel)?.api as PiAiApi | undefined)
+        }
         value={compat}
         onChange={setCompat}
       />
@@ -1150,7 +1180,10 @@ function ModelRow({
           size="sm"
           leftIcon={<Save size={14} />}
           onClick={async () => {
-            const compatApi = mode === 'standalone' ? apiVal : undefined;
+            const inheritApi = inheritModels.find((m) => m.id === inheritModel)?.api as
+              | PiAiApi
+              | undefined;
+            const compatApi = mode === 'standalone' ? apiVal : inheritApi;
             let compatOut: Record<string, any> | undefined;
             let tlmOut: Record<string, string | null> | undefined;
             try {
@@ -1173,7 +1206,7 @@ function ModelRow({
               ...(displayName.trim() ? { name: displayName.trim() } : {}),
               ...(num(contextWindow) ? { contextWindow: num(contextWindow) } : {}),
               ...(num(maxTokens) ? { maxTokens: num(maxTokens) } : {}),
-              ...(reasoning ? { reasoning: true } : {}),
+              ...(reasoning !== undefined ? { reasoning } : {}),
               ...(tlmOut ? { thinkingLevelMap: tlmOut } : {}),
               ...(compatOut ? { compat: compatOut } : {}),
             };

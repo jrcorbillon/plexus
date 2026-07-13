@@ -267,8 +267,12 @@ export function responsesToContext(body: any): ResponsesToContextResult {
   const wantsSummary: boolean =
     body.reasoning?.summary === 'detailed' || body.reasoning?.summary === 'auto';
   const effortRaw = normalizeEffort(body.reasoning?.effort);
-  const summaryDetail: string | undefined =
+  const summaryRaw =
     typeof body.reasoning?.summary === 'string' ? body.reasoning.summary : undefined;
+  const summaryDetail: 'auto' | 'concise' | 'detailed' | undefined =
+    summaryRaw === 'auto' || summaryRaw === 'concise' || summaryRaw === 'detailed'
+      ? summaryRaw
+      : undefined;
   const visibility = normalizeVisibility(body.reasoning?.summary);
   const baseReasoning = {
     ...(visibility != null ? { visibility } : {}),

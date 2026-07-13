@@ -345,7 +345,9 @@ describe('CompactionService.maybeCompact', () => {
     const seenSignals: AbortSignal[] = [];
     const neverFinishes: CompactionStrategy = {
       name: 'headroom',
-      compact: async (_ctx, _settings, stratCtx) => {
+      // Must not be async: an async function wraps the never-settling Promise in
+      // an immediately-resolved outer Promise, so the timeout never fires.
+      compact: (_ctx, _settings, stratCtx) => {
         if (stratCtx.signal) {
           seenSignals.push(stratCtx.signal);
         }

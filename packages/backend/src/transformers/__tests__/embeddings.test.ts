@@ -10,7 +10,7 @@ describe('OpenAIEmbeddingsTransformer', () => {
         model: 'text-embedding-3-small',
         input: 'Test text',
         originalBody: {
-          model: 'text-embedding-3-small',
+          model: 'text-embedding-3-large',
           input: 'Test text',
           encoding_format: 'float',
           dimensions: 512,

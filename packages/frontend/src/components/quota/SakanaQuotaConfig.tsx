@@ -8,7 +8,7 @@ export interface SakanaQuotaConfigProps {
 
 export const SakanaQuotaConfig: React.FC<SakanaQuotaConfigProps> = ({ options, onChange }) => {
   const handleChange = (key: string, value: string) => {
-    onChange({ ...options, [key]: value });
+    onChange({ ...options, [key]: value || undefined });
   };
 
   return (

@@ -35,6 +35,7 @@ vi.mock('@earendil-works/pi-ai', () => {
     getModel: (provider: string, modelId: string) => ({ id: modelId, provider }),
     getSupportedThinkingLevels,
     clampThinkingLevel,
+    createProvider: vi.fn(),
   };
 });
 

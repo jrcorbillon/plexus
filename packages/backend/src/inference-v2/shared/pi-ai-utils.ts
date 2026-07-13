@@ -67,10 +67,6 @@ export async function registerCustomProvidersWithPiAi(): Promise<void> {
   if (!customProviders || Object.keys(customProviders).length === 0) return;
 
   for (const [id, spec] of Object.entries(customProviders)) {
-    if (piAiModels.getProvider(id)) {
-      // Already registered (e.g. duplicate call at reload) — skip.
-      continue;
-    }
     const apiFactory = API_IMPLEMENTATIONS[spec.api];
     if (!apiFactory) {
       logger.warn(
@@ -87,6 +83,8 @@ export async function registerCustomProvidersWithPiAi(): Promise<void> {
         models: [],
         api: apiImpl,
       });
+      // Always setProvider so API/definition changes on PUT take effect (skipping
+      // existing ids would leave the old api implementation registered).
       piAiModels.setProvider(provider);
     } catch (e: any) {
       logger.warn(

@@ -333,9 +333,13 @@ export function ProviderModelsEditor({
                             </label>
                             <select
                               className={FIELD_CLS}
-                              value={mCfg.type || 'text'}
+                              value={mCfg.type === 'chat' ? 'text' : mCfg.type || 'text'}
                               onChange={(e) => {
-                                const newType = e.target.value as
+                                const raw = e.target.value;
+                                // Map legacy 'chat' to 'text' on edit.
+                                const newType = (
+                                  raw === 'chat' ? 'text' : raw
+                                ) as
                                   | 'text'
                                   | 'embeddings'
                                   | 'transcriptions'
@@ -366,7 +370,7 @@ export function ProviderModelsEditor({
                             </select>
                           </div>
 
-                          {(!mCfg.type || mCfg.type === 'text') && (
+                          {(!mCfg.type || mCfg.type === 'text' || mCfg.type === 'chat') && (
                             <div className="flex flex-col gap-1">
                               <label className="font-body text-[11px] font-medium text-text-secondary">
                                 Access Via

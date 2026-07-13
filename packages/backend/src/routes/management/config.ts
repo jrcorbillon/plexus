@@ -1030,6 +1030,9 @@ export async function registerConfigRoutes(
   fastify.post('/v0/management/mcp-servers/:serverName/stop', async (request, reply) => {
     const { serverName } = request.params as { serverName: string };
     logger.info(`MCP local stop requested for '${serverName}'`);
+    const servers = await configService.getRepository().getAllMcpServers();
+    if (!servers[serverName])
+      return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
     return reply.send(await mcpProcessManager.stop(serverName));
   });
 
@@ -1047,6 +1050,9 @@ export async function registerConfigRoutes(
   fastify.get('/v0/management/mcp-servers/:serverName/process-logs', async (request, reply) => {
     const { serverName } = request.params as { serverName: string };
     logger.info(`MCP local process logs requested for '${serverName}'`);
+    const servers = await configService.getRepository().getAllMcpServers();
+    if (!servers[serverName])
+      return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
     return reply.send({ data: mcpProcessManager.getLogs(serverName) });
   });
 

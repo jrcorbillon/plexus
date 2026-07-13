@@ -282,7 +282,8 @@ export class CooldownManager {
     }
 
     // Request-local bypass for model-specific cooldown only (alias retry rounds).
-    if (options?.bypassKeys?.has(`${provider}/${model}`)) {
+    // Never bypass provider-wide cooldowns (empty model key).
+    if (model !== '' && options?.bypassKeys?.has(`${provider}/${model}`)) {
       return true;
     }
 

@@ -233,12 +233,12 @@ export class ResponsesTransformer implements Transformer {
         'top_p',
         'top_logprobs',
         'max_tool_calls',
-        'previous_response_id',
-        'conversation',
         'prompt_cache_retention',
         'safety_identifier',
         'stream_options',
       ];
+      // previous_response_id / conversation are already expanded into `input` by
+      // the Responses route — do not pass them upstream alongside that history.
       for (const field of passthroughFields) {
         if (request.originalBody[field] !== undefined && payload[field] === undefined) {
           payload[field] = request.originalBody[field];

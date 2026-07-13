@@ -260,13 +260,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                     onChange={(e) => {
                       const raw = e.target.value;
                       const enabled: boolean | undefined = raw === '' ? undefined : raw === 'true';
-                      setEditingAlias({
-                        ...editingAlias,
+                      setEditingAlias((current) => ({
+                        ...current,
                         compaction: {
-                          ...editingAlias.compaction,
+                          ...current.compaction,
                           enabled,
                         } as CompactionSettings,
-                      });
+                      }));
                     }}
                   >
                     <option value="">Inherit</option>
@@ -288,13 +288,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                     onChange={(e) => {
                       const raw = e.target.value;
                       const strategy = (raw || undefined) as CompactionSettings['strategy'];
-                      setEditingAlias({
-                        ...editingAlias,
+                      setEditingAlias((current) => ({
+                        ...current,
                         compaction: {
-                          ...editingAlias.compaction,
+                          ...current.compaction,
                           strategy,
                         } as CompactionSettings,
-                      });
+                      }));
                     }}
                   >
                     <option value="">Inherit</option>
@@ -324,13 +324,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                       onChange={(val: string) => {
                         const num = Number(val);
                         const triggerRatio = val === '' || !Number.isFinite(num) ? undefined : num;
-                        setEditingAlias({
-                          ...editingAlias,
+                        setEditingAlias((current) => ({
+                          ...current,
                           compaction: {
-                            ...editingAlias.compaction,
+                            ...current.compaction,
                             triggerRatio,
                           } as CompactionSettings,
-                        });
+                        }));
                       }}
                     />
                   </div>
@@ -354,13 +354,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                         const num = Number(val);
                         const absoluteTriggerTokens =
                           val === '' || !Number.isFinite(num) ? undefined : num;
-                        setEditingAlias({
-                          ...editingAlias,
+                        setEditingAlias((current) => ({
+                          ...current,
                           compaction: {
-                            ...editingAlias.compaction,
+                            ...current.compaction,
                             absoluteTriggerTokens,
                           } as CompactionSettings,
-                        });
+                        }));
                       }}
                     />
                   </div>
@@ -382,13 +382,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                       onChange={(val: string) => {
                         const num = Number(val);
                         const minTokens = val === '' || !Number.isFinite(num) ? undefined : num;
-                        setEditingAlias({
-                          ...editingAlias,
+                        setEditingAlias((current) => ({
+                          ...current,
                           compaction: {
-                            ...editingAlias.compaction,
+                            ...current.compaction,
                             minTokens,
                           } as CompactionSettings,
-                        });
+                        }));
                       }}
                     />
                   </div>
@@ -410,13 +410,13 @@ export function ModelBehaviorsEditor({ editingAlias, setEditingAlias }: Props) {
                       onChange={(val: string) => {
                         const num = Number(val);
                         const protectRecent = val === '' || !Number.isFinite(num) ? undefined : num;
-                        setEditingAlias({
-                          ...editingAlias,
+                        setEditingAlias((current) => ({
+                          ...current,
                           compaction: {
-                            ...editingAlias.compaction,
+                            ...current.compaction,
                             protectRecent,
                           } as CompactionSettings,
-                        });
+                        }));
                       }}
                     />
                   </div>

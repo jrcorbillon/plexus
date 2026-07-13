@@ -291,7 +291,7 @@ export function estimateActiveParams(options: EstimateActiveParamsOptions): numb
 
 export const PROPRIETARY_MODEL_HEURISTICS: Record<string, ModelParamsWithDtype> = {
   // Claude Sonnet 5 (Released 2026): 1M Context + Adaptive Thinking
-  'claude-sonnet-5': {
+  'claude-5-sonnet': {
     total_params: 1500,
     active_params: 120, // 15B base * ~8x output price premium
     layers: 100,

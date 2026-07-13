@@ -8,7 +8,7 @@ export interface ClineQuotaConfigProps {
 
 export const ClineQuotaConfig: React.FC<ClineQuotaConfigProps> = ({ options, onChange }) => {
   const handleChange = (key: string, value: string) => {
-    onChange({ ...options, [key]: value || undefined });
+    onChange({ ...options, [key]: value });
   };
 
   return (

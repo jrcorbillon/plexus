@@ -3630,9 +3630,9 @@ export interface paths {
      *     - `checkerId` — The checker this history is for
      *     - `meterKey` — Echo of the `meterKey` query filter; omitted when no filter
      *       was supplied
-     *     - `since` — Normalized filter cutoff as an ISO-8601 timestamp (absolute
-     *       input or resolved relative `Nd` window); omitted when no `since` filter
-     *       was supplied
+     *     - `since` — Normalized UTC ISO-8601 filter cutoff (absolute inputs are
+     *       re-serialized, not echoed; relative `Nd` is resolved); omitted when no
+     *       `since` filter was supplied
      *     - `history` — Array of `QuotaSample` snapshot rows
      *
      *     ## Retention
@@ -11709,7 +11709,7 @@ export interface operations {
             meterKey?: string;
             /**
              * Format: date-time
-             * @description Normalized filter cutoff as ISO-8601. Absolute `since` values are echoed; relative `Nd` values are resolved to a concrete timestamp. Omitted (not null) when no `since` filter was supplied.
+             * @description Normalized filter cutoff as UTC ISO-8601 (`Date#toISOString`). Absolute inputs are parsed and re-serialized (do not rely on string equality with the query value); relative `Nd` values are resolved to a concrete timestamp. Omitted (not null) when no `since` filter was supplied.
              */
             since?: string;
             history?: components['schemas']['QuotaSample'][];
@@ -12880,7 +12880,9 @@ export interface operations {
         'application/json': {
           /** @description Alias or `provider/model` identifier. */
           model: string;
-          /** @description Prompt text, or an array of prompt strings joined with newlines. */
+          /**
+           * @description Prompt text, or an array of prompt strings. Native Completions targets receive the array as-is; targets translated to chat, messages, Gemini, or Responses join array elements with newlines.
+           */
           prompt: string | string[];
           /** @description Optional suffix enabling fill-in-the-middle completion. */
           suffix?: string;
@@ -12910,20 +12912,23 @@ export interface operations {
           'text/event-stream': string;
         };
       };
-      /** @description Authentication required or invalid credentials. */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Quota exceeded. */
+      400: components['responses']['BadRequestOpenAI'];
+      401: components['responses']['AuthError'];
+      404: components['responses']['NotFoundOpenAI'];
+      /**
+       * @description Quota exceeded, or an upstream provider returned HTTP 429 (rate limit).
+       *     Plexus quota rejections use `error.type: quota_exceeded`; upstream 429s
+       *     propagate with the provider's status and error payload.
+       */
       429: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['OpenAIError'];
+        };
       };
+      '5XX': components['responses']['ProviderError'];
     };
   };
   postCompletions: {
@@ -12938,7 +12943,9 @@ export interface operations {
         'application/json': {
           /** @description Alias or `provider/model` identifier. */
           model: string;
-          /** @description Prompt text, or an array of prompt strings joined with newlines. */
+          /**
+           * @description Prompt text, or an array of prompt strings. Native Completions targets receive the array as-is; targets translated to chat, messages, Gemini, or Responses join array elements with newlines.
+           */
           prompt: string | string[];
           /** @description Optional suffix enabling fill-in-the-middle completion. */
           suffix?: string;
@@ -12968,20 +12975,23 @@ export interface operations {
           'text/event-stream': string;
         };
       };
-      /** @description Authentication required or invalid credentials. */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Quota exceeded. */
+      400: components['responses']['BadRequestOpenAI'];
+      401: components['responses']['AuthError'];
+      404: components['responses']['NotFoundOpenAI'];
+      /**
+       * @description Quota exceeded, or an upstream provider returned HTTP 429 (rate limit).
+       *     Plexus quota rejections use `error.type: quota_exceeded`; upstream 429s
+       *     propagate with the provider's status and error payload.
+       */
       429: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['OpenAIError'];
+        };
       };
+      '5XX': components['responses']['ProviderError'];
     };
   };
   getHealthz: {

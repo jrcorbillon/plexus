@@ -28,7 +28,10 @@ post:
                 - type: array
                   items:
                     type: string
-              description: Prompt text, or an array of prompt strings joined with newlines.
+              description: >
+                Prompt text, or an array of prompt strings. Native Completions
+                targets receive the array as-is; targets translated to chat,
+                messages, Gemini, or Responses join array elements with newlines.
             suffix:
               type: string
               description: Optional suffix enabling fill-in-the-middle completion.
@@ -63,8 +66,21 @@ post:
           schema:
             type: string
             description: SSE frames of Completions deltas.
+    '400':
+      $ref: ../components/responses/BadRequestOpenAI.yaml
     '401':
-      description: Authentication required or invalid credentials.
+      $ref: ../components/responses/AuthError.yaml
+    '404':
+      $ref: ../components/responses/NotFoundOpenAI.yaml
     '429':
-      description: Quota exceeded.
+      description: |
+        Quota exceeded, or an upstream provider returned HTTP 429 (rate limit).
+        Plexus quota rejections use `error.type: quota_exceeded`; upstream 429s
+        propagate with the provider's status and error payload.
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/OpenAIError.yaml
+    5XX:
+      $ref: ../components/responses/ProviderError.yaml
   operationId: postV1Completions

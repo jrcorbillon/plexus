@@ -285,16 +285,26 @@ export class OllamaTransformer implements Transformer {
                 continue;
               }
 
+              // Hard failures (e.g. Responses response.failed) can still carry
+              // final usage after partial output — forward it like OpenAI formatStream.
+              const hardErrorPayload: Record<string, unknown> = {
+                error: {
+                  message: unifiedChunk.error?.message,
+                  type: 'server_error',
+                  code: unifiedChunk.error?.code || 'upstream_error',
+                },
+              };
+              if (unifiedChunk.usage) {
+                hardErrorPayload.usage = {
+                  prompt_tokens:
+                    unifiedChunk.usage.input_tokens + (unifiedChunk.usage.cached_tokens || 0),
+                  completion_tokens: unifiedChunk.usage.output_tokens,
+                  total_tokens: unifiedChunk.usage.total_tokens,
+                  reasoning_tokens: unifiedChunk.usage.reasoning_tokens,
+                };
+              }
               controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({
-                    error: {
-                      message: unifiedChunk.error?.message,
-                      type: 'server_error',
-                      code: unifiedChunk.error?.code || 'upstream_error',
-                    },
-                  })}\n\n`
-                )
+                encoder.encode(`data: ${JSON.stringify(hardErrorPayload)}\n\n`)
               );
               hasSentError = true;
               continue;

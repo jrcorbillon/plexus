@@ -31,9 +31,9 @@ get:
     - `checkerId` — The checker this history is for
     - `meterKey` — Echo of the `meterKey` query filter; omitted when no filter
       was supplied
-    - `since` — Normalized filter cutoff as an ISO-8601 timestamp (absolute
-      input or resolved relative `Nd` window); omitted when no `since` filter
-      was supplied
+    - `since` — Normalized UTC ISO-8601 filter cutoff (absolute inputs are
+      re-serialized, not echoed; relative `Nd` is resolved); omitted when no
+      `since` filter was supplied
     - `history` — Array of `QuotaSample` snapshot rows
 
     ## Retention
@@ -79,10 +79,11 @@ get:
                 type: string
                 format: date-time
                 description: >
-                  Normalized filter cutoff as ISO-8601. Absolute `since` values
-                  are echoed; relative `Nd` values are resolved to a concrete
-                  timestamp. Omitted (not null) when no `since` filter was
-                  supplied.
+                  Normalized filter cutoff as UTC ISO-8601 (`Date#toISOString`).
+                  Absolute inputs are parsed and re-serialized (do not rely on
+                  string equality with the query value); relative `Nd` values
+                  are resolved to a concrete timestamp. Omitted (not null) when
+                  no `since` filter was supplied.
               history:
                 type: array
                 items:

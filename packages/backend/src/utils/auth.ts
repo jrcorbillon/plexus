@@ -1,9 +1,10 @@
 import { FastifyRequest } from 'fastify';
-import { getConfig } from '../config';
+import { getConfig, isKeyDisabled } from '../config';
 import { logger } from './logger';
 import { getTrustedClientIp } from './ip';
 import { isIpAllowed } from './ip-match';
-import { enterRequestContext } from '../services/request-context';
+import { enterRequestContext } from '../services/observability/request-context';
+import { ConfigService } from '../services/configuration/config-service';
 
 export function attachKeyAccessPolicy<T extends { metadata?: Record<string, any> }>(
   request: FastifyRequest,
@@ -15,7 +16,6 @@ export function attachKeyAccessPolicy<T extends { metadata?: Record<string, any>
         allowedProviders?: string[];
         excludedModels?: string[];
         excludedProviders?: string[];
-        beta?: boolean;
       }
     | undefined;
 
@@ -65,7 +65,8 @@ export function isRequestIpAllowed(
   return isIpAllowed(clientIp, allowedIps);
 }
 
-export function createAuthHook() {
+export function createAuthHook(options: { allowQueryKey?: boolean } = {}) {
+  const allowQueryKey = options.allowQueryKey !== false;
   return {
     onRequest: async (request: FastifyRequest) => {
       logger.silly(`onRequest called: ${request.method} ${request.url}`);
@@ -81,7 +82,7 @@ export function createAuthHook() {
         // No Authorization header, try x-api-key or x-goog-api-key
         let apiKey = request.headers['x-api-key'] || request.headers['x-goog-api-key'];
 
-        if (!apiKey && request.query && typeof request.query === 'object') {
+        if (allowQueryKey && !apiKey && request.query && typeof request.query === 'object') {
           apiKey = (request.query as any).key;
         }
 
@@ -129,10 +130,23 @@ export function createAuthHook() {
         );
 
         if (entry) {
+          const keyCfg = entry[1] as {
+            allowedIps?: string[];
+            expiresAt?: number;
+            disabledAt?: number;
+          };
+          if (isKeyDisabled(keyCfg)) {
+            if (keyCfg.expiresAt !== undefined && keyCfg.disabledAt === undefined) {
+              void ConfigService.getInstance()
+                .disableTimeBoundKey(entry[0])
+                .catch((error) => logger.error(`Failed to disable expired key ${entry[0]}`, error));
+            }
+            logger.silly(`Auth FAILED - key disabled: ${entry[0]}`);
+            return false;
+          }
           // Enforce the key's IP allowlist (if any). Returning false here yields
           // the standard 401 auth_error, which deliberately does not reveal that
           // the key is valid-but-used-from-a-disallowed-IP.
-          const keyCfg = entry[1] as { allowedIps?: string[] };
           if (
             !isRequestIpAllowed(req as FastifyRequest, keyCfg.allowedIps, config.trustedProxies)
           ) {

@@ -23,8 +23,10 @@ import {
   formatMs,
   formatSlices,
   formatTPS,
+  getEstimatedBytesPerToken,
 } from '../lib/format';
 import { isClipboardAvailable, copyToClipboard } from '../lib/clipboard';
+import { formatApiTypeLabel, getApiBaseType } from '../lib/apiFormats';
 import { DateTimePicker } from '../components/ui/DateTimePicker';
 import {
   ChevronLeft,
@@ -54,6 +56,7 @@ import {
   ChevronDown,
   Image as ImageIcon,
   ShieldCheck,
+  Braces,
   RotateCcw,
   PencilLine,
   Plane,
@@ -85,6 +88,8 @@ import chatLogo from '../assets/chat.svg';
 import geminiLogo from '../assets/gemini.svg';
 // @ts-ignore
 import responsesLogo from '../assets/responses.svg';
+
+const SSE_HEARTBEAT_TIMEOUT_MS = 30_000;
 
 interface RetryAttemptDetail {
   index: number;
@@ -205,14 +210,13 @@ export const Logs = () => {
     gemini: geminiLogo,
     responses: responsesLogo,
     'openai-responses': responsesLogo,
-    // inference-v2 (pi-ai) outgoing API types
+    // pi-ai/OAuth outgoing API types
     'google-generative-ai': geminiLogo,
     'openai-completions': chatLogo,
     'anthropic-messages': messagesLogo,
   };
 
-  // Outgoing API types produced exclusively by the inference-v2 (pi-ai native) path
-  const INFERENCE_V2_OUTGOING_TYPES = new Set([
+  const PI_AI_OUTGOING_TYPES = new Set([
     'google-generative-ai',
     'openai-completions',
     'anthropic-messages',
@@ -380,10 +384,27 @@ export const Logs = () => {
     //   false — connection-level error (transient; safe to retry)
     //   null  — permanent server error (4xx); stop retrying
     const connectOnce = async (): Promise<boolean | null> => {
+      const connectionController = new AbortController();
+      const abortConnection = () => connectionController.abort();
+      controller.signal.addEventListener('abort', abortConnection, { once: true });
+      let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+      let heartbeatTimedOut = false;
+      let streamConnected = false;
+
+      const resetHeartbeatTimer = () => {
+        clearTimeout(heartbeatTimer);
+        heartbeatTimer = setTimeout(() => {
+          heartbeatTimedOut = true;
+          connectionController.abort();
+        }, SSE_HEARTBEAT_TIMEOUT_MS);
+      };
+
+      resetHeartbeatTimer();
+
       try {
         const response = await fetch('/v0/management/events', {
           headers: { 'x-admin-key': adminKey },
-          signal: controller.signal,
+          signal: connectionController.signal,
         });
 
         if (!response.ok) {
@@ -399,8 +420,10 @@ export const Logs = () => {
         const reader = response.body?.getReader();
         if (!reader) return false;
 
+        streamConnected = true;
         sseConnected.current = true;
         setSseStatus('connected');
+        resetHeartbeatTimer();
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -412,6 +435,8 @@ export const Logs = () => {
             break;
           }
 
+          // Any bytes prove the stream is alive; the server sends a ping every 10 seconds.
+          resetHeartbeatTimer();
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n\n'); // SSE messages are separated by double newline
           buffer = lines.pop() || '';
@@ -513,11 +538,20 @@ export const Logs = () => {
       } catch (err: any) {
         handleDisconnect();
         if (err.name === 'AbortError') {
-          // Intentional teardown — do not retry.
-          throw err;
+          if (controller.signal.aborted) {
+            // Intentional teardown — do not retry.
+            throw err;
+          }
+          if (heartbeatTimedOut) {
+            console.warn('SSE heartbeat timed out — reconnecting');
+            return streamConnected;
+          }
         }
         console.error('Log stream error:', err);
         return false;
+      } finally {
+        clearTimeout(heartbeatTimer);
+        controller.signal.removeEventListener('abort', abortConnection);
       }
     };
 
@@ -821,6 +855,8 @@ export const Logs = () => {
                   Number(log.tokensCached || 0) +
                   Number(log.tokensCacheWrite || 0) +
                   Number(log.tokensReasoning || 0);
+                const e2eOutputTokens =
+                  Number(log.tokensOutput || 0) + Number(log.tokensReasoning || 0);
                 const status = log.responseStatus || (log.hasError ? 'error' : 'unknown');
                 const statusClass =
                   status === 'success'
@@ -900,7 +936,9 @@ export const Logs = () => {
                         <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
                           <div className="flex items-center gap-1 text-text">
                             <div className="flex w-4 shrink-0 justify-center">
-                              {log.incomingApiType === 'embeddings' ? (
+                              {log.incomingApiType === 'raw' ? (
+                                <Braces size={16} className="text-cyan-400" />
+                              ) : log.incomingApiType === 'embeddings' ? (
                                 <Variable size={14} className="text-green-500" />
                               ) : log.incomingApiType === 'transcriptions' ? (
                                 <AudioLines size={14} className="text-purple-500" />
@@ -910,10 +948,12 @@ export const Logs = () => {
                                 <ImageIcon size={14} className="text-fuchsia-500" />
                               ) : log.incomingApiType === 'oauth' ? (
                                 <ShieldCheck size={14} className="text-emerald-500" />
-                              ) : log.incomingApiType && apiLogos[log.incomingApiType] ? (
+                              ) : log.incomingApiType &&
+                                apiLogos[getApiBaseType(log.incomingApiType)] ? (
                                 <img
-                                  src={apiLogos[log.incomingApiType]}
-                                  alt={log.incomingApiType}
+                                  src={apiLogos[getApiBaseType(log.incomingApiType)]}
+                                  alt={formatApiTypeLabel(log.incomingApiType)}
+                                  title={formatApiTypeLabel(log.incomingApiType)}
                                   className="h-3.5 w-3.5"
                                 />
                               ) : (
@@ -922,7 +962,9 @@ export const Logs = () => {
                             </div>
                             <span className="text-[10px] text-text-muted">→</span>
                             <div className="flex w-4 shrink-0 justify-center">
-                              {log.outgoingApiType === 'embeddings' ? (
+                              {log.outgoingApiType === 'raw' ? (
+                                <Braces size={16} className="text-cyan-400" />
+                              ) : log.outgoingApiType === 'embeddings' ? (
                                 <Variable size={14} className="text-green-500" />
                               ) : log.outgoingApiType === 'transcriptions' ? (
                                 <AudioLines size={14} className="text-purple-500" />
@@ -932,10 +974,12 @@ export const Logs = () => {
                                 <ImageIcon size={14} className="text-fuchsia-500" />
                               ) : log.outgoingApiType === 'oauth' ? (
                                 <ShieldCheck size={14} className="text-emerald-500" />
-                              ) : log.outgoingApiType && apiLogos[log.outgoingApiType] ? (
+                              ) : log.outgoingApiType &&
+                                apiLogos[getApiBaseType(log.outgoingApiType)] ? (
                                 <img
-                                  src={apiLogos[log.outgoingApiType]}
-                                  alt={log.outgoingApiType}
+                                  src={apiLogos[getApiBaseType(log.outgoingApiType)]}
+                                  alt={formatApiTypeLabel(log.outgoingApiType)}
+                                  title={formatApiTypeLabel(log.outgoingApiType)}
                                   className="h-3.5 w-3.5"
                                 />
                               ) : (
@@ -961,11 +1005,8 @@ export const Logs = () => {
                         <div className="min-w-0 rounded bg-bg-subtle px-1.5 py-1">
                           <div className="truncate text-text">
                             <span className="text-[9px] uppercase text-text-muted">E2E </span>
-                            {log.durationMs != null &&
-                            log.durationMs > 0 &&
-                            log.tokensOutput &&
-                            log.tokensOutput > 0
-                              ? formatTPS(log.tokensOutput / (log.durationMs / 1000))
+                            {log.durationMs != null && log.durationMs > 0 && e2eOutputTokens > 0
+                              ? formatTPS(e2eOutputTokens / (log.durationMs / 1000))
                               : '-'}
                           </div>
                         </div>
@@ -1124,7 +1165,7 @@ export const Logs = () => {
                       </td>
                       <td
                         className="px-2 py-1.5 text-left border-b border-border-glass text-text align-middle whitespace-nowrap"
-                        title={`Incoming: ${log.incomingApiType || '?'} → Outgoing: ${log.outgoingApiType || '?'} • ${log.isStreamed ? 'Streamed' : 'Non-streamed'} • ${log.outgoingApiType && INFERENCE_V2_OUTGOING_TYPES.has(log.outgoingApiType) ? 'pi-ai native' : log.isPassthrough ? 'Direct/Passthrough' : 'Translated'}`}
+                        title={`Incoming: ${formatApiTypeLabel(log.incomingApiType)} → Outgoing: ${formatApiTypeLabel(log.outgoingApiType)} • ${log.isStreamed ? 'Streamed' : 'Non-streamed'} • ${log.isRaw ? `Raw ${log.requestMethod || ''} ${log.requestPath || ''}` : log.outgoingApiType && PI_AI_OUTGOING_TYPES.has(log.outgoingApiType) ? 'pi-ai native' : log.isPassthrough ? 'Direct/Passthrough' : 'Translated'}`}
                         style={{ cursor: 'help' }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
@@ -1143,10 +1184,12 @@ export const Logs = () => {
                                 <ImageIcon size={16} className="text-fuchsia-500" />
                               ) : log.incomingApiType === 'oauth' ? (
                                 <ShieldCheck size={16} className="text-emerald-500" />
-                              ) : log.incomingApiType && apiLogos[log.incomingApiType] ? (
+                              ) : log.incomingApiType &&
+                                apiLogos[getApiBaseType(log.incomingApiType)] ? (
                                 <img
-                                  src={apiLogos[log.incomingApiType]}
-                                  alt={log.incomingApiType}
+                                  src={apiLogos[getApiBaseType(log.incomingApiType)]}
+                                  alt={formatApiTypeLabel(log.incomingApiType)}
+                                  title={formatApiTypeLabel(log.incomingApiType)}
                                   style={{ width: '16px', height: '16px' }}
                                 />
                               ) : (
@@ -1167,10 +1210,12 @@ export const Logs = () => {
                                 <ImageIcon size={16} className="text-fuchsia-500" />
                               ) : log.outgoingApiType === 'oauth' ? (
                                 <ShieldCheck size={16} className="text-emerald-500" />
-                              ) : log.outgoingApiType && apiLogos[log.outgoingApiType] ? (
+                              ) : log.outgoingApiType &&
+                                apiLogos[getApiBaseType(log.outgoingApiType)] ? (
                                 <img
-                                  src={apiLogos[log.outgoingApiType]}
-                                  alt={log.outgoingApiType}
+                                  src={apiLogos[getApiBaseType(log.outgoingApiType)]}
+                                  alt={formatApiTypeLabel(log.outgoingApiType)}
+                                  title={formatApiTypeLabel(log.outgoingApiType)}
                                   style={{ width: '16px', height: '16px' }}
                                 />
                               ) : (
@@ -1200,8 +1245,10 @@ export const Logs = () => {
                             <div
                               style={{ width: '16px', display: 'flex', justifyContent: 'center' }}
                             >
-                              {log.outgoingApiType &&
-                              INFERENCE_V2_OUTGOING_TYPES.has(log.outgoingApiType) ? (
+                              {log.isRaw ? (
+                                <Braces size={12} className="text-cyan-400" />
+                              ) : log.outgoingApiType &&
+                                PI_AI_OUTGOING_TYPES.has(log.outgoingApiType) ? (
                                 <Pi size={12} className="text-emerald-400" />
                               ) : log.isPassthrough ? (
                                 <MoveHorizontal size={12} className="text-yellow-500" />
@@ -1507,16 +1554,29 @@ export const Logs = () => {
                                 : null;
                           const liveDuration =
                             rawDurationMs != null ? formatMs(rawDurationMs) : '-';
-                          // End-to-end throughput: total output tokens / full request duration.
+                          const e2eOutputTokens =
+                            Number(log.tokensOutput || 0) + Number(log.tokensReasoning || 0);
+                          // End-to-end throughput: output plus reasoning tokens / full request duration.
                           // Unlike TPS (which excludes the TTFT delay), E2E includes it.
                           const e2e =
-                            log.durationMs != null &&
-                            log.durationMs > 0 &&
-                            log.tokensOutput &&
-                            log.tokensOutput > 0
-                              ? log.tokensOutput / (log.durationMs / 1000)
+                            log.durationMs != null && log.durationMs > 0 && e2eOutputTokens > 0
+                              ? e2eOutputTokens / (log.durationMs / 1000)
                               : null;
                           if (progress) {
+                            const bytesPerToken = getEstimatedBytesPerToken(log);
+                            const effectiveBytesPerSec =
+                              progress.bytesPerSec != null && progress.bytesPerSec > 0
+                                ? progress.bytesPerSec
+                                : progress.elapsedMs > 0 && progress.bytesReceived > 0
+                                  ? (progress.bytesReceived / progress.elapsedMs) * 1000
+                                  : null;
+                            const estTokensPerSec =
+                              effectiveBytesPerSec != null &&
+                              Number.isFinite(effectiveBytesPerSec) &&
+                              effectiveBytesPerSec > 0
+                                ? effectiveBytesPerSec / bytesPerToken
+                                : null;
+
                             return (
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
                                 <span>Duration: {liveDuration}</span>
@@ -1544,6 +1604,21 @@ export const Logs = () => {
                                   >
                                     <Gauge size={12} className="text-text-secondary" />
                                     {formatBytes(progress.bytesPerSec)}/s
+                                  </span>
+                                )}
+                                {estTokensPerSec != null && (
+                                  <span
+                                    style={{
+                                      color: 'var(--color-text-secondary)',
+                                      fontSize: '0.85em',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '4px',
+                                    }}
+                                    title={`Estimated tokens/sec (~${Math.round(bytesPerToken)} bytes/token accounting for SSE + JSON framing)`}
+                                  >
+                                    <Zap size={12} className="text-amber-400" />
+                                    <span>~{formatTPS(estTokensPerSec)} tok/s</span>
                                   </span>
                                 )}
                               </div>

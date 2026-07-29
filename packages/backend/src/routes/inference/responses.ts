@@ -1,20 +1,41 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { logger } from '../../utils/logger';
-import { Dispatcher } from '../../services/dispatcher';
-import { ResponsesTransformer } from '../../transformers/responses';
-import { UsageStorageService } from '../../services/usage-storage';
-import { ResponsesStorageService } from '../../services/responses-storage';
+import { Dispatcher } from '../../services/dispatch/dispatcher';
+import {
+  ResponsesTransformer,
+  normalizeCompositeResponsesCallIds,
+  normalizeResponsesReasoningContent,
+} from '../../transformers/responses';
+import { UsageStorageService } from '../../services/observability/usage-storage';
+import { ResponsesStorageService } from '../../services/responses/responses-storage';
 import { UsageRecord } from '../../types/usage';
-import { handleResponse } from '../../services/response-handler';
+import { handleResponse } from '../../services/responses/response-handler';
 import { getClientIp } from '../../utils/ip';
-import { DebugManager } from '../../services/debug-manager';
+import { DebugManager } from '../../services/observability/debug-manager';
 import { QuotaEnforcer } from '../../services/quota/quota-enforcer';
-import { checkQuotaMiddleware } from '../../services/quota/quota-middleware';
+import { checkQuotaMiddleware, attachQuotaContext } from '../../services/quota/quota-middleware';
+import { saveQuotaBlockedUsage, saveQuotaExceededUsage } from './_quota-error';
 import { attachKeyAccessPolicy } from '../../utils/auth';
 import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/timeout';
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
 import { sanitizeHeaders } from '../../utils/sanitize-headers';
-import { handleBetaResponses } from '../../inference-v2';
+import { CLIENT_REQUEST_ID_HEADER, getClientRequestId } from '../../utils/client-request-id';
+import { getCacheRoutingHeaders } from '../../utils/cache-routing-headers';
+
+export function detectResponsesApiType(
+  headers: Record<string, unknown>,
+  body: any
+): 'responses' | 'responses:lite' {
+  const rawHeader = headers['x-openai-internal-codex-responses-lite'];
+  const header = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  if (typeof header === 'string' && header.toLowerCase() === 'true') {
+    return 'responses:lite';
+  }
+
+  const hasAdditionalTools =
+    Array.isArray(body?.input) && body.input.some((item: any) => item?.type === 'additional_tools');
+  return hasAdditionalTools ? 'responses:lite' : 'responses';
+}
 
 export async function registerResponsesRoute(
   fastify: FastifyInstance,
@@ -37,22 +58,21 @@ export async function registerResponsesRoute(
    */
   // Handler for Responses API requests (shared between /v1/responses and /v1/codex/responses)
   const responsesHandler = async (request: FastifyRequest, reply: FastifyReply) => {
-    if ((request as any).keyConfig?.beta === true) {
-      return handleBetaResponses(request, reply, {
-        usageStorage,
-        quotaEnforcer,
-        responsesStorage,
-      });
-    }
-
     const requestId = crypto.randomUUID();
+    const clientRequestId = getClientRequestId(request.headers);
     reply.header('x-request-id', requestId);
+    if (clientRequestId) reply.header(CLIENT_REQUEST_ID_HEADER, clientRequestId);
     const startTime = Date.now();
+    const incomingApiType = detectResponsesApiType(
+      request.headers as Record<string, unknown>,
+      request.body
+    );
     let usageRecord: Partial<UsageRecord> = {
       requestId,
+      clientRequestId,
       date: new Date().toISOString(),
       sourceIp: getClientIp(request),
-      incomingApiType: 'responses',
+      incomingApiType,
       startTime,
       isStreamed: false,
       responseStatus: 'pending',
@@ -81,9 +101,11 @@ export async function registerResponsesRoute(
       const transformer = new ResponsesTransformer();
 
       // Helper to normalize input into the standardized array format
-      function normalizeInput(
-        input: unknown
-      ): Array<{ type: string; role: string; content: Array<{ type: string; text: string }> }> {
+      function normalizeInput(input: unknown): Array<{
+        type: string;
+        role: string;
+        content: Array<{ type: string; text: string }>;
+      }> {
         return Array.isArray(input)
           ? (input as any[])
           : [
@@ -138,24 +160,35 @@ export async function registerResponsesRoute(
         body.input = [...conversationItems, ...currentInput];
       }
 
+      // Keep debug capture faithful to the client payload, then repair the
+      // dispatch body so strict Responses providers don't reject composite
+      // tool call IDs observed in replayed Codex CLI conversations.
+      const rawBodyForDebug = JSON.parse(JSON.stringify(body));
+      const normalizedCallIds = normalizeCompositeResponsesCallIds(body);
+      const normalizedReasoningItems = normalizeResponsesReasoningContent(body);
+      if (normalizedCallIds > 0) {
+        logger.warn(
+          `Normalized ${normalizedCallIds} composite Responses call_id value(s) for request ${requestId}`
+        );
+      }
+      if (normalizedReasoningItems > 0) {
+        logger.warn(
+          `Removed plaintext content from ${normalizedReasoningItems} Responses reasoning item(s) for request ${requestId}`
+        );
+      }
+
       let unifiedRequest = await transformer.parseRequest(body);
-      unifiedRequest.incomingApiType = 'responses';
+      unifiedRequest.incomingApiType = incomingApiType;
       unifiedRequest.originalBody = body;
       unifiedRequest.requestId = requestId;
       if (body.previous_response_id) {
         unifiedRequest.previousResponseId = body.previous_response_id;
       }
 
-      // Forward cache routing headers for prompt caching support.
-      // These headers enable server-side cache routing at the upstream provider.
-      const sessionId = request.headers['session_id'] as string | undefined;
-      const clientRequestId = request.headers['x-client-request-id'] as string | undefined;
-      if (sessionId || clientRequestId || body.prompt_cache_key) {
-        unifiedRequest.cacheRoutingHeaders = {
-          session_id: sessionId || body.prompt_cache_key,
-          'x-client-request-id': clientRequestId || body.prompt_cache_key,
-        };
-      }
+      unifiedRequest.cacheRoutingHeaders = getCacheRoutingHeaders(
+        request.headers,
+        body.prompt_cache_key
+      );
       unifiedRequest = attachKeyAccessPolicy(request, unifiedRequest);
       const xAppHeader = Array.isArray(request.headers['x-app'])
         ? request.headers['x-app'][0]
@@ -172,12 +205,20 @@ export async function registerResponsesRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(requestId, body, request.headers);
+      DebugManager.getInstance().startLog(
+        requestId,
+        rawBodyForDebug,
+        sanitizeHeaders(request.headers as any)
+      );
 
       // Check quota before processing
       if (quotaEnforcer) {
-        const allowed = await checkQuotaMiddleware(request, reply, quotaEnforcer);
-        if (!allowed) return;
+        const quotaCheck = await checkQuotaMiddleware(request, reply, quotaEnforcer);
+        if (!quotaCheck.ok) {
+          saveQuotaBlockedUsage(usageRecord, usageStorage, requestId, startTime);
+          return;
+        }
+        unifiedRequest = attachQuotaContext(unifiedRequest, quotaCheck.context);
       }
 
       const abortController = new AbortController();
@@ -260,6 +301,10 @@ export async function registerResponsesRoute(
         );
         return;
       }
+      if (e?.routingContext?.code === 'quota_exceeded') {
+        saveQuotaExceededUsage(e, 'responses', usageRecord, usageStorage, requestId, startTime);
+        return reply.code(429).send(e.routingContext.body);
+      }
       usageRecord.responseStatus =
         e?.routingContext?.code === 'upstream_timeout' ? 'timeout' : 'error';
       usageRecord.durationMs = Date.now() - startTime;
@@ -268,7 +313,7 @@ export async function registerResponsesRoute(
       usageStorage.saveRequest(usageRecord as UsageRecord);
 
       const errorDetails = {
-        apiType: 'responses',
+        apiType: incomingApiType,
         ...(e.routingContext || {}),
       };
 

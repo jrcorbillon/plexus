@@ -383,8 +383,50 @@
     {
       "idx": 54,
       "version": "6",
-      "when": 1783922439668,
-      "tag": "0054_add_alias_retry_rounds",
+      "when": 1783053909476,
+      "tag": "0054_add_scoped_multi_quotas",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "6",
+      "when": 1783309798440,
+      "tag": "0055_add_auto_compat",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1783698913287,
+      "tag": "0056_add_client_request_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "6",
+      "when": 1783840103366,
+      "tag": "0057_test_setup",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1783912982289,
+      "tag": "0058_add_key_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1784998659229,
+      "tag": "0059_add_mcp_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1785331545970,
+      "tag": "0060_add_alias_retry_rounds",
       "breakpoints": true
     }
   ]

@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, vi } from 'vitest';
-import { DebugManager } from '../debug-manager';
+import { DebugManager } from '../observability/debug-manager';
 import * as sanitizeHeadersModule from '../../utils/sanitize-headers';
 
 describe('DebugManager HTTP metadata', () => {

@@ -1,0 +1,87 @@
+post:
+  tags:
+    - Inference
+  summary: OpenAI-compatible text completions (unversioned alias)
+  description: |
+    Alias for `POST /v1/completions`. Same handler, auth, request body, and
+    response behaviour.
+
+    Authenticated with a Plexus inference key (`PlexusApiKey`), not the
+    management `x-admin-key`.
+  security:
+    - PlexusApiKey: []
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          type: object
+          required:
+            - model
+            - prompt
+          properties:
+            model:
+              type: string
+              description: Alias or `provider/model` identifier.
+            prompt:
+              oneOf:
+                - type: string
+                - type: array
+                  items:
+                    type: string
+              description: >
+                Prompt text, or an array of prompt strings. Native Completions
+                targets receive the array as-is; targets translated to chat,
+                messages, Gemini, or Responses join array elements with newlines.
+            suffix:
+              type: string
+              description: Optional suffix enabling fill-in-the-middle completion.
+            stream:
+              type: boolean
+              description: When true, response is Server-Sent Events.
+            echo:
+              type: boolean
+            max_tokens:
+              type: integer
+            temperature:
+              type: number
+          additionalProperties: true
+        examples:
+          simple:
+            summary: Minimal non-streaming call
+            value:
+              model: fast-model
+              prompt: 'def hello():'
+  responses:
+    '200':
+      description: |
+        A non-streamed JSON Completions response or, when `stream: true`,
+        a `text/event-stream` of Completions deltas.
+      content:
+        application/json:
+          schema:
+            type: object
+            description: OpenAI Completions response object.
+            additionalProperties: true
+        text/event-stream:
+          schema:
+            type: string
+            description: SSE frames of Completions deltas.
+    '400':
+      $ref: ../components/responses/BadRequestOpenAI.yaml
+    '401':
+      $ref: ../components/responses/AuthError.yaml
+    '404':
+      $ref: ../components/responses/NotFoundOpenAI.yaml
+    '429':
+      description: |
+        Quota exceeded, or an upstream provider returned HTTP 429 (rate limit).
+        Plexus quota rejections use `error.type: quota_exceeded`; upstream 429s
+        propagate with the provider's status and error payload.
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/OpenAIError.yaml
+    5XX:
+      $ref: ../components/responses/ProviderError.yaml
+  operationId: postCompletions

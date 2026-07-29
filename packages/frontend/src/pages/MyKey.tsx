@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { RotateCw } from 'lucide-react';
-import { api } from '../lib/api';
+import { RotateCw, AlertTriangle } from 'lucide-react';
+import { api, type QuotaStatusEntry } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { Card } from '../components/ui/Card';
@@ -10,18 +10,21 @@ import { Input } from '../components/ui/Input';
 import { Modal } from '../components/ui/Modal';
 import { Switch } from '../components/ui/Switch';
 import { CopyButton } from '../components/ui/CopyButton';
+import { QuotaStatusCard } from '../components/quota';
 import { PageHeader } from '../components/layout/PageHeader';
 import { PageContainer } from '../components/layout/PageContainer';
 import { Skeleton } from '../components/ui/Skeleton';
+import { sortMostConstrainedFirst } from '../lib/quota';
 
 interface SelfInfo {
   role: 'admin' | 'limited';
   keyName?: string;
   allowedProviders?: string[];
   allowedModels?: string[];
+  allowRawPassthrough?: boolean;
+  quotaNames?: string[];
   quotaName?: string | null;
   comment?: string | null;
-  beta?: boolean;
   traceEnabled?: boolean;
   traceEnabledGlobal?: boolean;
 }
@@ -30,6 +33,8 @@ export const MyKey: React.FC = () => {
   const { isLimited, isAdmin, login } = useAuth();
   const toast = useToast();
   const [info, setInfo] = useState<SelfInfo | null>(null);
+  const [quotas, setQuotas] = useState<QuotaStatusEntry[] | null>(null);
+  const [quotaError, setQuotaError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
   const [savingComment, setSavingComment] = useState(false);
@@ -50,6 +55,14 @@ export const MyKey: React.FC = () => {
       .catch((e) => toast.error(String(e), 'Load failed'))
       .finally(() => {
         if (!cancelled) setLoading(false);
+      });
+    api
+      .getSelfQuota()
+      .then((data) => {
+        if (!cancelled) setQuotas(data.quotas);
+      })
+      .catch(() => {
+        if (!cancelled) setQuotaError(true);
       });
     return () => {
       cancelled = true;
@@ -151,9 +164,11 @@ export const MyKey: React.FC = () => {
               <dt className="text-text-muted">Key name</dt>
               <dd className="font-mono text-text break-all">{info.keyName}</dd>
               <dt className="text-text-muted">Quota</dt>
-              <dd className="text-text">{info.quotaName || '—'}</dd>
-              <dt className="text-text-muted">Inference path</dt>
-              <dd className="text-text">{info.beta ? 'Beta' : 'Stable'}</dd>
+              <dd className="text-text">
+                {info.quotaNames && info.quotaNames.length > 0
+                  ? info.quotaNames.join(', ')
+                  : info.quotaName || '—'}
+              </dd>
               <dt className="text-text-muted">Allowed providers</dt>
               <dd className="text-text break-words">
                 {allowedProviders.length > 0 ? allowedProviders.join(', ') : 'Any (unrestricted)'}
@@ -162,7 +177,30 @@ export const MyKey: React.FC = () => {
               <dd className="text-text break-words">
                 {allowedModels.length > 0 ? allowedModels.join(', ') : 'Any (unrestricted)'}
               </dd>
+              <dt className="text-text-muted">Raw provider access</dt>
+              <dd className="text-text">{info.allowRawPassthrough ? 'Enabled' : 'Disabled'}</dd>
             </dl>
+          </Card>
+
+          <Card title="Quota">
+            {quotaError ? (
+              <div className="flex items-start gap-2 text-sm text-warning">
+                <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+                <span>Could not load quota status — try refreshing.</span>
+              </div>
+            ) : quotas === null ? (
+              <p className="text-sm text-text-muted">Loading…</p>
+            ) : quotas.length === 0 ? (
+              <p className="text-sm text-text-muted">
+                No quota is assigned to this key — requests are unrestricted by quota policy.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-4">
+                {sortMostConstrainedFirst(quotas).map((q) => (
+                  <QuotaStatusCard key={q.name} entry={q} />
+                ))}
+              </div>
+            )}
           </Card>
 
           <Card title="Comment">

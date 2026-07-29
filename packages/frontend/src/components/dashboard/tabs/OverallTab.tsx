@@ -13,20 +13,21 @@
  *                             an embedded 7-day / today roll-up
  *   - `getUsageByProvider` → per-provider request + token totals
  *   - `getUsageByModel`    → per-model (alias) request + token totals
- *   - `getSelfQuota`       → quota progress for the caller's key, when assigned
+ *   - `getSelfQuota`       → per-quota progress for the caller's key
+ *                             (`quotas[]`, most-constrained rendered first)
  *
  * All calls fire in parallel inside a single `useEffect`. There is no polling;
  * a manual refresh is triggered by changing the time range.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Key, Layers, Boxes, Gauge, Activity, AlertTriangle } from 'lucide-react';
-import { api, type PieChartDataPoint } from '../../../lib/api';
+import { api, type PieChartDataPoint, type QuotaStatusEntry } from '../../../lib/api';
 import { formatNumber, formatTokens, formatCost } from '../../../lib/format';
 import { Card } from '../../ui/Card';
-import { QuotaProgressBar } from '../../quota/QuotaProgressBar';
+import { QuotaStatusCard } from '../../quota';
 import { TimeRangeSelector } from '../TimeRangeSelector';
-import type { MeterStatus } from '../../../types/quota';
+import { sortMostConstrainedFirst } from '../../../lib/quota';
 
 type TimeRange = 'hour' | 'day' | 'week' | 'month';
 
@@ -35,6 +36,7 @@ interface SelfInfo {
   keyName?: string;
   allowedProviders?: string[];
   allowedModels?: string[];
+  quotaNames?: string[];
   quotaName?: string | null;
   comment?: string | null;
 }
@@ -48,55 +50,6 @@ interface SummaryStats {
   cachedTokens: number;
   cacheWriteTokens: number;
   todayCost: number;
-}
-
-interface QuotaInfo {
-  quotaName: string | null;
-  allowed: boolean;
-  currentUsage: number;
-  limit: number | null;
-  remaining: number | null;
-  resetsAt: string | null;
-  limitType: 'requests' | 'tokens' | 'cost' | null;
-}
-
-/**
- * Format an ISO resets-at timestamp as a short relative string, e.g.
- * "in 3h 20m". Falls back to an absolute date for far-future resets.
- */
-function formatResetsIn(iso: string | null): string {
-  if (!iso) return '—';
-  const resetsAt = new Date(iso).getTime();
-  const diffMs = resetsAt - Date.now();
-  if (diffMs <= 0) return 'resetting now';
-  const diffSeconds = Math.floor(diffMs / 1000);
-  const days = Math.floor(diffSeconds / 86400);
-  const hours = Math.floor((diffSeconds % 86400) / 3600);
-  const minutes = Math.floor((diffSeconds % 3600) / 60);
-  if (days > 7) return `on ${new Date(iso).toLocaleDateString()}`;
-  if (days > 0) return `in ${days}d ${hours}h`;
-  if (hours > 0) return `in ${hours}h ${minutes}m`;
-  return `in ${minutes}m`;
-}
-
-/**
- * Map a quota utilization percentage onto the progress-bar status colors
- * used elsewhere in the UI. Kept in sync with `QuotaProgressBar`'s palette.
- */
-function statusForPercent(pct: number): MeterStatus {
-  if (pct >= 100) return 'exhausted';
-  if (pct >= 90) return 'critical';
-  if (pct >= 75) return 'warning';
-  return 'ok';
-}
-
-/**
- * Format a quota usage value based on its limitType. `tokens` and `requests`
- * reuse the compact number formatter; `cost` falls through to formatCost.
- */
-function formatQuotaValue(value: number, limitType: QuotaInfo['limitType']): string {
-  if (limitType === 'cost') return formatCost(value);
-  return formatNumber(value, 1);
 }
 
 /**
@@ -165,7 +118,7 @@ export const OverallTab: React.FC = () => {
   const [summary, setSummary] = useState<SummaryStats | null>(null);
   const [providerData, setProviderData] = useState<PieChartDataPoint[]>([]);
   const [modelData, setModelData] = useState<PieChartDataPoint[]>([]);
-  const [quota, setQuota] = useState<QuotaInfo | null>(null);
+  const [quotas, setQuotas] = useState<QuotaStatusEntry[] | null>(null);
   const [quotaError, setQuotaError] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -190,7 +143,7 @@ export const OverallTab: React.FC = () => {
       .getSelfQuota()
       .then((data) => {
         if (!cancelled) {
-          setQuota(data);
+          setQuotas(data.quotas);
           setQuotaError(false);
         }
       })
@@ -198,7 +151,7 @@ export const OverallTab: React.FC = () => {
         // Distinguish fetch failure from "no quota assigned" so the card
         // doesn't tell a quota-gated user that they are unrestricted.
         if (!cancelled) {
-          setQuota(null);
+          setQuotas(null);
           setQuotaError(true);
         }
       });
@@ -255,13 +208,6 @@ export const OverallTab: React.FC = () => {
     };
   }, [timeRange]);
 
-  // Derived progress percentage for the quota card. 0% when no limit is set
-  // so the bar renders empty instead of NaN-width.
-  const quotaPct = useMemo(() => {
-    if (!quota || !quota.limit || quota.limit <= 0) return 0;
-    return Math.min(100, (quota.currentUsage / quota.limit) * 100);
-  }, [quota]);
-
   const allowedProviders = info?.allowedProviders ?? [];
   const allowedModels = info?.allowedModels ?? [];
 
@@ -296,7 +242,11 @@ export const OverallTab: React.FC = () => {
             </div>
             <div className="flex">
               <dt className="w-32 text-text-muted">Quota</dt>
-              <dd className="text-text">{info?.quotaName || 'None assigned'}</dd>
+              <dd className="text-text">
+                {info?.quotaNames && info.quotaNames.length > 0
+                  ? info.quotaNames.join(', ')
+                  : info?.quotaName || 'None assigned'}
+              </dd>
             </div>
             {info?.comment && (
               <div className="flex">
@@ -312,7 +262,7 @@ export const OverallTab: React.FC = () => {
           extra={<Gauge size={16} className="text-text-muted" />}
           className="min-w-0"
         >
-          {loading && !quota && !quotaError ? (
+          {loading && !quotas && !quotaError ? (
             <p className="text-sm text-text-muted">Loading…</p>
           ) : quotaError ? (
             <div className="flex items-start gap-2 text-sm text-warning">
@@ -322,49 +272,15 @@ export const OverallTab: React.FC = () => {
                 not shown here — try refreshing.
               </span>
             </div>
-          ) : !quota || !quota.quotaName ? (
+          ) : !quotas || quotas.length === 0 ? (
             <p className="text-sm text-text-muted">
               No quota is assigned to this key — requests are unrestricted by quota policy.
             </p>
-          ) : quota.limit == null ? (
-            <div className="space-y-2">
-              <p className="text-sm text-text">
-                Assigned: <span className="font-medium">{quota.quotaName}</span>
-              </p>
-              <p className="text-xs text-text-muted">
-                Quota definition not resolved yet; current status is unavailable.
-              </p>
-            </div>
           ) : (
-            <div className="space-y-3">
-              <QuotaProgressBar
-                label={`${quota.quotaName} (${quota.limitType ?? 'usage'})`}
-                value={quota.currentUsage}
-                max={quota.limit}
-                displayValue={`${formatQuotaValue(quota.currentUsage, quota.limitType)} / ${formatQuotaValue(
-                  quota.limit,
-                  quota.limitType
-                )}`}
-                status={statusForPercent(quotaPct)}
-                size="md"
-              />
-              <div className="flex items-center justify-between text-xs text-text-muted">
-                <span>
-                  Remaining:{' '}
-                  <span className="text-text font-medium">
-                    {quota.remaining != null
-                      ? formatQuotaValue(quota.remaining, quota.limitType)
-                      : '—'}
-                  </span>
-                </span>
-                <span>Resets {formatResetsIn(quota.resetsAt)}</span>
-              </div>
-              {!quota.allowed && (
-                <div className="flex items-center gap-2 text-xs text-danger">
-                  <AlertTriangle size={14} />
-                  <span>Quota exhausted — new requests will be rejected until it resets.</span>
-                </div>
-              )}
+            <div className="space-y-4">
+              {sortMostConstrainedFirst(quotas).map((q) => (
+                <QuotaStatusCard key={q.name} entry={q} resetsAtFormat="relative" />
+              ))}
             </div>
           )}
         </Card>

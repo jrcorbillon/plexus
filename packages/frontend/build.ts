@@ -73,6 +73,10 @@ const runBuild = async () => {
   const result = await build({
     entrypoints: ['./src/main.tsx'],
     outdir: './dist',
+    // index.html loads main.js as a classic script. Keep bundle-local symbols
+    // scoped so dependency identifiers (for example a parser named `Element`)
+    // cannot overwrite browser globals used by Monaco and DOMPurify.
+    format: 'iife',
     publicPath: '/ui/',
     minify: process.env.NODE_ENV === 'production',
     define: {
@@ -94,14 +98,6 @@ const runBuild = async () => {
   html = html.replace('src="./src/main.tsx"', 'src="main.js"');
   html = html.replace('src="/src/main.tsx"', 'src="main.js"'); // Handle both absolute/relative
   html = html.replace('type="module"', '');
-
-  // Add <base href="/ui/"> so that relative asset references (main.js, main.css,
-  // favicon) resolve correctly when the browser navigates to SPA deep links
-  // like /ui/models/:id/insights instead of trying to load assets relative
-  // to the current path.
-  if (!html.includes('<base')) {
-    html = html.replace('<head>', '<head>\n    <base href="/ui/">');
-  }
 
   // Inject Favicons and Manifest. SVG comes first so modern browsers prefer
   // the new Plexus geometric mark; older browsers fall back to the PNGs.

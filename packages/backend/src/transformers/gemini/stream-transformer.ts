@@ -2,6 +2,7 @@ import { createParser, EventSourceMessage } from 'eventsource-parser';
 import { logger } from '../../utils/logger';
 import type { StreamBlockEventType } from '../../types/unified';
 import { normalizeGeminiUsage } from '../../utils/usage-normalizer';
+import { detectGeminiMalformedFunctionCall } from '../../utils/gemini-malformed-function-call';
 
 /**
  * Transforms a Gemini stream (Server-Sent Events) into unified stream format.
@@ -89,6 +90,44 @@ export function transformGeminiStream(stream: ReadableStream): ReadableStream {
             }
 
             if (!candidate) return;
+
+            const malformedFunctionCall = detectGeminiMalformedFunctionCall(data);
+            // Fail before emitting any parts: the MALFORMED_FUNCTION_CALL
+            // terminal frame often carries leaked tool-call text that clients
+            // must never consume before the retryable error.
+            if (malformedFunctionCall) {
+              if (activeBlockType) {
+                const endEvent = {
+                  id: data.responseId,
+                  model: data.modelVersion,
+                  created: Date.now(),
+                  event: `${activeBlockType}_end` as StreamBlockEventType,
+                  delta: {},
+                };
+                logger.silly(
+                  `Gemini Transformer: Enqueueing unified chunk (${activeBlockType}_end)`,
+                  endEvent
+                );
+                controller.enqueue(endEvent);
+                activeBlockType = null;
+              }
+
+              controller.enqueue({
+                id: data.responseId,
+                model: data.modelVersion,
+                created: Date.now(),
+                event: 'error' as StreamBlockEventType,
+                delta: {},
+                error: {
+                  statusCode: malformedFunctionCall.statusCode,
+                  code: malformedFunctionCall.code,
+                  message: malformedFunctionCall.message,
+                },
+              });
+              messageHasFunctionCalls = false;
+              streamedToolCallCount = 0;
+              return;
+            }
 
             const parts = candidate.content?.parts || [];
 

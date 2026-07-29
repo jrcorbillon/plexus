@@ -6,19 +6,38 @@ import {
   KeyConfigSchema,
   McpServerConfigSchema,
   CompactionConfigSchema,
+  normalizeKeyConfig,
 } from '../../config';
-import { ConfigService } from '../../services/config-service';
+import { validateRawProviderSlug } from '../../services/dispatch/raw-passthrough';
+import { ConfigService } from '../../services/configuration/config-service';
+import { DebugManager } from '../../services/observability/debug-manager';
 import { isValidIpRule } from '../../utils/ip-match';
 import { getCheckerDefinitions } from '../../services/quota/checker-registry';
-import { UsageStorageService } from '../../services/usage-storage';
+import { UsageStorageService } from '../../services/observability/usage-storage';
 import { validateServerName } from '../../services/mcp-proxy/mcp-proxy-service';
 import { mcpProcessManager } from '../../services/mcp-local/mcp-process-manager';
-import { VisionDescriptorService } from '../../services/vision-descriptor-service';
+import { VisionDescriptorService } from '../../services/vision/vision-descriptor-service';
+import { decryptField } from '../../utils/encryption';
 import type { GpuParams, ModelArchitecture } from '@plexus/shared';
 import { DEFAULT_GPU_PARAMS } from '@plexus/shared';
+import { McpKeyCreateSchema } from '@plexus/shared';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function serializeMcpKey(key: {
+  id: number;
+  key: string;
+  isActive: boolean | number;
+  cooldownUntil: Date | number | null;
+}) {
+  return {
+    id: key.id,
+    key: decryptField(key.key) as string,
+    is_active: key.isActive === true || key.isActive === 1,
+    cooldown_until: key.cooldownUntil ? new Date(key.cooldownUntil).toISOString() : null,
+  };
 }
 
 function mergeCompactionPatch(
@@ -172,6 +191,11 @@ export async function registerConfigRoutes(
     if (!result.success) {
       return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
     }
+    if (result.data.raw_passthrough?.enabled && !validateRawProviderSlug(slug)) {
+      return reply.code(400).send({
+        error: 'Raw passthrough requires a single slug-safe provider ID',
+      });
+    }
     try {
       await configService.saveProvider(slug, result.data);
       logger.debug(`Provider '${slug}' saved via API (PUT)`);
@@ -199,6 +223,11 @@ export async function registerConfigRoutes(
       const result = ProviderConfigSchema.safeParse(merged);
       if (!result.success) {
         return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
+      }
+      if (result.data.raw_passthrough?.enabled && !validateRawProviderSlug(slug)) {
+        return reply.code(400).send({
+          error: 'Raw passthrough requires a single slug-safe provider ID',
+        });
       }
       await configService.saveProvider(slug, result.data);
       logger.debug(`Provider '${slug}' updated via API (PATCH)`);
@@ -364,12 +393,31 @@ export async function registerConfigRoutes(
   // PUT — full create-or-replace with Zod validation
   fastify.put('/v0/management/keys/:name', async (request, reply) => {
     const { name } = request.params as { name: string };
-    const result = KeyConfigSchema.safeParse(request.body);
+    if (name.includes('*')) {
+      return reply
+        .code(400)
+        .send({ error: "Key name cannot contain '*' (reserved for the shared-quota bucket)" });
+    }
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Object body is required' });
+    }
+    const existing = await configService.getRepository().getAllKeys();
+    if (
+      existing[name] &&
+      ('expiresInMinutes' in body || 'expiresAt' in body || 'disabledAt' in body)
+    ) {
+      return reply.code(400).send({ error: 'Key expiry cannot be changed after creation' });
+    }
+    if ('expiresAt' in body || 'disabledAt' in body) {
+      return reply.code(400).send({ error: 'Expiry timestamps are managed by Plexus' });
+    }
+    const result = KeyConfigSchema.safeParse(body);
     if (!result.success) {
       return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
     }
     try {
-      await configService.saveKey(name, result.data);
+      await configService.saveKey(name, normalizeKeyConfig(result.data));
       logger.debug(`API key '${name}' saved via API (PUT)`);
       return reply.send({ success: true, name });
     } catch (e: any) {
@@ -384,6 +432,9 @@ export async function registerConfigRoutes(
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return reply.code(400).send({ error: 'Object body is required' });
     }
+    if ('expiresInMinutes' in body || 'expiresAt' in body || 'disabledAt' in body) {
+      return reply.code(400).send({ error: 'Key expiry cannot be changed after creation' });
+    }
 
     try {
       const keys = await configService.getRepository().getAllKeys();
@@ -391,7 +442,10 @@ export async function registerConfigRoutes(
       if (!existing) {
         return reply.code(404).send({ error: `API key '${name}' not found` });
       }
-      const merged = { ...existing, ...body };
+      // Normalize a legacy `quota` field on the incoming body BEFORE merging,
+      // so a legacy-format PATCH replaces the key's `quotas` instead of being
+      // shadowed by the existing config's `quotas`.
+      const merged = { ...existing, ...normalizeKeyConfig(body) };
       const result = KeyConfigSchema.safeParse(merged);
       if (!result.success) {
         return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
@@ -418,6 +472,21 @@ export async function registerConfigRoutes(
     }
   });
 
+  fastify.post('/v0/management/keys/:name/disable', async (request, reply) => {
+    const { name } = request.params as { name: string };
+    try {
+      const disabled = await configService.disableTimeBoundKey(name);
+      if (!disabled) {
+        return reply.code(400).send({ error: 'Only time-bound keys can be disabled' });
+      }
+      logger.debug(`Time-bound API key '${name}' disabled via API`);
+      return reply.send({ success: true, name });
+    } catch (e: any) {
+      logger.error(`Failed to disable API key '${name}'`, e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
   // ─── System Settings ──────────────────────────────────────────────
 
   fastify.get('/v0/management/system-settings', async (_request, reply) => {
@@ -433,6 +502,32 @@ export async function registerConfigRoutes(
     const body = request.body as Record<string, unknown> | null;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return reply.code(400).send({ error: 'Object body is required' });
+    }
+
+    // `default_quotas` is the one system setting with referential integrity:
+    // every name must exist in `user_quotas`, mirroring the membership checks
+    // on /quota/clear and /quota/recompute (the runtime only skip-and-warns on
+    // dangling names, silently enforcing nothing). `null` clears the setting.
+    if ('default_quotas' in body && body.default_quotas != null) {
+      const dq = body.default_quotas;
+      if (!Array.isArray(dq) || dq.some((v) => typeof v !== 'string')) {
+        return reply.code(400).send({
+          error: {
+            message: `'default_quotas' must be an array of quota names`,
+            type: 'invalid_request_error',
+          },
+        });
+      }
+      const defined = await configService.getRepository().getAllUserQuotas();
+      const unknown = dq.filter((name) => !Object.hasOwn(defined, name));
+      if (unknown.length > 0) {
+        return reply.code(400).send({
+          error: {
+            message: `Unknown quota name(s) in 'default_quotas': ${unknown.join(', ')}. Quotas must be defined in user_quotas first.`,
+            type: 'invalid_request_error',
+          },
+        });
+      }
     }
 
     try {
@@ -486,6 +581,42 @@ export async function registerConfigRoutes(
       return reply.send(updated);
     } catch (e: any) {
       logger.error('Failed to patch failover config', e);
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
+  // ─── Capture Trace on Error ──────────────────────────────────────
+  // Persisted admin toggle. When enabled, DebugManager captures traces for
+  // every request and persists them only when a request writes an inference
+  // error or triggers a cooldown, even if global/per-key debug is off.
+
+  fastify.get('/v0/management/config/capture-trace-on-error', async (_request, reply) => {
+    try {
+      const enabled = await configService.getRepository().getCaptureTraceOnError();
+      return reply.send({ enabled });
+    } catch (e: any) {
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  });
+
+  fastify.patch('/v0/management/config/capture-trace-on-error', async (request, reply) => {
+    const body = request.body as { enabled?: unknown } | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Object body is required' });
+    }
+    if (typeof body.enabled !== 'boolean') {
+      return reply.code(400).send({ error: 'enabled must be a boolean' });
+    }
+
+    try {
+      // Persist to the database, then mirror to the in-memory DebugManager so
+      // the change takes effect immediately without a restart.
+      await configService.setSetting('debug.captureOnError', body.enabled);
+      DebugManager.getInstance().setCaptureOnError(body.enabled);
+      logger.debug('Capture-trace-on-error updated via API');
+      return reply.send({ enabled: body.enabled });
+    } catch (e: any) {
+      logger.error('Failed to patch capture-trace-on-error config', e);
       return reply.code(500).send({ error: 'Internal server error' });
     }
   });
@@ -934,6 +1065,52 @@ export async function registerConfigRoutes(
       return reply.code(500).send({ error: 'Internal server error' });
     }
   });
+
+  fastify.get('/v0/management/mcp-servers/:serverName/keys', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    const keys = await configService.getRepository().getMcpServerKeys(serverName);
+    if (!keys) return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+    return reply.send({ keys: keys.map(serializeMcpKey) });
+  });
+
+  fastify.post('/v0/management/mcp-servers/:serverName/keys', async (request, reply) => {
+    const { serverName } = request.params as { serverName: string };
+    const result = McpKeyCreateSchema.safeParse(request.body);
+    if (!result.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: result.error.issues });
+    }
+
+    const key = await configService
+      .getRepository()
+      .addMcpServerKey(serverName, result.data.key, result.data.is_active ?? true);
+    if (!key) return reply.code(404).send({ error: `MCP server '${serverName}' not found` });
+    return reply.code(201).send(serializeMcpKey(key));
+  });
+
+  fastify.delete('/v0/management/mcp-servers/:serverName/keys/:keyId', async (request, reply) => {
+    const { serverName, keyId } = request.params as { serverName: string; keyId: string };
+    const id = Number(keyId);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      return reply.code(400).send({ error: 'keyId must be a positive integer' });
+    }
+    const deleted = await configService.getRepository().deleteMcpServerKey(serverName, id);
+    if (!deleted) return reply.code(404).send({ error: `MCP key '${keyId}' not found` });
+    return reply.send({ success: true });
+  });
+
+  fastify.post(
+    '/v0/management/mcp-servers/:serverName/keys/:keyId/clear-cooldown',
+    async (request, reply) => {
+      const { serverName, keyId } = request.params as { serverName: string; keyId: string };
+      const id = Number(keyId);
+      if (!Number.isSafeInteger(id) || id < 1) {
+        return reply.code(400).send({ error: 'keyId must be a positive integer' });
+      }
+      const cleared = await configService.getRepository().clearMcpServerKeyCooldown(serverName, id);
+      if (!cleared) return reply.code(404).send({ error: `MCP key '${keyId}' not found` });
+      return reply.send({ success: true });
+    }
+  );
 
   fastify.put('/v0/management/mcp-servers/:serverName', async (request, reply) => {
     const { serverName } = request.params as { serverName: string };

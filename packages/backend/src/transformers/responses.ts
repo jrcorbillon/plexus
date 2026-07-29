@@ -11,11 +11,102 @@ import {
   ResponsesReasoningTextPart,
   ResponsesSummaryTextPart,
 } from '../types/responses';
-import { UnifiedChatRequest, UnifiedChatResponse, UnifiedMessage } from '../types/unified';
+import {
+  UnifiedChatRequest,
+  UnifiedChatResponse,
+  UnifiedImageGenerationCall,
+  UnifiedMessage,
+} from '../types/unified';
 import { createParser } from 'eventsource-parser';
 import { encode } from 'eventsource-encoder';
 import { logger } from '../utils/logger';
 import { normalizeOpenAIChatUsage, normalizeOpenAIResponsesUsage } from '../utils/usage-normalizer';
+import { imageGenerationCallMarkdown } from './image-rendering';
+
+const OPENAI_RESPONSES_CALL_ID_MAX_LENGTH = 64;
+const OPENAI_RESPONSES_REASONING_CONTENT_MAX_ITEMS = 0;
+
+/**
+ * Projects a completed image_generation_call output item (with a non-empty
+ * base64 `result`) onto the typed unified carry — see
+ * UnifiedImageGenerationCall in types/unified.ts. The `result` is carried
+ * byte-intact: the inline size cap applies only to the chat-format markdown
+ * rendering (see transformers/image-rendering.ts), never to the typed item.
+ */
+function toUnifiedImageGenerationCall(item: any): UnifiedImageGenerationCall {
+  return {
+    ...(typeof item.id === 'string' ? { id: item.id } : {}),
+    ...(typeof item.status === 'string' ? { status: item.status } : {}),
+    result: item.result,
+  };
+}
+
+// Some Responses clients have been observed replaying tool calls with composite
+// IDs like "call_...|fc_...". OpenAI-compatible providers validate call_id
+// length and require the model-generated "call_..." ID when the composite ID is
+// too long, so only repair that exact observed shape once it violates the
+// OpenAI limit instead of rewriting arbitrary caller-provided IDs.
+export function normalizeCompositeResponsesCallIds(body: any): number {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.input)) {
+    return 0;
+  }
+
+  let normalizedCount = 0;
+  for (const item of body.input) {
+    if (!item || typeof item !== 'object' || typeof item.call_id !== 'string') {
+      continue;
+    }
+
+    if (item.call_id.length <= OPENAI_RESPONSES_CALL_ID_MAX_LENGTH) {
+      continue;
+    }
+
+    const separatorIndex = item.call_id.indexOf('|');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const callId = item.call_id.slice(0, separatorIndex);
+    const itemId = item.call_id.slice(separatorIndex + 1);
+    if (!callId.startsWith('call_') || !itemId.startsWith('fc_')) {
+      continue;
+    }
+
+    item.call_id = callId;
+    normalizedCount++;
+  }
+
+  return normalizedCount;
+}
+
+// Reasoning items are valid replay context, but some OpenAI-compatible
+// Responses providers reject replayed plaintext reasoning text with
+// "content max length 0". Drop only the optional plaintext content array once
+// it violates that limit while preserving the reasoning item, summary, status,
+// id, and encrypted_content.
+export function normalizeResponsesReasoningContent(body: any): number {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.input)) {
+    return 0;
+  }
+
+  let normalizedCount = 0;
+  for (const item of body.input) {
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      item.type !== 'reasoning' ||
+      !Array.isArray(item.content) ||
+      item.content.length <= OPENAI_RESPONSES_REASONING_CONTENT_MAX_ITEMS
+    ) {
+      continue;
+    }
+
+    item.content = [];
+    normalizedCount++;
+  }
+
+  return normalizedCount;
+}
 
 /**
  * ResponsesTransformer
@@ -26,6 +117,14 @@ import { normalizeOpenAIChatUsage, normalizeOpenAIResponsesUsage } from '../util
 export class ResponsesTransformer implements Transformer {
   name = 'responses';
   defaultEndpoint = '/responses';
+
+  // Codex CLI extensions (namespace tools, custom/freeform tools) are
+  // per-request state: providers only understand flat function tools, so we
+  // flatten on the way in and split/re-wrap on the way out. Populated during
+  // parseRequest/convertToolsForUnified and consulted by
+  // convertChatResponseToOutputItems/formatStream on the same instance.
+  private namespaceMap = new Map<string, { namespace: string; name: string }>();
+  private customToolNames = new Set<string>();
 
   /**
    * Parses incoming Responses API request into unified format
@@ -39,8 +138,28 @@ export class ResponsesTransformer implements Transformer {
       throw new Error('Missing required field: input');
     }
 
+    this.namespaceMap.clear();
+    this.customToolNames.clear();
+
     // Normalize input to array format
     const normalizedInput = this.normalizeInput(input.input);
+
+    // Codex CLI "lite" mode sends turn-local tool definitions as an
+    // `additional_tools` input item instead of the top-level `tools` array.
+    // Lift those into the tool list before flattening so the model actually
+    // sees them — otherwise the request goes upstream with no tools and the
+    // model hallucinates tool calls as plain text.
+    const liftedTools = normalizedInput
+      .filter((item) => item?.type === 'additional_tools' && Array.isArray(item.tools))
+      .flatMap((item) => item.tools);
+
+    // Convert tools first — built-in server-side tools (web search etc.) are
+    // passed through so provider adapters can coerce them; function tools are
+    // reformatted; Codex CLI namespace/custom tools are flattened/registered.
+    // This must run before converting input items, since namespace-qualified
+    // function_call items and custom_tool_call items are resolved against the
+    // namespaceMap/customToolNames populated here.
+    const tools = this.convertToolsForUnified([...(input.tools || []), ...liftedTools]);
 
     // Convert input items to Chat Completions messages
     const messages = this.convertInputItemsToMessages(normalizedInput);
@@ -53,31 +172,51 @@ export class ResponsesTransformer implements Transformer {
       });
     }
 
-    // Convert tools — built-in server-side tools (web search etc.) are passed through
-    // so provider adapters can coerce them; only function tools are reformatted.
-    const tools = this.convertToolsForUnified(input.tools || []);
-
+    // Maybe-undefined client fields use conditional spread (not
+    // `key: input.maybeUndefined`) so an omitted client field leaves NO own
+    // property on the unified request — a phantom `key: undefined` own
+    // property survives object spreads and flips `'key' in x` /
+    // hasOwnProperty checks downstream even though JSON would drop it.
     return {
-      requestId: input.requestId,
+      ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
       model: input.model,
       messages,
-      max_tokens: input.max_output_tokens,
-      temperature: input.temperature ?? 1.0,
-      stream: input.stream ?? false,
-      tools: tools.length > 0 ? tools : undefined,
+      ...(input.max_output_tokens !== undefined ? { max_tokens: input.max_output_tokens } : {}),
+      // Forward temperature only when the client actually sent it. GPT-5
+      // reasoning models (and others) reject sampling params outright, so
+      // injecting a fabricated default here would send `temperature: 1.0`
+      // upstream on every request that omitted it.
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.stream !== undefined ? { stream: input.stream } : {}),
+      ...(tools.length > 0 ? { tools } : {}),
       tool_choice: this.convertToolChoiceForChatCompletions(input.tool_choice),
-      reasoning: input.reasoning,
-      include: input.include,
-      prompt_cache_key: input.prompt_cache_key,
-      text: input.text,
-      parallel_tool_calls: input.parallel_tool_calls,
-      response_format: input.text?.format
+      ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
+      ...(input.include !== undefined ? { include: input.include } : {}),
+      ...(input.prompt_cache_key !== undefined ? { prompt_cache_key: input.prompt_cache_key } : {}),
+      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.parallel_tool_calls !== undefined
+        ? { parallel_tool_calls: input.parallel_tool_calls }
+        : {}),
+      ...(input.text?.format
         ? {
-            type: input.text.format.type,
-            json_schema: input.text.format.schema,
+            response_format: {
+              type: input.text.format.type,
+              json_schema: input.text.format.schema,
+              // Carry the full structured-output descriptor: dropping
+              // name/description/strict would force the responses -> chat
+              // emission to fabricate `name: "response_schema"` /
+              // `strict: true` over the client-supplied values.
+              ...(input.text.format.name !== undefined ? { name: input.text.format.name } : {}),
+              ...(input.text.format.description !== undefined
+                ? { description: input.text.format.description }
+                : {}),
+              ...(input.text.format.strict !== undefined
+                ? { strict: input.text.format.strict }
+                : {}),
+            },
           }
-        : undefined,
-      metadata: input.metadata,
+        : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       incomingApiType: 'responses',
       originalBody: input,
     };
@@ -170,10 +309,15 @@ export class ResponsesTransformer implements Transformer {
       };
     });
 
+    // `stream` uses conditional spread for the same reason parseRequest does:
+    // when the client omitted it, the outbound payload must carry NO own
+    // `stream` property — a phantom `stream: undefined` survives object
+    // spreads and flips `'stream' in x` / hasOwnProperty checks downstream
+    // even though JSON serialization would drop it.
     const payload: any = {
       model: request.model,
       input: inputItems,
-      stream: request.stream,
+      ...(request.stream !== undefined ? { stream: request.stream } : {}),
     };
 
     if (instructions) {
@@ -222,7 +366,10 @@ export class ResponsesTransformer implements Transformer {
     // the floor when the client is talking the same API type as the upstream
     // provider. Only fields not already set are carried through, so the
     // unified pipeline output is never overridden.
-    if (request.incomingApiType?.toLowerCase() === 'responses' && request.originalBody) {
+    if (
+      request.incomingApiType?.toLowerCase().split(':', 1)[0] === 'responses' &&
+      request.originalBody
+    ) {
       const passthroughFields = [
         'user',
         'store',
@@ -266,7 +413,29 @@ export class ResponsesTransformer implements Transformer {
 
       // Find the first message output item for content
       const messageItem = response.output?.find((item: any) => item.type === 'message');
-      const content = messageItem?.content?.map((part: any) => part.text).join('\n') || null;
+      const messageText = messageItem?.content?.map((part: any) => part.text).join('\n') || null;
+
+      // Completed image_generation_call items (non-empty base64 `result`)
+      // are carried TYPED ONLY, byte-intact and never size-capped, on
+      // `image_generation_calls` — see UnifiedImageGenerationCall in
+      // types/unified.ts. The unified `content` stays PURE authored message
+      // text: chat-format client renderers compose their own markdown
+      // projection from the typed items (composeContentWithImageMarkdown in
+      // transformers/image-rendering.ts), and the responses-facing
+      // formatResponse re-emits the native item with NO string surgery on
+      // the text — so authored text that happens to contain the same
+      // characters as a rendered image segment can never be corrupted.
+      const imageGenerationCalls: UnifiedImageGenerationCall[] = [];
+      for (const item of response.output ?? []) {
+        if (
+          item?.type === 'image_generation_call' &&
+          typeof item.result === 'string' &&
+          item.result.length > 0
+        ) {
+          imageGenerationCalls.push(toUnifiedImageGenerationCall(item));
+        }
+      }
+      const content = messageText;
 
       // Collect url_citation annotations from all output_text content parts
       const annotations: any[] = [];
@@ -296,6 +465,34 @@ export class ResponsesTransformer implements Transformer {
         : reasoningItem?.summary;
       const reasoning_content = reasoningParts?.map((part: any) => part.text).join('\n') || null;
 
+      // Extract tool calls from function_call/custom_tool_call output items.
+      // This transformer instance is the PROVIDER-side transformer (a
+      // different instance than the client-side one that ran parseRequest),
+      // so it has no namespaceMap/customToolNames of its own — it just flattens
+      // to the same flat name convention used when sending tools out
+      // (${namespace}__${name}) so the client-side transformer's
+      // namespaceMap/customToolNames (built from the original request) can
+      // split/unwrap them again in formatResponse/formatStream.
+      // custom_tool_call's raw string `input` is re-wrapped as JSON
+      // `{input}` function-call arguments so it round-trips through the
+      // unified layer identically to a normal function call.
+      const toolCalls = response.output
+        ?.filter((item: any) => item.type === 'function_call' || item.type === 'custom_tool_call')
+        .map((item: any) => {
+          const flatName = item.namespace ? `${item.namespace}__${item.name}` : item.name;
+          return {
+            id: item.call_id,
+            type: 'function' as const,
+            function: {
+              name: flatName,
+              arguments:
+                item.type === 'custom_tool_call'
+                  ? this.customToolArgumentsForModel(item.input)
+                  : item.arguments,
+            },
+          };
+        });
+
       return {
         id: response.id,
         model: response.model,
@@ -303,7 +500,10 @@ export class ResponsesTransformer implements Transformer {
         content,
         reasoning_content,
         annotations: annotations.length > 0 ? annotations : undefined,
-        tool_calls: undefined, // TODO: Extract from function_call output items if needed
+        tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+        ...(imageGenerationCalls.length > 0
+          ? { image_generation_calls: imageGenerationCalls }
+          : {}),
         usage,
       };
     } else {
@@ -398,8 +598,32 @@ export class ResponsesTransformer implements Transformer {
           });
           break;
 
-        case 'function_call':
-          // Add assistant message with tool call
+        case 'function_call': {
+          // Codex CLI namespace extension: join namespace-qualified calls
+          // back to the flat name providers were given in convertToolsForUnified.
+          const flatName = item.namespace ? `${item.namespace}__${item.name}` : item.name;
+          messages.push({
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: item.call_id,
+                type: 'function',
+                function: {
+                  name: flatName,
+                  arguments: item.arguments,
+                },
+              },
+            ],
+          });
+          break;
+        }
+
+        case 'custom_tool_call': {
+          // Codex CLI custom (freeform) tool, e.g. apply_patch. Wrap the raw
+          // string input as JSON function-call arguments so the model sees a
+          // normal function tool, matching customToolArgumentsForModel.
+          this.customToolNames.add(item.name);
           messages.push({
             role: 'assistant',
             content: null,
@@ -409,14 +633,16 @@ export class ResponsesTransformer implements Transformer {
                 type: 'function',
                 function: {
                   name: item.name,
-                  arguments: item.arguments,
+                  arguments: this.customToolArgumentsForModel(item.input),
                 },
               },
             ],
           });
           break;
+        }
 
         case 'function_call_output':
+        case 'custom_tool_call_output': {
           // Add tool message with result
           const outputContent =
             typeof item.output === 'string'
@@ -429,6 +655,7 @@ export class ResponsesTransformer implements Transformer {
             content: outputContent,
           });
           break;
+        }
 
         case 'reasoning':
           // Convert reasoning to assistant message (limited support)
@@ -440,6 +667,11 @@ export class ResponsesTransformer implements Transformer {
             });
           }
           break;
+
+        case 'additional_tools':
+          // Already lifted into the tool list in parseRequest; not a message.
+          break;
+
         default:
           if (item.role) {
             messages.push({
@@ -534,11 +766,67 @@ export class ResponsesTransformer implements Transformer {
    * Function tools are reformatted; non-function tools (built-in server-side
    * tools like web_search, web_search_20250305, openrouter:web_search) are
    * passed through as-is so provider adapters can coerce them.
+   *
+   * Codex CLI extensions:
+   * - `type: "namespace"` tools group sub-tools; most providers only
+   *   understand flat function tools, so each sub-tool is flattened to
+   *   `${namespace}__${name}` and recorded in namespaceMap for split-back
+   *   in convertChatResponseToOutputItems/formatStream.
+   * - `type: "custom"` tools (e.g. apply_patch) take raw string input rather
+   *   than JSON-schema arguments; they're exposed to the model as a function
+   *   tool with a single `input: string` argument, matching the wire shape
+   *   codex-ollama-proxy's `customToolArgumentsForModel` sends
+   *   (`JSON.stringify({ input })`). The name is recorded in
+   *   customToolNames so the response side can convert back to
+   *   custom_tool_call and unwrap the argument via customToolInput().
    */
   private convertToolsForUnified(tools: any[]): any[] {
-    return tools.map((tool) => {
-      if (tool.type !== 'function') return tool;
-      return {
+    const result: any[] = [];
+    for (const tool of tools) {
+      if (tool.type === 'namespace') {
+        for (const subTool of tool.tools || []) {
+          const flatName = `${tool.name}__${subTool.name}`;
+          this.namespaceMap.set(flatName, { namespace: tool.name, name: subTool.name });
+          result.push({
+            type: 'function',
+            function: {
+              name: flatName,
+              description: subTool.description || '',
+              parameters: subTool.parameters || {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+              strict: subTool.strict,
+            },
+          });
+        }
+        continue;
+      }
+
+      if (tool.type === 'custom') {
+        this.customToolNames.add(tool.name);
+        result.push({
+          type: 'function',
+          function: {
+            name: tool.name,
+            description: tool.description || '',
+            parameters: {
+              type: 'object',
+              properties: { input: { type: 'string' } },
+              required: ['input'],
+            },
+          },
+        });
+        continue;
+      }
+
+      if (tool.type !== 'function') {
+        result.push(tool);
+        continue;
+      }
+
+      result.push({
         type: 'function',
         function: {
           name: tool.name,
@@ -546,8 +834,68 @@ export class ResponsesTransformer implements Transformer {
           parameters: tool.parameters,
           strict: tool.strict,
         },
-      };
-    });
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Wraps a custom tool's raw string input into the JSON arguments shape a
+   * function-calling model expects, matching codex-ollama-proxy's
+   * `customToolArgumentsForModel`.
+   */
+  private customToolArgumentsForModel(input: any): string {
+    return JSON.stringify({ input: typeof input === 'string' ? input : JSON.stringify(input) });
+  }
+
+  /**
+   * Unwraps a model-generated function_call's JSON arguments back into the
+   * raw string input a custom_tool_call expects, matching
+   * codex-ollama-proxy's `customToolInput`. Handles:
+   * - a plain string that already looks like a patch/raw input
+   * - `{ input: string }` (the shape we ask the model to produce)
+   * - `{ command: [..., patchBody] }` tuple form some models emit
+   * - any other object: falls back to the first string-valued property
+   */
+  private customToolInput(rawArguments: string): string {
+    if (typeof rawArguments !== 'string') {
+      return rawArguments == null ? '' : String(rawArguments);
+    }
+
+    const trimmed = rawArguments.trim();
+    if (trimmed.startsWith('*** Begin Patch')) {
+      return rawArguments;
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawArguments);
+    } catch {
+      return rawArguments;
+    }
+
+    if (typeof parsed === 'string') {
+      return parsed;
+    }
+
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.input === 'string') {
+        return parsed.input;
+      }
+      if (Array.isArray(parsed.command)) {
+        const last = parsed.command[parsed.command.length - 1];
+        if (typeof last === 'string') {
+          return last;
+        }
+      }
+      for (const value of Object.values(parsed)) {
+        if (typeof value === 'string') {
+          return value;
+        }
+      }
+    }
+
+    return rawArguments;
   }
 
   /**
@@ -594,15 +942,26 @@ export class ResponsesTransformer implements Transformer {
     // Add tool calls if present
     if (response.tool_calls && response.tool_calls.length > 0) {
       for (const toolCall of response.tool_calls) {
-        items.push({
-          type: 'function_call',
-          id: this.generateItemId('fc'),
-          status: 'completed',
-          call_id: toolCall.id,
-          name: toolCall.function.name,
-          arguments: toolCall.function.arguments,
-        });
+        items.push(this.buildToolOutputItem(toolCall));
       }
+    }
+
+    // Re-emit typed image_generation_call items natively (full base64 — the
+    // native format has no inline-markdown size concern). Unified `content`
+    // is PURE authored text (transformResponse never bakes a rendered image
+    // segment into it — see transformers/image-rendering.ts), so the message
+    // text below needs NO string surgery: it reaches the client byte-intact
+    // even when the authored text happens to contain the same characters as
+    // a rendered image segment (markdown or oversized placeholder).
+    const messageText = response.content || '';
+    for (const imageCall of response.image_generation_calls ?? []) {
+      if (typeof imageCall.result !== 'string' || imageCall.result.length === 0) continue;
+      items.push({
+        type: 'image_generation_call',
+        id: imageCall.id ?? this.generateItemId('ig'),
+        status: (imageCall.status as 'in_progress' | 'completed' | 'failed') ?? 'completed',
+        result: imageCall.result,
+      });
     }
 
     // Add main message
@@ -614,7 +973,7 @@ export class ResponsesTransformer implements Transformer {
       content: [
         {
           type: 'output_text',
-          text: response.content || '',
+          text: messageText,
           annotations: response.annotations || [],
         },
       ],
@@ -623,12 +982,93 @@ export class ResponsesTransformer implements Transformer {
     return items;
   }
 
+  /**
+   * Converts a single Chat-Completions-style tool call back into a Responses
+   * API output item, splitting namespace-flattened names back to
+   * `{namespace, name}` and converting custom tool calls back to
+   * custom_tool_call with unwrapped string input (customToolInput).
+   */
+  private buildToolOutputItem(toolCall: {
+    id: string;
+    function: { name: string; arguments: string };
+  }): ResponsesOutputItem {
+    const flatName = toolCall.function.name;
+
+    if (this.customToolNames.has(flatName)) {
+      return {
+        type: 'custom_tool_call',
+        id: this.generateItemId('fc'),
+        status: 'completed',
+        call_id: toolCall.id,
+        name: flatName,
+        input: this.customToolInput(toolCall.function.arguments),
+      };
+    }
+
+    const namespaced = this.namespaceMap.get(flatName);
+    if (namespaced) {
+      return {
+        type: 'function_call',
+        id: this.generateItemId('fc'),
+        status: 'completed',
+        call_id: toolCall.id,
+        name: namespaced.name,
+        namespace: namespaced.namespace,
+        arguments: toolCall.function.arguments,
+      };
+    }
+
+    return {
+      type: 'function_call',
+      id: this.generateItemId('fc'),
+      status: 'completed',
+      call_id: toolCall.id,
+      name: flatName,
+      arguments: toolCall.function.arguments,
+    };
+  }
+
   transformStream(stream: ReadableStream): ReadableStream {
     // Converts Responses API SSE stream to Unified chunks
     // Following the same pattern as OpenAI and Anthropic transformers
     const decoder = new TextDecoder();
     let responseModel = '';
     let responseId = '';
+    // Responses output indexes identify items in the whole response, whereas
+    // Chat Completions tool call indexes identify only tool calls. Keep a
+    // stable mapping so parallel calls remain independently assemblable even
+    // when their argument deltas are interleaved with other output items.
+    const toolCallIndexByOutputIndex = new Map<number, number>();
+    const toolCallIndexByItemId = new Map<string, number>();
+    let nextToolCallIndex = 0;
+    let hasFunctionCall = false;
+    // image_generation_call items already rendered as a content delta from
+    // their response.output_item.done event, so the response.completed
+    // fallback below doesn't render them a second time.
+    const renderedImageItemIds = new Set<string>();
+    const getToolCallIndex = (data: any): number => {
+      const outputIndex =
+        typeof data.output_index === 'number' ? (data.output_index as number) : undefined;
+      const itemId =
+        typeof data.item_id === 'string'
+          ? data.item_id
+          : typeof data.item?.id === 'string'
+            ? data.item.id
+            : undefined;
+      const index =
+        (outputIndex === undefined ? undefined : toolCallIndexByOutputIndex.get(outputIndex)) ??
+        (itemId === undefined ? undefined : toolCallIndexByItemId.get(itemId)) ??
+        nextToolCallIndex++;
+
+      if (outputIndex !== undefined) {
+        toolCallIndexByOutputIndex.set(outputIndex, index);
+      }
+      if (itemId !== undefined) {
+        toolCallIndexByItemId.set(itemId, index);
+      }
+
+      return index;
+    };
 
     return new ReadableStream({
       async start(controller) {
@@ -670,6 +1110,7 @@ export class ResponsesTransformer implements Transformer {
                 });
               } else if (data.type === 'response.function_call_arguments.delta') {
                 // Tool call arguments delta
+                hasFunctionCall = true;
                 controller.enqueue({
                   id: responseId,
                   model: responseModel,
@@ -677,7 +1118,7 @@ export class ResponsesTransformer implements Transformer {
                   delta: {
                     tool_calls: [
                       {
-                        index: 0,
+                        index: getToolCallIndex(data),
                         function: {
                           arguments: data.delta,
                         },
@@ -691,6 +1132,7 @@ export class ResponsesTransformer implements Transformer {
                 data.item?.type === 'function_call'
               ) {
                 // Tool call start
+                hasFunctionCall = true;
                 controller.enqueue({
                   id: responseId,
                   model: responseModel,
@@ -698,7 +1140,7 @@ export class ResponsesTransformer implements Transformer {
                   delta: {
                     tool_calls: [
                       {
-                        index: 0,
+                        index: getToolCallIndex(data),
                         id: data.item.call_id,
                         type: 'function',
                         function: {
@@ -710,17 +1152,157 @@ export class ResponsesTransformer implements Transformer {
                   },
                   finish_reason: null,
                 });
+              } else if (
+                data.type === 'response.output_item.done' &&
+                data.item?.type === 'image_generation_call'
+              ) {
+                // Minimal image rendering, COMPLETED items only: a finished
+                // image_generation_call with a base64 result becomes a
+                // markdown data-URI content delta for chat-format clients,
+                // PAIRED with the chunk-level typed carry
+                // (`image_generation_calls`, full base64 — see
+                // types/unified.ts) that responses-facing formatters re-emit
+                // natively instead of the markdown. Partial-image preview
+                // events (response.image_generation_call.partial_image) are
+                // deliberately NOT handled — rendering progressive previews
+                // as chat content deltas has no sensible mapping, so they
+                // are explicitly skipped as out of scope; only the final
+                // completed image renders.
+                const imageMarkdown = imageGenerationCallMarkdown(data.item);
+                if (imageMarkdown) {
+                  if (typeof data.item.id === 'string') {
+                    renderedImageItemIds.add(data.item.id);
+                  }
+                  controller.enqueue({
+                    id: responseId,
+                    model: responseModel,
+                    created: Math.floor(Date.now() / 1000),
+                    delta: {
+                      content: imageMarkdown,
+                    },
+                    image_generation_calls: [toUnifiedImageGenerationCall(data.item)],
+                    finish_reason: null,
+                  });
+                }
               } else if (data.type === 'response.completed') {
-                // Final chunk with usage data and finish reason
+                // Final chunk with usage data and an OpenAI-compatible finish reason.
+                // `response.completed` includes the full output as a fallback because some
+                // Responses-compatible providers omit intermediate function-call events.
                 const usage = data.response?.usage;
                 const normalizedUsage = usage ? normalizeOpenAIResponsesUsage(usage) : undefined;
+                const completedResponseHasFunctionCall = data.response?.output?.some(
+                  (item: any) => item?.type === 'function_call'
+                );
+                // Same fallback as function calls above: render any completed
+                // image_generation_call items that only appear in the final
+                // response (skipping ones already rendered from their own
+                // response.output_item.done event) BEFORE the terminal chunk,
+                // so the content delta still reaches the client — with the
+                // same paired typed carry as the output_item.done path.
+                for (const item of data.response?.output ?? []) {
+                  if (item?.type !== 'image_generation_call') continue;
+                  if (typeof item.id === 'string' && renderedImageItemIds.has(item.id)) continue;
+                  const imageMarkdown = imageGenerationCallMarkdown(item);
+                  if (!imageMarkdown) continue;
+                  controller.enqueue({
+                    id: responseId,
+                    model: responseModel,
+                    created: Math.floor(Date.now() / 1000),
+                    delta: {
+                      content: imageMarkdown,
+                    },
+                    image_generation_calls: [toUnifiedImageGenerationCall(item)],
+                    finish_reason: null,
+                  });
+                }
                 controller.enqueue({
                   id: responseId,
                   model: responseModel,
                   created: Math.floor(Date.now() / 1000),
                   delta: {},
-                  finish_reason: 'stop',
+                  finish_reason:
+                    hasFunctionCall || completedResponseHasFunctionCall ? 'tool_calls' : 'stop',
                   usage: normalizedUsage,
+                });
+              } else if (data.type === 'response.failed') {
+                // Upstream reported a hard failure mid-stream. Surface it as
+                // a unified error chunk (same shape OpenAITransformer.formatStream
+                // already renders) instead of silently ending the stream.
+                // Propagate final usage (when the upstream included it
+                // alongside the failure) so chat-format clients still
+                // receive an accurate token count for the turn instead of
+                // silently losing it.
+                const err = data.response?.error || {};
+                const usage = data.response?.usage;
+                const normalizedUsage = usage ? normalizeOpenAIResponsesUsage(usage) : undefined;
+                controller.enqueue({
+                  id: responseId || data.response?.id || '',
+                  model: responseModel || data.response?.model || '',
+                  created: Math.floor(Date.now() / 1000),
+                  event: 'error',
+                  delta: {},
+                  error: {
+                    statusCode: 500,
+                    code: err.code || 'response_failed',
+                    message: err.message || 'The model response failed to complete.',
+                  },
+                  ...(normalizedUsage ? { usage: normalizedUsage } : {}),
+                });
+              } else if (data.type === 'response.incomplete') {
+                // Upstream ended the response early (e.g. hitting
+                // max_output_tokens, or a content_filter cutoff) rather than
+                // failing outright. Carry both the OpenAI-compatible finish
+                // reason AND the raw incomplete_details on the unified chunk
+                // — formatStream (both chat- and responses-facing) needs
+                // incomplete_details to tell an "ended incomplete" chunk
+                // apart from a genuine response.failed hard error. When the
+                // upstream omits incomplete_details entirely, default to
+                // { reason: 'unknown' } so the chunk still reads as an
+                // incomplete (not a hard failure) downstream. Also propagate
+                // final usage, same as response.failed above.
+                const incompleteDetails = data.response?.incomplete_details ?? {
+                  reason: 'unknown',
+                };
+                const reason = incompleteDetails.reason || 'unknown';
+                const usage = data.response?.usage;
+                const normalizedUsage = usage ? normalizeOpenAIResponsesUsage(usage) : undefined;
+                controller.enqueue({
+                  id: responseId || data.response?.id || '',
+                  model: responseModel || data.response?.model || '',
+                  created: Math.floor(Date.now() / 1000),
+                  event: 'error',
+                  delta: {},
+                  // 'content_filter' keeps its own finish reason; everything
+                  // else (max_output_tokens, unknown/absent reasons) maps to
+                  // 'length' — the same OpenAI-compatible default as
+                  // usage-logging's raw-mode incomplete mapping — so every
+                  // incomplete chunk carries a recognizable non-fatal finish
+                  // for the chat-facing formatters.
+                  finish_reason: reason === 'content_filter' ? 'content_filter' : 'length',
+                  incomplete_details: incompleteDetails,
+                  error: {
+                    statusCode: 500,
+                    code: reason,
+                    message: `Response ended incomplete: ${reason}`,
+                  },
+                  ...(normalizedUsage ? { usage: normalizedUsage } : {}),
+                });
+              } else if (data.type === 'error') {
+                // Generic Responses API stream error event (top-level, not
+                // nested under `response`) — no incomplete_details, since
+                // this is a hard stream-level error, not an "ended
+                // incomplete" signal.
+                controller.enqueue({
+                  id: responseId,
+                  model: responseModel,
+                  created: Math.floor(Date.now() / 1000),
+                  event: 'error',
+                  delta: {},
+                  error: {
+                    statusCode: 500,
+                    code: data.code || 'error',
+                    message: data.message || 'Upstream error',
+                  },
                 });
               }
             } catch (e) {
@@ -747,6 +1329,11 @@ export class ResponsesTransformer implements Transformer {
   formatStream(stream: ReadableStream): ReadableStream {
     const encoder = new TextEncoder();
     const reader = stream.getReader();
+    // `start(controller) {}` below uses method shorthand, so `this` inside it
+    // is the stream's underlying source, not this transformer instance.
+    // Capture the Codex CLI namespace/custom-tool state as locals for use
+    // inside that scope.
+    const customToolNames = this.customToolNames;
 
     let hasSentCreated = false;
     let hasSentInProgress = false;
@@ -783,9 +1370,9 @@ export class ResponsesTransformer implements Transformer {
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
         try {
           JSON.parse(trimmed);
-          return trimmed;
+          if (!previous || trimmed.startsWith(previous.trimStart())) return trimmed;
         } catch {
-          return previous + delta;
+          // Argument deltas may contain incomplete JSON.
         }
       }
       return previous + delta;
@@ -913,11 +1500,33 @@ export class ResponsesTransformer implements Transformer {
       const outputIndex = reserveOutputIndex();
       const callId = toolCall?.id || this.generateItemId('call');
       const itemId = this.generateItemId('fc');
+      const flatName = toolCall?.function?.name || toolCall?.name || '';
       toolOutputIndexMap.set(toolIndex, outputIndex);
       toolCallIdMap.set(toolIndex, callId);
       toolItemIdMap.set(toolIndex, itemId);
       toolArgsMap.set(toolIndex, '');
-      toolNameMap.set(toolIndex, toolCall?.function?.name || toolCall?.name || '');
+      toolNameMap.set(toolIndex, flatName);
+
+      // Codex CLI namespace/custom tool split-back for the streamed "added"
+      // event; the resolved shape is recomputed at finalization once full
+      // arguments are known.
+      if (this.customToolNames.has(flatName)) {
+        sendEvent(controller, {
+          type: 'response.output_item.added',
+          output_index: outputIndex,
+          item: {
+            id: itemId,
+            type: 'custom_tool_call',
+            status: 'in_progress',
+            call_id: callId,
+            name: flatName,
+            input: '',
+          },
+        });
+        return;
+      }
+
+      const namespaced = this.namespaceMap.get(flatName);
       sendEvent(controller, {
         type: 'response.output_item.added',
         output_index: outputIndex,
@@ -926,18 +1535,59 @@ export class ResponsesTransformer implements Transformer {
           type: 'function_call',
           status: 'in_progress',
           call_id: callId,
-          name: toolCall?.function?.name || toolCall?.name || '',
+          name: namespaced ? namespaced.name : flatName,
+          ...(namespaced ? { namespace: namespaced.namespace } : {}),
           arguments: '',
         },
       });
     };
 
-    const finalizeOutputItems = (controller: ReadableStreamDefaultController): any[] => {
+    // Re-emits typed image_generation_call carries (see types/unified.ts) as
+    // native Responses output items — full base64 `result`, no inline size
+    // cap (the markdown guard exists for content strings; the native format
+    // has no such concern). Each item is registered in outputItemsByIndex so
+    // the terminal response.completed's output array includes it.
+    const emitImageGenerationCallItems = (
+      controller: ReadableStreamDefaultController,
+      imageCalls: Array<{ id?: string; status?: string; result: string }>
+    ) => {
+      for (const imageCall of imageCalls) {
+        const outputIndex = reserveOutputIndex();
+        const itemId = imageCall.id || this.generateItemId('ig');
+        const doneItem = {
+          id: itemId,
+          type: 'image_generation_call',
+          status: imageCall.status || 'completed',
+          result: imageCall.result,
+        };
+        sendEvent(controller, {
+          type: 'response.output_item.added',
+          output_index: outputIndex,
+          item: { ...doneItem, status: 'in_progress', result: null },
+        });
+        sendEvent(controller, {
+          type: 'response.output_item.done',
+          output_index: outputIndex,
+          item: doneItem,
+        });
+        outputItemsByIndex.set(outputIndex, doneItem);
+      }
+    };
+
+    // `itemStatus` is the terminal status stamped on items that were still
+    // in progress when the stream ended. The completed and failed paths keep
+    // the pre-existing 'completed' stamp; only the response.incomplete path
+    // passes 'incomplete' (matching the real Responses API, where items cut
+    // off mid-generation surface as status 'incomplete').
+    const finalizeOutputItems = (
+      controller: ReadableStreamDefaultController,
+      itemStatus: 'completed' | 'incomplete' = 'completed'
+    ): any[] => {
       if (reasoningItemSent && reasoningOutputIndex !== null) {
         const reasoningItem = {
           id: reasoningItemId,
           type: 'reasoning',
-          status: 'completed',
+          status: itemStatus,
           content: reasoningText
             ? [
                 {
@@ -997,7 +1647,7 @@ export class ResponsesTransformer implements Transformer {
         const messageItem = {
           id: messageItemId,
           type: 'message',
-          status: 'completed',
+          status: itemStatus,
           role: 'assistant',
           content: [
             {
@@ -1040,15 +1690,30 @@ export class ResponsesTransformer implements Transformer {
         const itemId = toolItemIdMap.get(toolIndex);
         const callId = toolCallIdMap.get(toolIndex);
         const args = toolArgsMap.get(toolIndex) || '';
-        const name = toolNameMap.get(toolIndex) || '';
-        const toolItem = {
-          id: itemId,
-          type: 'function_call',
-          status: 'completed',
-          call_id: callId,
-          name,
-          arguments: args,
-        };
+        const flatName = toolNameMap.get(toolIndex) || '';
+
+        let toolItem: any;
+        if (this.customToolNames.has(flatName)) {
+          toolItem = {
+            id: itemId,
+            type: 'custom_tool_call',
+            status: itemStatus,
+            call_id: callId,
+            name: flatName,
+            input: this.customToolInput(args),
+          };
+        } else {
+          const namespaced = this.namespaceMap.get(flatName);
+          toolItem = {
+            id: itemId,
+            type: 'function_call',
+            status: itemStatus,
+            call_id: callId,
+            name: namespaced ? namespaced.name : flatName,
+            ...(namespaced ? { namespace: namespaced.namespace } : {}),
+            arguments: args,
+          };
+        }
         sendEvent(controller, {
           type: 'response.output_item.done',
           output_index: outputIndex,
@@ -1062,6 +1727,24 @@ export class ResponsesTransformer implements Transformer {
         .map(([, item]) => item);
     };
 
+    const buildUsagePayload = (usage: any) =>
+      usage
+        ? {
+            input_tokens:
+              (usage.input_tokens || 0) +
+              (usage.cached_tokens || 0) +
+              (usage.cache_creation_tokens || 0),
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            input_tokens_details: {
+              cached_tokens: usage.cached_tokens || 0,
+            },
+            output_tokens_details: {
+              reasoning_tokens: usage.reasoning_tokens || 0,
+            },
+          }
+        : undefined;
+
     return new ReadableStream({
       async start(controller) {
         try {
@@ -1069,7 +1752,10 @@ export class ResponsesTransformer implements Transformer {
             const { done, value: unifiedChunk } = await reader.read();
             if (done) {
               if (!hasSentCreated) {
-                ensureCreated(controller, { model: responseModel, created: responseCreatedAt });
+                ensureCreated(controller, {
+                  model: responseModel,
+                  created: responseCreatedAt,
+                });
               }
               const outputItems = finalizeOutputItems(controller);
               sendEvent(controller, {
@@ -1105,6 +1791,64 @@ export class ResponsesTransformer implements Transformer {
             ensureCreated(controller, unifiedChunk);
             ensureInProgress(controller);
 
+            if (unifiedChunk.event === 'error') {
+              // Upstream failed, ended incomplete, or reported a stream-level
+              // error (surfaced as a unified error chunk by transformStream).
+              // Emit the matching Responses-API terminal event instead of
+              // unconditionally completing, so the client sees the actual
+              // outcome rather than a phantom success:
+              //   - incomplete_details present -> response.incomplete (the
+              //     upstream ended the turn early — max_output_tokens /
+              //     content_filter — not a hard failure).
+              //   - otherwise -> response.failed (a genuine hard error),
+              //     exactly as before.
+              if (unifiedChunk.usage) {
+                lastUsage = unifiedChunk.usage;
+              }
+              // Items still in progress on the incomplete path finalize with
+              // status 'incomplete'; the failed path keeps the pre-existing
+              // 'completed' stamp (see finalizeOutputItems).
+              const outputItems = finalizeOutputItems(
+                controller,
+                unifiedChunk.incomplete_details ? 'incomplete' : 'completed'
+              );
+              const err = unifiedChunk.error || {};
+
+              if (unifiedChunk.incomplete_details) {
+                sendEvent(controller, {
+                  type: 'response.incomplete',
+                  response: {
+                    id: responseId || undefined,
+                    object: 'response',
+                    created_at: responseCreatedAt || Math.floor(Date.now() / 1000),
+                    status: 'incomplete',
+                    model: responseModel,
+                    output: outputItems,
+                    incomplete_details: unifiedChunk.incomplete_details,
+                    usage: buildUsagePayload(lastUsage),
+                  },
+                });
+              } else {
+                sendEvent(controller, {
+                  type: 'response.failed',
+                  response: {
+                    id: responseId || undefined,
+                    object: 'response',
+                    created_at: responseCreatedAt || Math.floor(Date.now() / 1000),
+                    status: 'failed',
+                    model: responseModel,
+                    output: outputItems,
+                    error: {
+                      code: err.code || 'server_error',
+                      message: err.message || 'The model response failed to complete.',
+                    },
+                    usage: buildUsagePayload(lastUsage),
+                  },
+                });
+              }
+              break;
+            }
+
             if (unifiedChunk.usage) {
               lastUsage = unifiedChunk.usage;
             }
@@ -1114,6 +1858,22 @@ export class ResponsesTransformer implements Transformer {
               typeof delta.reasoning_content === 'string' ? delta.reasoning_content : null;
             const reasoningSummaryDelta =
               typeof delta.thinking?.content === 'string' ? delta.thinking.content : null;
+
+            // Typed image_generation_call carries re-emit as NATIVE output
+            // items for this Responses-format client. The same chunk's
+            // `delta.content` is the chat-format markdown rendering of these
+            // exact items (transformStream pairs them 1:1), so the content
+            // delta is skipped below — the native item is the only carrier
+            // here (a chat client would render the markdown instead).
+            const typedImageCalls = Array.isArray(unifiedChunk.image_generation_calls)
+              ? unifiedChunk.image_generation_calls.filter(
+                  (imageCall: any) =>
+                    imageCall && typeof imageCall.result === 'string' && imageCall.result.length > 0
+                )
+              : [];
+            if (typedImageCalls.length > 0) {
+              emitImageGenerationCallItems(controller, typedImageCalls);
+            }
 
             if (reasoningDelta && reasoningDelta.length > 0) {
               ensureReasoningItem(controller);
@@ -1152,7 +1912,11 @@ export class ResponsesTransformer implements Transformer {
               });
             }
 
-            if (typeof delta.content === 'string' && delta.content.length > 0) {
+            if (
+              typeof delta.content === 'string' &&
+              delta.content.length > 0 &&
+              typedImageCalls.length === 0
+            ) {
               ensureMessageItem(controller);
               messageText += delta.content;
               sendEvent(controller, {
@@ -1177,12 +1941,20 @@ export class ResponsesTransformer implements Transformer {
                     toolIndex,
                     normalizeToolArgs(prevArgs, toolCall.function.arguments)
                   );
-                  sendEvent(controller, {
-                    type: 'response.function_call_arguments.delta',
-                    output_index: outputIndex,
-                    item_id: itemId,
-                    delta: toolCall.function.arguments,
-                  });
+                  // Custom tool call input can't be correctly unwrapped from
+                  // partial JSON (customToolInput needs the full buffered
+                  // arguments), so only stream deltas for ordinary function
+                  // calls; custom tool input is emitted once, complete, in
+                  // finalizeOutputItems's output_item.done.
+                  const flatName = toolNameMap.get(toolIndex) || '';
+                  if (!customToolNames.has(flatName)) {
+                    sendEvent(controller, {
+                      type: 'response.function_call_arguments.delta',
+                      output_index: outputIndex,
+                      item_id: itemId,
+                      delta: toolCall.function.arguments,
+                    });
+                  }
                 }
               }
             }

@@ -5,16 +5,14 @@ import { Dashboard } from './pages/Dashboard';
 import { Logs } from './pages/Logs';
 import { Providers } from './pages/Providers';
 import { Models } from './pages/Models';
-import { ModelInsights } from './pages/ModelInsights';
-import { ProviderInsights } from './pages/ProviderInsights';
 import { Keys } from './pages/Keys';
 import { Config } from './pages/Config';
-import { PiRegistry } from './pages/PiRegistry';
 import { SystemLogs } from './pages/SystemLogs';
 import { Debug } from './pages/Debug';
 import { Errors } from './pages/Errors';
 import { Quotas } from './pages/Quotas';
 import { McpPage } from './pages/Mcp';
+import { Playground } from './pages/Playground';
 import { Login } from './pages/Login';
 import { MyKey } from './pages/MyKey';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -81,22 +79,6 @@ const AppRoutes = () => {
                   }
                 />
                 <Route
-                  path="/models/:modelId/insights"
-                  element={
-                    <ProtectedRoute requireAdmin>
-                      <ModelInsights />
-                    </ProtectedRoute>
-                  }
-                />
-                <Route
-                  path="/providers/:providerId/insights"
-                  element={
-                    <ProtectedRoute requireAdmin>
-                      <ProviderInsights />
-                    </ProtectedRoute>
-                  }
-                />
-                <Route
                   path="/keys"
                   element={
                     <ProtectedRoute requireAdmin>
@@ -109,14 +91,6 @@ const AppRoutes = () => {
                   element={
                     <ProtectedRoute requireAdmin>
                       <Config />
-                    </ProtectedRoute>
-                  }
-                />
-                <Route
-                  path="/pi-registry"
-                  element={
-                    <ProtectedRoute requireAdmin>
-                      <PiRegistry />
                     </ProtectedRoute>
                   }
                 />
@@ -141,6 +115,14 @@ const AppRoutes = () => {
                   element={
                     <ProtectedRoute requireAdmin>
                       <McpPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/playground"
+                  element={
+                    <ProtectedRoute requireAdmin>
+                      <Playground />
                     </ProtectedRoute>
                   }
                 />

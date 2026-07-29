@@ -3,11 +3,11 @@ import Fastify, { FastifyInstance } from 'fastify';
 import { setConfigForTesting } from '../../../config';
 import { registerManagementRoutes } from '../../management';
 import { registerInferenceRoutes } from '../../inference';
-import { Dispatcher } from '../../../services/dispatcher';
-import { UsageStorageService } from '../../../services/usage-storage';
-import { ProbeService } from '../../../services/probe-service';
-import { DebugManager } from '../../../services/debug-manager';
-import { SelectorFactory } from '../../../services/selectors/factory';
+import { Dispatcher } from '../../../services/dispatch/dispatcher';
+import { UsageStorageService } from '../../../services/observability/usage-storage';
+import { ProbeService } from '../../../services/probes/probe-service';
+import { DebugManager } from '../../../services/observability/debug-manager';
+import { SelectorFactory } from '../../../services/routing/selectors/factory';
 
 // Helper to close Fastify instances after tests
 const closeFastify = async (fastify: FastifyInstance | undefined) => {
@@ -94,6 +94,8 @@ describe('GET /v0/management/auth/verify', () => {
   beforeEach(async () => {
     process.env.ADMIN_KEY = 'correct-admin-key';
     setConfigForTesting(BASE_CONFIG);
+    DebugManager.getInstance().resetForTesting();
+    DebugManager.getInstance().setEnabled(false);
     fastify = Fastify();
     const { mockUsageStorage, mockDispatcher, mockProbeService } = makeMockDeps();
     await registerManagementRoutes(fastify, mockUsageStorage, mockDispatcher, mockProbeService);
@@ -102,6 +104,8 @@ describe('GET /v0/management/auth/verify', () => {
 
   afterEach(async () => {
     await closeFastify(fastify);
+    DebugManager.getInstance().resetForTesting();
+    DebugManager.getInstance().setEnabled(false);
   });
 
   it('returns 200 with admin principal info when the correct admin key is provided', async () => {
@@ -252,6 +256,8 @@ describe('Management route protection', () => {
   beforeEach(async () => {
     process.env.ADMIN_KEY = 'correct-admin-key';
     setConfigForTesting(BASE_CONFIG);
+    DebugManager.getInstance().resetForTesting();
+    DebugManager.getInstance().setEnabled(false);
     fastify = Fastify();
     const { mockUsageStorage, mockDispatcher, mockProbeService } = makeMockDeps();
     await registerManagementRoutes(fastify, mockUsageStorage, mockDispatcher, mockProbeService);
@@ -260,6 +266,8 @@ describe('Management route protection', () => {
 
   afterEach(async () => {
     await closeFastify(fastify);
+    DebugManager.getInstance().resetForTesting();
+    DebugManager.getInstance().setEnabled(false);
   });
 
   it('rejects GET /v0/management/cooldowns without admin key', async () => {
@@ -308,6 +316,65 @@ describe('Management route protection', () => {
     });
 
     expect(res.statusCode).toBe(200);
+  });
+
+  it('round-trips in-memory debug capture targets', async () => {
+    const patchRes = await fastify.inject({
+      method: 'PATCH',
+      url: '/v0/management/debug',
+      headers: { 'x-admin-key': 'correct-admin-key' },
+      payload: {
+        enabled: false,
+        keys: ['mobile-app'],
+        aliases: ['gpt-4o-mini'],
+        providers: ['openai'],
+      },
+    });
+
+    expect(patchRes.statusCode).toBe(200);
+    expect(patchRes.json()).toMatchObject({
+      enabled: false,
+      enabledGlobal: false,
+      enabledKeys: ['mobile-app'],
+      keys: ['mobile-app'],
+      aliases: ['gpt-4o-mini'],
+      providers: ['openai'],
+    });
+
+    const getRes = await fastify.inject({
+      method: 'GET',
+      url: '/v0/management/debug',
+      headers: { 'x-admin-key': 'correct-admin-key' },
+    });
+
+    expect(getRes.statusCode).toBe(200);
+    expect(getRes.json()).toMatchObject({
+      enabled: false,
+      enabledGlobal: false,
+      enabledKeys: ['mobile-app'],
+      keys: ['mobile-app'],
+      aliases: ['gpt-4o-mini'],
+      providers: ['openai'],
+    });
+
+    const clearRes = await fastify.inject({
+      method: 'PATCH',
+      url: '/v0/management/debug',
+      headers: { 'x-admin-key': 'correct-admin-key' },
+      payload: {
+        keys: null,
+        aliases: null,
+        providers: null,
+      },
+    });
+
+    expect(clearRes.statusCode).toBe(200);
+    expect(clearRes.json()).toMatchObject({
+      enabledKeys: [],
+      keys: [],
+      aliases: [],
+      providers: null,
+    });
   });
 });
 

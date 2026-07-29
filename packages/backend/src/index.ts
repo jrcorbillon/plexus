@@ -13,17 +13,6 @@ if (subcommand === 'rekey') {
   await new Promise(() => {}); // Block forever; process.exit above will terminate
 }
 
-if (subcommand === 'migrate-quota-snapshots') {
-  const { migrateQuotaSnapshotsMain } = await import('./cli/migrate-quota-snapshots');
-  migrateQuotaSnapshotsMain()
-    .then(() => process.exit(0))
-    .catch((err) => {
-      console.error('Quota snapshot migration failed:', err);
-      process.exit(1);
-    });
-  await new Promise(() => {});
-}
-
 if (subcommand === 'backup') {
   const { backupMain } = await import('./cli/backup');
   backupMain()
@@ -38,6 +27,7 @@ if (subcommand === 'backup') {
 import Fastify, { FastifyReply, FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth';
 import path from 'path';
 import indexHtmlPath from '../../frontend/dist/index.html' with { type: 'file' };
 import mainJsPath from '../../frontend/dist/main.js' with { type: 'file' };
@@ -46,31 +36,35 @@ import mainCssPath from '../../frontend/dist/main.css' with { type: 'file' };
 import fs from 'fs';
 import { logger } from './utils/logger';
 import { getConfig } from './config';
-import { ConfigService } from './services/config-service';
-import { Dispatcher } from './services/dispatcher';
-import { UsageStorageService } from './services/usage-storage';
-import { ProbeService } from './services/probe-service';
-import { BackgroundExplorer } from './services/background-explorer';
-import { CooldownManager } from './services/cooldown-manager';
-import { DebugManager } from './services/debug-manager';
-import { PricingManager } from './services/pricing-manager';
-import { ModelMetadataManager } from './services/model-metadata-manager';
-import { CodexVersionService } from './services/codex-version-service';
-import { SelectorFactory } from './services/selectors/factory';
+import { ConfigService } from './services/configuration/config-service';
+import { Dispatcher } from './services/dispatch/dispatcher';
+import { UsageStorageService } from './services/observability/usage-storage';
+import { ProbeService } from './services/probes/probe-service';
+import { BackgroundExplorer } from './services/routing/background-explorer';
+import { CooldownManager } from './services/runtime/cooldown-manager';
+import { DebugManager } from './services/observability/debug-manager';
+import { ModelMetadataManager } from './services/models/model-metadata-manager';
+import { CodexVersionService } from './services/oauth/codex-version-service';
+import { SelectorFactory } from './services/routing/selectors/factory';
 import { QuotaScheduler } from './services/quota/quota-scheduler';
-import { ResponsesStorageService } from './services/responses-storage';
-import { OAuthAuthManager } from './services/oauth-auth-manager';
+import { ResponsesStorageService } from './services/responses/responses-storage';
+import { OAuthAuthManager } from './services/oauth/oauth-auth-manager';
 import { requestLogger } from './middleware/log';
 import { registerManagementRoutes } from './routes/management';
 import { registerInferenceRoutes } from './routes/inference';
+import { registerRawPassthroughRoutes } from './routes/raw-passthrough';
 import { registerMcpRoutes } from './routes/mcp';
 import { McpUsageStorageService } from './services/mcp-proxy/mcp-usage-storage';
 import { QuotaEnforcer } from './services/quota/quota-enforcer';
+import { initModelCatalog } from './services/pi-ai/catalog';
 import { initializeDatabase } from './db/client';
 import { runMigrations } from './db/migrate';
 import { runEncryptionMigration } from './db/encrypt-migration';
+import { runMcpKeyMigration } from './db/mcp-key-migration';
 import { isEncryptionEnabled } from './utils/encryption';
 import { mcpProcessManager } from './services/mcp-local/mcp-process-manager';
+
+registerBunOAuthFlows();
 
 /**
  * Plexus Backend Server
@@ -108,9 +102,26 @@ const fastify = Fastify({
 // Enable CORS for all origins to support dashboard and external client access
 fastify.register(cors, {
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-admin-key', 'x-goog-api-key'],
-  exposedHeaders: ['Content-Type'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-api-key',
+    'x-admin-key',
+    'x-goog-api-key',
+    'x-client-request-id',
+  ],
+  exposedHeaders: [
+    'Content-Type',
+    'x-request-id',
+    'x-client-request-id',
+    'x-plexus-request-id',
+    'x-plexus-quota',
+    'x-plexus-quota-limit',
+    'x-plexus-quota-remaining',
+    'x-plexus-quota-reset',
+    'x-plexus-quota-warning',
+  ],
 });
 
 // Enable multipart/form-data support for file uploads (audio transcriptions)
@@ -152,6 +163,7 @@ try {
   initializeDatabase();
   await runMigrations();
   await runEncryptionMigration();
+  await runMcpKeyMigration();
 } catch (e) {
   logger.error('Failed to initialize database or run migrations', e);
   process.exit(1);
@@ -163,6 +175,17 @@ if (!isEncryptionEnabled()) {
   );
 }
 
+// --- Model Catalog Initialization ---
+// Restore the persisted pi.dev catalog overlay (offline, fast) so config
+// validation and dispatch see models released between pi-ai versions, then
+// refresh from pi.dev in the background. Non-fatal: the static built-in
+// catalog is the fallback.
+try {
+  await initModelCatalog();
+} catch (e) {
+  logger.error('Failed to initialize model catalog', e);
+}
+
 // --- Configuration Initialization ---
 try {
   const configService = ConfigService.getInstance();
@@ -170,10 +193,10 @@ try {
   await configService.initialize();
   logger.debug('Configuration loaded from database');
 
-  // Register pi_ai_custom_providers with the piAiModels instance so custom
-  // providers can be dispatched directly by api type without remapping hacks.
-  const { registerCustomProvidersWithPiAi } = await import('./inference-v2/shared/pi-ai-utils');
-  await registerCustomProvidersWithPiAi();
+  // Restore the persisted "capture trace on error" toggle into DebugManager.
+  DebugManager.getInstance().setCaptureOnError(
+    await configService.getRepository().getCaptureTraceOnError()
+  );
 
   // One-time migration of legacy flat-format aliases to target groups.
   // TODO(#target-groups-cleanup): remove this after migration period.
@@ -182,10 +205,13 @@ try {
   // One-time migration: rewrite legacy model_type 'chat'/'responses' → 'text'.
   await configService.migrateModelTypes();
 
+  // One-time cleanup: drop any persisted Gemini CLI / Antigravity OAuth
+  // providers + credentials (those providers were removed).
+  await configService.dropRetiredOAuthProviders();
+
   // Eagerly initialize OAuth auth manager so auth.json schema migration
   // runs during startup (instead of waiting for first OAuth request).
   await OAuthAuthManager.getInstance().initialize();
-  await PricingManager.getInstance().loadPricing();
   // Load model metadata from all configured sources (non-fatal on failure)
   const modelMetadataManager = ModelMetadataManager.getInstance();
   modelMetadataManager.startAutoRefresh(60);
@@ -198,7 +224,7 @@ try {
       logger.error('Failed to fetch codex version', e);
     });
 } catch (e) {
-  logger.error('Failed to load config or pricing', e);
+  logger.error('Failed to load config', e);
   process.exit(1);
 }
 
@@ -276,6 +302,9 @@ fastify.setErrorHandler((error, request, reply) => {
 // --- Routes: v1 (Inference API) ---
 await registerInferenceRoutes(fastify, dispatcher, usageStorage, quotaEnforcer);
 
+// --- Raw Provider Proxy ---
+await registerRawPassthroughRoutes(fastify, usageStorage, quotaEnforcer);
+
 // --- Routes: MCP Proxy ---
 await registerMcpRoutes(fastify, mcpUsageStorage);
 
@@ -297,6 +326,7 @@ await registerManagementRoutes(
 
 // Health check endpoint for container orchestration
 fastify.get('/health', (request, reply) => reply.send('OK'));
+fastify.get('/healthz', (request, reply) => reply.send({ ok: true }));
 
 // --- Static File Serving ---
 // `indexHtmlPath` is a string path — the filesystem path in dev, or a $bunfs/ path in a

@@ -1,5 +1,6 @@
 import { Transformer } from '../types/transformer';
 import { UnifiedChatRequest, UnifiedChatResponse, UnifiedChatStreamChunk } from '../types/unified';
+import { composeContentWithImageMarkdown } from './image-rendering';
 
 /**
  * OllamaTransformer
@@ -154,7 +155,13 @@ export class OllamaTransformer implements Transformer {
           index: 0,
           message: {
             role: 'assistant',
-            content: response.content,
+            // Image output renders as size-guarded markdown composed after
+            // the authored text (see transformers/image-rendering.ts) —
+            // unified `content` itself stays pure.
+            content: composeContentWithImageMarkdown(
+              response.content,
+              response.image_generation_calls
+            ),
             tool_calls: response.tool_calls,
           },
           finish_reason: response.tool_calls ? 'tool_calls' : response.finishReason || 'stop',
@@ -238,6 +245,7 @@ export class OllamaTransformer implements Transformer {
   formatStream(stream: ReadableStream): ReadableStream {
     const encoder = new TextEncoder();
     const reader = stream.getReader();
+    let hasSentError = false;
 
     return new ReadableStream({
       async start(controller) {
@@ -247,6 +255,59 @@ export class OllamaTransformer implements Transformer {
             if (done) {
               controller.enqueue(encoder.encode('data: [DONE]\n\n'));
               break;
+            }
+
+            if (hasSentError) continue;
+
+            // Match OpenAITransformer.formatStream: surface unified error
+            // chunks as an error payload so Anthropic (and other) mid-stream
+            // failures are not mistaken for a successful empty completion.
+            if (unifiedChunk.event === 'error') {
+              if (unifiedChunk.finish_reason) {
+                const chunk: any = {
+                  id: unifiedChunk.id,
+                  object: 'chat.completion.chunk',
+                  created: unifiedChunk.created || Math.floor(Date.now() / 1000),
+                  model: unifiedChunk.model,
+                  choices: [{ index: 0, delta: {}, finish_reason: unifiedChunk.finish_reason }],
+                };
+                if (unifiedChunk.usage) {
+                  chunk.usage = {
+                    prompt_tokens:
+                      unifiedChunk.usage.input_tokens + (unifiedChunk.usage.cached_tokens || 0),
+                    completion_tokens: unifiedChunk.usage.output_tokens,
+                    total_tokens: unifiedChunk.usage.total_tokens,
+                    reasoning_tokens: unifiedChunk.usage.reasoning_tokens,
+                  };
+                }
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+                hasSentError = true;
+                continue;
+              }
+
+              // Hard failures (e.g. Responses response.failed) can still carry
+              // final usage after partial output — forward it like OpenAI formatStream.
+              const hardErrorPayload: Record<string, unknown> = {
+                error: {
+                  message: unifiedChunk.error?.message,
+                  type: 'server_error',
+                  code: unifiedChunk.error?.code || 'upstream_error',
+                },
+              };
+              if (unifiedChunk.usage) {
+                hardErrorPayload.usage = {
+                  prompt_tokens:
+                    unifiedChunk.usage.input_tokens + (unifiedChunk.usage.cached_tokens || 0),
+                  completion_tokens: unifiedChunk.usage.output_tokens,
+                  total_tokens: unifiedChunk.usage.total_tokens,
+                  reasoning_tokens: unifiedChunk.usage.reasoning_tokens,
+                };
+              }
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(hardErrorPayload)}\n\n`)
+              );
+              hasSentError = true;
+              continue;
             }
 
             const chunk: any = {

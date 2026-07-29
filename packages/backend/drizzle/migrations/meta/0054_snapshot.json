@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2f763daf-f209-4893-b8b7-6b12a3f8daf3",
+  "id": "f428e363-2350-49c6-aac0-be85c5b5aff5",
   "prevId": "b786e61d-b236-41ae-a76c-49b23c4b352c",
   "tables": {
     "meter_snapshots": {
@@ -1822,7 +1822,7 @@
         "key_name": {
           "name": "key_name",
           "type": "text",
-          "primaryKey": true,
+          "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
@@ -1865,7 +1865,15 @@
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
+      "compositePrimaryKeys": {
+        "quota_state_key_name_quota_name_pk": {
+          "columns": [
+            "key_name",
+            "quota_name"
+          ],
+          "name": "quota_state_key_name_quota_name_pk"
+        }
+      },
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
@@ -2407,22 +2415,6 @@
           "autoincrement": false,
           "default": 0
         },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        },
-        "retry_delay_seconds": {
-          "name": "retry_delay_seconds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
         "preferred_api": {
           "name": "preferred_api",
           "type": "text",
@@ -2768,6 +2760,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "quota_names": {
+          "name": "quota_names",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "allowed_models": {
           "name": "allowed_models",
           "type": "text",
@@ -2902,6 +2901,49 @@
         "duration": {
           "name": "duration",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "allowed_models": {
+          "name": "allowed_models",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "allowed_providers": {
+          "name": "allowed_providers",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "excluded_models": {
+          "name": "excluded_models",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "excluded_providers": {
+          "name": "excluded_providers",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "shared": {
+          "name": "shared",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "warn_at": {
+          "name": "warn_at",
+          "type": "real",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

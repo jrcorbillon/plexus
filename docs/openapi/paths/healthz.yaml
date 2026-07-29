@@ -1,0 +1,24 @@
+get:
+  tags:
+    - Health
+  summary: Health check (JSON)
+  description: >-
+    Returns `{ "ok": true }` while the process is accepting traffic. Public
+    unauthenticated probe (alongside `GET /health`).
+  security: []
+  responses:
+    '200':
+      description: Server is healthy.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - ok
+            properties:
+              ok:
+                type: boolean
+                const: true
+    '400':
+      description: Bad request.
+  operationId: getHealthz

@@ -57,23 +57,12 @@ The project uses separate Drizzle ORM config files for each database dialect:
 
 When running Drizzle Kit commands, specify the appropriate config file with `--config`.
 
-## Pi Assistant Prompt
+## Pi Assistant & PR Agent Review
 
-The system prompt for the `/pi` AI agent lives at **`.github/prompts/pi-assistant.md`**.
-Edit that file directly — do not put prompt text inside the workflow YAML.
+Plexus uses **Pi Assistant** and **PR Agent** for automated coding assistance and code reviews:
 
-The file supports `{{dot.notation.path}}` placeholders that are substituted at runtime:
-
-- `{{context.payload.comment.body}}` — the triggering comment's text
-- `{{context.payload.issue.number}}` — issue/PR number
-- `{{context.actor}}` — the GitHub actor who triggered the run
-- `{{env.GITHUB_SHA}}` — any `GITHUB_*` / `RUNNER_*` runner environment variable
-- `{{env.INITIAL_COMMENT_ID}}` — a value passed explicitly via the step's `env:` block
-
-Anything reachable from the [`@actions/github` context object](https://github.com/actions/toolkit/tree/main/packages/github)
-is available under `context.*` without any extra wiring. Values that come from
-previous step outputs (like `INITIAL_COMMENT_ID`) must be added to the `env:` block
-on the **Run Pi agent** step in `.github/workflows/pi-assistant.yml`.
+- **Pi Assistant** (`.github/workflows/pi-assistant-issue.yml` and `.github/workflows/pi-assistant-pr.yml`): Triggered by commenting `/pi` on an issue or PR. It uses the `mcowger/pi-action` action to run an AI-agent-driven coding session directly in the repository context to address requested changes. System prompts live in `.github/prompts/pi-assistant-issue.md` and `.github/prompts/pi-assistant-pr.md`.
+- **PR Agent Review** (`.github/workflows/pr-agent-review.yml`): Triggered automatically when non-draft pull requests are opened/reopened/ready for review, or when comments are made. It performs thorough automated code reviews using the `the-pr-agent/pr-agent` action, configured via `.pr_agent.toml`.
 
 ## Code Style
 
@@ -168,12 +157,12 @@ existing resources are replaced rather than duplicated.
 
 | Category | Count | Notes |
 |---|---|---|
-| Providers | 7 | Local (Ollama, LM Studio, llama.cpp) + mock cloud (OpenAI, Anthropic, Gemini, OpenRouter) |
-| Quotas | 7 | Rolling, daily, weekly windows; requests and token limits |
-| Model aliases | 16 | chat, embeddings, speech, transcriptions, image types; multi-target failover aliases |
-| API keys | 14 | Unrestricted, quota-enforced, provider-restricted, model-restricted |
+| Providers | 11 | Frontier cloud providers (Kilocode, Wisgate, Neuralwatt, OpenRouter, Google, OpenAI, Anthropic, CC, CC-Sigma, OpenLimits, Ozore) |
+| Quotas | 2 | Daily, weekly budgets and limits |
+| Model aliases | 19 | Frontier model architectures (gpt-5.x, claude-4.5/5, gemini-3.5, deepseek-v4) for chat, embeddings, speech, transcriptions |
+| API keys | 4 | Default, OWUI, GithubKey, GHAKey |
 
-All provider URLs point at `localhost` — no real API keys are needed by default.
+All provider URLs are mapped to their real production API gateways, but with safe, redacted mock keys by default. No real secrets are checked into the codebase.
 
 #### Adding your own data
 

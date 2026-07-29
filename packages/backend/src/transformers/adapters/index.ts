@@ -4,6 +4,9 @@ import { suppressDeveloperRoleAdapter } from './suppress-developer-role.adapter'
 import { modelOverrideAdapter } from './model-override.adapter';
 import { reasoningRewriteAdapter } from './reasoning-rewrite.adapter';
 import { webSearchCoercionAdapter } from './web-search-coercion.adapter';
+import { stripUnsupportedToolSearchAdapter } from './strip-unsupported-tool-search.adapter';
+import { suppressUnsupportedGpt5OptionsAdapter } from './suppress-unsupported-gpt5-options.adapter';
+import { normalizeAnthropicToolIdsAdapter } from './normalize-anthropic-tool-ids.adapter';
 
 /**
  * Registry of all built-in provider adapters.
@@ -15,4 +18,7 @@ export const ADAPTER_REGISTRY: Record<string, ProviderAdapter> = {
   [modelOverrideAdapter.name]: modelOverrideAdapter,
   [reasoningRewriteAdapter.name]: reasoningRewriteAdapter,
   [webSearchCoercionAdapter.name]: webSearchCoercionAdapter,
+  [stripUnsupportedToolSearchAdapter.name]: stripUnsupportedToolSearchAdapter,
+  [suppressUnsupportedGpt5OptionsAdapter.name]: suppressUnsupportedGpt5OptionsAdapter,
+  [normalizeAnthropicToolIdsAdapter.name]: normalizeAnthropicToolIdsAdapter,
 };

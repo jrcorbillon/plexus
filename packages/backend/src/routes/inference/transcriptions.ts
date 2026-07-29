@@ -1,14 +1,16 @@
 import { FastifyInstance } from 'fastify';
 import { logger } from '../../utils/logger';
-import { Dispatcher } from '../../services/dispatcher';
+import { Dispatcher } from '../../services/dispatch/dispatcher';
 import { TranscriptionsTransformer } from '../../transformers';
-import { UsageStorageService } from '../../services/usage-storage';
+import { UsageStorageService } from '../../services/observability/usage-storage';
 import { UsageRecord } from '../../types/usage';
 import { getClientIp } from '../../utils/ip';
 import { calculateCosts } from '../../utils/calculate-costs';
-import { DebugManager } from '../../services/debug-manager';
+import { DebugManager } from '../../services/observability/debug-manager';
 import { UnifiedTranscriptionRequest } from '../../types/unified';
 import { attachKeyAccessPolicy } from '../../utils/auth';
+import { sanitizeHeaders } from '../../utils/sanitize-headers';
+import { CLIENT_REQUEST_ID_HEADER, getClientRequestId } from '../../utils/client-request-id';
 
 export async function registerTranscriptionsRoute(
   fastify: FastifyInstance,
@@ -22,11 +24,14 @@ export async function registerTranscriptionsRoute(
    */
   fastify.post('/v1/audio/transcriptions', async (request, reply) => {
     const requestId = crypto.randomUUID();
+    const clientRequestId = getClientRequestId(request.headers);
     reply.header('x-request-id', requestId);
+    if (clientRequestId) reply.header(CLIENT_REQUEST_ID_HEADER, clientRequestId);
     const startTime = Date.now();
 
     let usageRecord: Partial<UsageRecord> = {
       requestId,
+      clientRequestId,
       date: new Date().toISOString(),
       sourceIp: getClientIp(request),
       incomingApiType: 'transcriptions',
@@ -145,7 +150,7 @@ export async function registerTranscriptionsRoute(
           response_format,
           temperature,
         },
-        request.headers
+        sanitizeHeaders(request.headers as any)
       );
 
       // Dispatch

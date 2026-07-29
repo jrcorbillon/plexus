@@ -1,6 +1,14 @@
 ---
 name: plexus-management
-description: Use this skill whenever the agent needs to inspect or administer a running Plexus instance through the management API. This includes request logs, debug traces, enabling/disabling debug capture, providers and model targets, provider balances and quotas, model aliases and target groups, inference keys, user quotas, MCP gateway servers and logs, runtime settings such as failover, exploration, cooldowns, timeouts, stall detection, network restrictions, backup/restore, and system logs. Prefer this skill for any Plexus admin or operational task, even if the user only says "check Plexus", "look at logs", "update a provider", "rotate keys", "configure quotas", or "debug a request".
+description: >-
+  Use this skill to inspect or administer a running Plexus instance via the management API, or debug
+  failures touching Plexus-proxied traffic (oauth, routing, model targets, raw provider passthrough, inference keys, MCP gateway)
+  rather than searching the local codebase. Covers request logs, debug traces (lookup by UUID), enabling/disabling
+  debug capture, providers, model targets, balances, quotas, aliases, target groups, keys, MCP logs, and
+  runtime settings (failover, cooldowns, timeouts, backup/restore). Prefer this for any Plexus admin, operational,
+  or live-debugging task, even if the user only says "check Plexus", "look at logs", "update a provider",
+  "rotate keys", "configure quotas", "debug a request", "review debug trace", or "upstream error" — Plexus state
+  lives behind the management API, not in local files.
 ---
 
 # Plexus Management API
@@ -100,10 +108,62 @@ curl -fsS "$PLEXUS_STAGING_URL/v0/management/aliases" \
 ### Review Or Toggle Debug Tracing
 
 - Check state with `GET /v0/management/debug`.
-- Enable globally with `PATCH /v0/management/debug` and `{"enabled":true,"providers":null}` or set `providers` to an array of provider slugs.
+- Debug target state is in-memory only; it resets on process restart except for `DEBUG=true` startup global capture.
+- Enable globally with `PATCH /v0/management/debug` and `{"enabled":true}`.
+- Set inclusive capture targets with `PATCH /v0/management/debug` and any of `keys`, `aliases`, or `providers`, for example `{"enabled":false,"keys":["mobile-app"],"aliases":["gpt-4o-mini"],"providers":["openai"]}`.
+- Capture is inclusive: a request is recorded when any enabled dimension matches the request key, canonical model alias, selected provider, or global flag. Setting `providers` does not filter out global/key/alias capture.
+- Clear a target list by sending `null` or `[]`, for example `{"providers":null}`.
 - Disable with `PATCH /v0/management/debug` and `{"enabled":false}`.
 - List captures with `GET /v0/management/debug/logs?limit=50`.
 - Fetch a full trace with `GET /v0/management/debug/logs/{requestId}`.
+
+The list response is a newest-first JSON array containing only `requestId`, `createdAt`, and `responseStatus`. Use its request ID to fetch the detail:
+
+```bash
+REQUEST_ID=$(
+  curl -fsS "$PLEXUS_STAGING_URL/v0/management/debug/logs?limit=1" \
+    -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq -r '.[0].requestId'
+)
+
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/debug/logs/$REQUEST_ID" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" | jq .
+```
+
+#### Annotated Debug Trace Example
+
+The detail endpoint returns payloads and headers as JSON-encoded strings, not nested JSON values. This illustrative Chat Completions trace has the exact outer response shape:
+
+```json
+{
+  "requestId": "018f2f89-6f43-7f4d-a714-93d35e35b8a1",
+  "createdAt": 1784217600123,
+  "rawRequest": "{\"model\":\"support\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"stream\":true}",
+  "transformedRequest": "{\"model\":\"gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"stream\":true}",
+  "rawResponse": "data: {\"id\":\"chatcmpl_upstream\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\ndata: {\"id\":\"chatcmpl_upstream\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":1,\"total_tokens\":9}}\n\ndata: [DONE]\n\n",
+  "transformedResponse": "data: {\"id\":\"chatcmpl_upstream\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\ndata: {\"id\":\"chatcmpl_upstream\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":1,\"total_tokens\":9}}\n\ndata: [DONE]\n\n",
+  "rawResponseSnapshot": "{\"id\":\"chatcmpl_upstream\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":1,\"total_tokens\":9}}",
+  "transformedResponseSnapshot": "{\"id\":\"chatcmpl_upstream\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":1,\"total_tokens\":9}}",
+  "requestHeaders": "{\"authorization\":\"Bearer sk-v...-key\",\"content-type\":\"application/json\"}",
+  "responseHeaders": "{\"content-type\":\"text/event-stream\",\"x-request-id\":\"upstream-request-id\"}",
+  "responseStatus": 200
+}
+```
+
+- `createdAt` is Unix epoch milliseconds; render it with `jq -r '.createdAt / 1000 | todateiso8601'`.
+- `rawRequest` is the client-facing request body. `transformedRequest` is the provider-facing body after alias resolution and adapters, so compare these first when debugging request transformation.
+- `rawResponse` is the exact captured upstream body. `transformedResponse` is the exact body returned after Plexus transformation. Streaming bodies remain SSE text and may end with `[DONE]`.
+- `rawResponseSnapshot` and `transformedResponseSnapshot` are best-effort reconstructed final objects used for inspection and usage extraction. Prefer the corresponding exact response field when ordering, malformed chunks, comments, or wire formatting matter.
+- Any unavailable stage is `null`. Response capture is capped at 10 MiB and appends `[DEBUG OUTPUT TRUNCATED - Exceeded 10MB limit]` when exceeded.
+- The detail response does not expose the captured key, provider, or model alias. Correlate by `requestId` with `GET /v0/management/usage?requestId=...` when those routing fields matter.
+- Sensitive request headers are masked before capture, but request/response bodies and nonstandard headers can still contain customer data or secrets. Do not paste a full trace into chat; extract and redact only the fields needed.
+
+Decode JSON-valued strings while leaving SSE/plain-text bodies unchanged:
+
+```bash
+curl -fsS "$PLEXUS_STAGING_URL/v0/management/debug/logs/$REQUEST_ID" \
+  -H "x-admin-key: $PLEXUS_STAGING_ADMIN_KEY" \
+  | jq 'reduce ["rawRequest", "transformedRequest", "rawResponse", "transformedResponse", "rawResponseSnapshot", "transformedResponseSnapshot", "requestHeaders", "responseHeaders"][] as $field (.; .[$field] |= (. as $value | try fromjson catch $value))'
+```
 
 ### Manage Providers And Model Targets
 
@@ -113,6 +173,8 @@ curl -fsS "$PLEXUS_STAGING_URL/v0/management/aliases" \
 - Delete provider: `DELETE /v0/management/providers/{slug}`. Use `?cascade=true` only when the user wants alias targets referencing that provider removed too.
 - Fetch upstream models for setup: `POST /v0/management/providers/fetch-models` with `{"url":"https://.../v1/models","apiKey":"..."}`.
 - Check provider quota checker status and balances with `GET /v0/management/quota-checkers`, `GET /v0/management/quotas`, and `GET /v0/management/quotas/{checkerId}`.
+- Raw provider access is configured with `raw_passthrough: { enabled, base_url, auth }`, where `auth` is `bearer`, `x-api-key`, or `x-goog-api-key`. It is supported for static API-key providers and exposes `/raw/{provider}/*` without model routing, failover, adapters, or payload transformation.
+- Treat raw enablement as high-impact: inspect the provider and relevant key policies first. A caller also needs `allowRawPassthrough: true`, and its provider allow/deny lists still apply.
 
 ### Manage Model Aliases And Targets
 
@@ -126,9 +188,10 @@ curl -fsS "$PLEXUS_STAGING_URL/v0/management/aliases" \
 ### Manage Inference Keys
 
 - List keys: `GET /v0/management/keys`, redacted by default.
-- Create or replace key: `PUT /v0/management/keys/{name}` with `secret` and optional `comment`, `allowedProviders`, `excludedProviders`, `allowedModels`, `excludedModels`, `allowedIps`, and `quota`.
+- Create or replace key: `PUT /v0/management/keys/{name}` with `secret` and optional `comment`, `allowedProviders`, `excludedProviders`, `allowedModels`, `excludedModels`, `allowedIps`, `allowRawPassthrough`, and `quota`.
 - Omit `quota` for unrestricted keys; do not send `quota: null` because the current write schema accepts only strings when the field is present.
 - Network restrictions are managed per inference key with `allowedIps` CIDR/IP entries, not through a separate network endpoint.
+- `allowRawPassthrough: true` is provider-wide for every raw-enabled provider permitted by the key's provider policy. Model allow/deny lists do not constrain raw requests.
 - Delete key: `DELETE /v0/management/keys/{name}`. Usage history remains attached to the key name, but future requests with that key fail.
 
 ### Manage User Quotas Applied To Inference Keys
@@ -173,4 +236,3 @@ To load the endpoint map, check for the local copy first. If found, read it dire
 
 local: .agents/skills/plexus-management/references/endpoint-map.md
 fallback with curl: "https://raw.githubusercontent.com/mcowger/plexus/refs/heads/main/.agents/skills/plexus-management/references/endpoint-map.md"
-

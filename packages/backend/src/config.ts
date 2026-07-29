@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { McpServerConfigSchema } from '@plexus/shared';
 import { logger } from './utils/logger';
 import { DEFAULT_VISION_DESCRIPTION_PROMPT } from './utils/constants';
 import { isValidIpRule } from './utils/ip-match';
 import { resolveGpuParams, VALID_GPU_PROFILES } from '@plexus/shared';
 import type { ModelArchitecture } from '@plexus/shared';
-import { getBuiltinModel } from '@earendil-works/pi-ai/providers/all';
+import { getCatalogModel } from './services/pi-ai/catalog';
 
 // --- Zod Schemas ---
 
@@ -33,7 +34,11 @@ const PricingRangeSchema = z.object({
   //   ## In the above case, if the number of input tokens is between 1001 and 5000, the pricing will be 0.008 per million input tokens and 0.018 per million output tokens
   //.  # If the upper bound is Infinity, the pricing will apply to all token counts above the lower bound
   lower_bound: z.number().min(0).default(0),
-  upper_bound: z.number().default(Infinity),
+  upper_bound: z
+    .number()
+    .nullable()
+    .default(Infinity)
+    .transform((value) => value ?? Infinity),
   input_per_m: z.number().min(0),
   output_per_m: z.number().min(0),
   cached_per_m: z.number().min(0).optional(),
@@ -90,6 +95,7 @@ const ModelOverrideOptionsSchema = z.object({
 const AdapterEntrySchema = z.object({
   name: z.string().min(1),
   options: z.record(z.string(), z.any()).default({}),
+  enabled: z.boolean().default(true),
 });
 
 /**
@@ -105,10 +111,10 @@ const AdapterConfigSchema = z.preprocess((val) => {
   const arr = Array.isArray(val) ? val : [val];
   return arr.map((entry: any) => {
     if (typeof entry === 'string') {
-      return { name: entry, options: {} };
+      return { name: entry, options: {}, enabled: true };
     }
     if (entry && typeof entry === 'object' && 'name' in entry) {
-      return { name: entry.name, options: entry.options ?? {} };
+      return { name: entry.name, options: entry.options ?? {}, enabled: entry.enabled ?? true };
     }
     return entry; // Let Zod produce a clear validation error
   });
@@ -186,106 +192,10 @@ export type MatchCondition = z.infer<typeof MatchConditionSchema>;
 export type ReasoningRewriteRule = z.infer<typeof ReasoningRewriteRuleSchema>;
 export type ReasoningRewriteOptions = z.infer<typeof ReasoningRewriteOptionsSchema>;
 
-// ─── pi-ai custom provider / model definitions (inference-v2) ─────────────────
-//
-// The beta (pi-ai) inference path resolves a pi-ai `Model` object for each
-// routed target. Most upstreams are in pi-ai's built-in registry, but two gaps
-// need filling without waiting for a pi-ai release:
-//
-//   1. Custom providers — a niche OpenAI/Anthropic/Gemini-compatible host that
-//      pi-ai doesn't know. We only need its wire `api` and optional `compat`
-//      overrides; everything else comes from the (inherited or custom) model.
-//
-//   2. Custom / inherited models — a model too new for the registry. Either
-//      `inherits` an existing registry model and deep-merges `overrides` (e.g.
-//      treat gpt-5.6 like gpt-5.5 with a bigger context window), or provides a
-//      full standalone spec.
-//
-// These are workspace-level registries (like user_quotas / mcp_servers),
-// reusable across any number of Plexus providers.
-
-/** pi-ai upstream wire API surfaces a custom provider/model can target. */
-const PiAiApiEnum = z.enum([
-  'openai-completions',
-  'openai-responses',
-  'openai-codex-responses',
-  'azure-openai-responses',
-  'anthropic-messages',
-  'google-generative-ai',
-  'google-generative-ai-vertex',
-]);
-
-/**
- * Custom pi-ai provider definition. Keyed by an arbitrary provider id that
- * Plexus providers reference via `pi_ai_provider`. `compat` is passed through
- * to pi-ai verbatim (OpenAI/Anthropic compat shape; validated loosely here).
- */
-export const PiAiCustomProviderSchema = z.object({
-  /** Upstream wire API this provider speaks. */
-  api: PiAiApiEnum,
-  /** Optional human label for the UI. */
-  display_name: z.string().optional(),
-  /** pi-ai compat overrides (OpenAICompletionsCompat / AnthropicMessagesCompat / …). */
-  compat: z.record(z.string(), z.any()).optional(),
+const ApiFormatSchema = z.object({
+  type: z.string().trim().min(1),
+  subtype: z.string().trim().min(1).optional(),
 });
-
-/** Pricing block in a custom model spec (per-million-token rates). */
-const PiAiModelCostSchema = z.object({
-  input: z.number().min(0).default(0),
-  output: z.number().min(0).default(0),
-  cacheRead: z.number().min(0).default(0),
-  cacheWrite: z.number().min(0).default(0),
-});
-
-/**
- * Custom pi-ai model definition. Keyed by an arbitrary model id that Plexus
- * provider-models reference via `pi_ai_model_id`.
- *
- * A model is scoped to a single custom provider via `provider` (the custom
- * provider id). Resolution only matches a custom model when its `provider`
- * equals the `pi_ai_provider` of the referencing Plexus provider.
- *
- * Two modes (a definition may use one or both — `inherits` first, then the
- * sibling fields deep-merge as overrides):
- *   - `inherits`: clone a registry model `{ provider, model_id }` as the base.
- *   - standalone: provide `api` + the model fields directly.
- */
-export const PiAiCustomModelSchema = z.object({
-  /**
-   * The custom pi-ai provider id this model belongs to. The model only
-   * resolves for Plexus providers whose `pi_ai_provider` equals this id.
-   */
-  provider: z.string().min(1),
-  /** Clone this registry model as the base, then deep-merge the fields below. */
-  inherits: z
-    .object({
-      provider: z.string().min(1),
-      model_id: z.string().min(1),
-    })
-    .optional(),
-  /** Required when not inheriting (the base has no api to borrow). */
-  api: PiAiApiEnum.optional(),
-  /** Display name override. */
-  name: z.string().optional(),
-  /** Context window (tokens). */
-  contextWindow: z.number().int().positive().optional(),
-  /** Max output tokens. */
-  maxTokens: z.number().int().positive().optional(),
-  /** Whether the model reasons. */
-  reasoning: z.boolean().optional(),
-  /** pi-ai thinking level map (effort → provider value; null = unsupported). */
-  thinkingLevelMap: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
-  /** Accepted input modalities. */
-  input: z.array(z.enum(['text', 'image'])).optional(),
-  /** Per-million-token pricing. */
-  cost: PiAiModelCostSchema.optional(),
-  /** pi-ai compat overrides (deep-merged onto the inherited model's compat). */
-  compat: z.record(z.string(), z.any()).optional(),
-});
-
-export type PiAiApi = z.infer<typeof PiAiApiEnum>;
-export type PiAiCustomProvider = z.infer<typeof PiAiCustomProviderSchema>;
-export type PiAiCustomModel = z.infer<typeof PiAiCustomModelSchema>;
 
 const ModelProviderConfigSchema = z.object({
   pricing: PricingSchema.default({
@@ -293,21 +203,21 @@ const ModelProviderConfigSchema = z.object({
     input: 0,
     output: 0,
   }),
-  access_via: z.array(z.string()).optional(),
+  access_via: z.array(z.union([z.string().trim().min(1), ApiFormatSchema])).optional(),
   type: z.enum(['text', 'embeddings', 'transcriptions', 'speech', 'image']).optional(),
   extraBody: z.record(z.string(), z.any()).optional(),
   adapter: AdapterConfigSchema,
+  auto_compat: z.boolean().optional(),
   maxConcurrency: z.number().int().positive().nullable().optional(),
   pi_ai_model_id: z.string().optional(),
 });
 
-const OAuthProviderSchema = z.enum([
-  'anthropic',
-  'openai-codex',
-  'github-copilot',
-  'google-gemini-cli',
-  'google-antigravity',
-]);
+// Gemini CLI / Antigravity OAuth were removed. Their enum
+// values are gone, so new configs referencing them are rejected on write; any
+// persisted rows are purged at startup by
+// ConfigService.dropRetiredOAuthProviders() (which loads from DB columns, not
+// this schema, so old rows never fail to load before they are dropped).
+const OAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'github-copilot']);
 
 const NagaQuotaCheckerOptionsSchema = z.object({
   apiKey: z.string().min(1, 'Naga provisioning key is required'),
@@ -714,6 +624,23 @@ export const CompactionOverrideSchema = z.object({
 export const CompactionConfigSchema = CompactionOverrideSchema;
 export type CompactionSettingsConfig = z.infer<typeof CompactionOverrideSchema>;
 
+const RawPassthroughConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  base_url: z
+    .string()
+    .url()
+    .refine(
+      (value) => {
+        const url = new URL(value);
+        return (url.protocol === 'https:' || url.protocol === 'http:') && !url.search && !url.hash;
+      },
+      {
+        message: 'raw_passthrough.base_url must be HTTP(S) without a query or fragment',
+      }
+    ),
+  auth: z.enum(['bearer', 'x-api-key', 'x-goog-api-key']).default('bearer'),
+});
+
 export const ProviderConfigSchema = z
   .object({
     display_name: z.string().optional(),
@@ -749,6 +676,7 @@ export const ProviderConfigSchema = z
     gpu_power_draw_watts: z.number().positive().optional(),
     geminiThinkingEnabled: z.boolean().optional(),
     adapter: AdapterConfigSchema,
+    auto_compat: z.boolean().optional(),
     timeoutMs: z.number().int().positive().optional(),
     maxConcurrency: z.number().int().positive().nullable().optional(),
     // Per-provider stall detection overrides (null = use global setting)
@@ -759,6 +687,7 @@ export const ProviderConfigSchema = z
     stallGracePeriodMs: z.number().int().min(0).max(120000).nullable().optional(),
     pi_ai_provider: z.string().optional(),
     compaction: CompactionOverrideSchema.optional(),
+    raw_passthrough: RawPassthroughConfigSchema.optional(),
   })
   .refine((data) => !!data.api_key || isOAuthProviderConfig(data), {
     message: "'api_key' must be specified for provider",
@@ -768,6 +697,9 @@ export const ProviderConfigSchema = z
   })
   .refine((data) => !isOAuthProviderConfig(data) || !!data.oauth_account, {
     message: "'oauth_account' must be specified when using oauth://",
+  })
+  .refine((data) => data.raw_passthrough?.enabled !== true || !isOAuthProviderConfig(data), {
+    message: 'raw_passthrough currently supports static API-key providers only',
   });
 
 const ModelTargetSchema = z.object({
@@ -792,6 +724,23 @@ const ModelTargetGroupSchema = z.object({
   targets: z.array(ModelTargetSchema),
 });
 
+// Shared scope/limit fields applied to every quota-type union member below:
+//  - allowed*/excluded* restrict which provider/model pairs the quota counts
+//    against (see services/scope-match.ts for matching semantics; all-empty
+//    scope means "applies to everything").
+//  - shared marks the quota as a single pooled bucket across every key that
+//    references it (vs. one independent counter per key).
+//  - warnAt is an optional early-warning threshold, expressed as a fraction
+//    of `limit` in (0, 1) exclusive (e.g. 0.8 = warn at 80% usage).
+const QuotaScopeFields = {
+  allowedProviders: z.array(z.string()).optional(),
+  excludedProviders: z.array(z.string()).optional(),
+  allowedModels: z.array(z.string()).optional(),
+  excludedModels: z.array(z.string()).optional(),
+  shared: z.boolean().optional(),
+  warnAt: z.number().gt(0).lt(1).optional(),
+};
+
 // Quota definition schemas for user quota enforcement
 export const QuotaDefinitionSchema = z.discriminatedUnion('type', [
   z.object({
@@ -799,21 +748,25 @@ export const QuotaDefinitionSchema = z.discriminatedUnion('type', [
     limitType: z.enum(['requests', 'tokens', 'cost']),
     limit: z.number().min(1),
     duration: z.string().min(1), // e.g., "1h", "30m", "1d"
+    ...QuotaScopeFields,
   }),
   z.object({
     type: z.literal('daily'),
     limitType: z.enum(['requests', 'tokens', 'cost']),
     limit: z.number().min(1),
+    ...QuotaScopeFields,
   }),
   z.object({
     type: z.literal('weekly'),
     limitType: z.enum(['requests', 'tokens', 'cost']),
     limit: z.number().min(1),
+    ...QuotaScopeFields,
   }),
   z.object({
     type: z.literal('monthly'),
     limitType: z.enum(['requests', 'tokens', 'cost']),
     limit: z.number().min(1),
+    ...QuotaScopeFields,
   }),
 ]);
 
@@ -837,12 +790,21 @@ const ModelBehaviorSchema = z.discriminatedUnion('type', [StripAdaptiveThinkingB
 // `overrides` lets users override individual fields per alias. Overridden
 // fields win over catalog values; untouched fields still track the catalog.
 // When `source === 'custom'`, all data comes from overrides (no catalog lookup).
+const MetadataPricingTierSchema = z.object({
+  input_tokens_above: z.number().int().nonnegative(),
+  prompt: z.string().optional(),
+  completion: z.string().optional(),
+  input_cache_read: z.string().optional(),
+  input_cache_write: z.string().optional(),
+});
+
 const MetadataPricingOverridesSchema = z
   .object({
     prompt: z.string().optional(),
     completion: z.string().optional(),
     input_cache_read: z.string().optional(),
     input_cache_write: z.string().optional(),
+    tiers: z.array(MetadataPricingTierSchema).optional(),
   })
   .partial();
 
@@ -872,6 +834,13 @@ const MetadataOverridesSchema = z.object({
 });
 
 const ModelMetadataSchema = z.discriminatedUnion('source', [
+  z.object({
+    source: z.literal('auto'),
+    overrides: MetadataOverridesSchema.optional(),
+  }),
+  z.object({
+    source: z.literal('disabled'),
+  }),
   z.object({
     source: z.literal('openrouter'),
     // Path within the source catalog (e.g., "openai/gpt-4.1-nano")
@@ -923,8 +892,8 @@ export const ModelConfigSchema = z
     max_attempts: z.number().int().min(1).max(10).default(1).optional(),
     // Fixed wait (seconds) before starting each subsequent retry round. No delay before round 1.
     retry_delay_seconds: z.number().int().min(0).max(300).default(0).optional(),
-    // Advertised in GET /v1/models to inform clients of the preferred API surface(s)
-    // for this alias, even if plexus can translate between them.
+    // Advertised in GET /v1/models to inform clients of the preferred API surface(s).
+    // When omitted for text aliases, the model family determines the default.
     preferred_api: z
       .array(z.enum(['chat_completions', 'messages', 'gemini', 'responses']))
       .optional(),
@@ -981,15 +950,35 @@ export type StripAdaptiveThinkingBehavior = z.infer<typeof StripAdaptiveThinking
 export type ModelMetadata = z.infer<typeof ModelMetadataSchema>;
 export type MetadataOverrides = z.infer<typeof MetadataOverridesSchema>;
 
+// NOTE: intentionally a plain z.object (no `.transform`). A `.transform`
+// turns this into a ZodEffects whose inferred output makes `quotas` a
+// REQUIRED property (always present on the returned object literal, even
+// when `undefined`) — that ripples into every object literal typed against
+// `KeyConfig` / `PlexusConfig['keys']` across the codebase (dozens of test
+// fixtures construct `{ secret, comment }` etc. without `quotas`), which
+// fails typecheck. Keeping `quotas` a genuinely optional schema field avoids
+// that, at the cost of normalization being explicit (via
+// `normalizeKeyConfig` below) rather than automatic at every parse.
 export const KeyConfigSchema = z.object({
   secret: z.string(),
   comment: z.string().optional(),
-  quota: z.string().optional(), // References a quota definition name
+  // Accepted only when creating a key. The repository derives and persists an
+  // immutable absolute expiry timestamp from this duration.
+  expiresInMinutes: z.number().int().positive().optional(),
+  expiresAt: z.number().int().positive().optional(),
+  disabledAt: z.number().int().positive().optional(),
+  // Deprecated: single quota-definition reference. Still accepted on input
+  // (indefinitely) for backward compat. Not auto-normalized by this schema —
+  // callers must run parsed/merged data through `normalizeKeyConfig` (see
+  // below) at the parse boundary, and should read `quotas`, never `quota`.
+  quota: z.string().optional(),
+  // References zero or more quota-definition names (see QuotaDefinitionSchema).
+  quotas: z.array(z.string().min(1)).optional(),
   allowedModels: z.array(z.string().min(1)).optional(),
   allowedProviders: z.array(z.string().min(1)).optional(),
   excludedModels: z.array(z.string().min(1)).optional(),
   excludedProviders: z.array(z.string().min(1)).optional(),
-  beta: z.boolean().optional(),
+  allowRawPassthrough: z.boolean().optional(),
   allowedIps: z
     .array(
       z.string().min(1).refine(isValidIpRule, {
@@ -1000,6 +989,24 @@ export const KeyConfigSchema = z.object({
     .optional(),
 });
 
+/**
+ * Normalize a legacy `quota` field into `quotas`. Explicit `quotas` (even an
+ * empty array) always wins; `quota` is only used as a fallback when `quotas`
+ * is entirely absent. Returns a new object; does not mutate `data`.
+ *
+ * Used at key-config parse boundaries (PUT body after validation, PATCH body
+ * BEFORE the shallow merge with the existing stored config — merging first
+ * would let a stale `quotas` already on `existing` shadow a caller's legacy
+ * `quota` in the patch body).
+ */
+export function normalizeKeyConfig<T extends { quota?: unknown; quotas?: unknown }>(data: T): T {
+  if (data.quotas !== undefined) return data;
+  if (typeof data.quota === 'string' && data.quota.length > 0) {
+    return { ...data, quotas: [data.quota] };
+  }
+  return data;
+}
+
 const QuotaConfigSchema = z.object({
   id: z.string(),
   type: z.string(),
@@ -1009,30 +1016,7 @@ const QuotaConfigSchema = z.object({
   options: z.record(z.string(), z.any()).default({}),
 });
 
-const RemoteHttpMcpServerConfigSchema = z.object({
-  mode: z.literal('remote_http').default('remote_http').optional(),
-  upstream_url: z.string().url(),
-  enabled: z.boolean().default(true),
-  headers: z.record(z.string(), z.string()).optional(),
-});
-
-const LocalHttpMcpServerConfigSchema = z.object({
-  mode: z.literal('local_http'),
-  enabled: z.boolean().default(true),
-  launcher: z.enum(['bunx', 'uvx']),
-  package: z.string().trim().min(1),
-  args: z.array(z.string()).default([]).optional(),
-  env: z.record(z.string(), z.string()).default({}).optional(),
-  port: z.number().int().min(1).max(65535),
-  path: z.string().trim().min(1).default('/mcp').optional(),
-  startup_timeout_ms: z.number().int().min(1000).max(300000).default(30000).optional(),
-  headers: z.record(z.string(), z.string()).optional(),
-});
-
-export const McpServerConfigSchema = z.union([
-  LocalHttpMcpServerConfigSchema,
-  RemoteHttpMcpServerConfigSchema,
-]);
+export { McpServerConfigSchema } from '@plexus/shared';
 
 const CooldownPolicySchema = z.object({
   initialMinutes: z.number().min(0.1).default(2),
@@ -1075,9 +1059,9 @@ const RawPlexusConfigSchema = z
     backgroundExploration: BackgroundExplorationConfigSchema.optional(),
     mcp_servers: z.record(z.string(), McpServerConfigSchema).optional(),
     user_quotas: z.record(z.string(), QuotaDefinitionSchema).optional(),
-    // Workspace-level pi-ai custom provider / model registries (inference-v2).
-    pi_ai_custom_providers: z.record(z.string(), PiAiCustomProviderSchema).optional(),
-    pi_ai_custom_models: z.record(z.string(), PiAiCustomModelSchema).optional(),
+    // Applied to keys with NO quotas assigned (`quotas` absent/empty). Non-stacking:
+    // a key either uses its own `quotas` or falls back to this list, never both.
+    default_quotas: z.array(z.string()).optional(),
     compaction: CompactionOverrideSchema.optional(),
   })
   .passthrough();
@@ -1117,6 +1101,10 @@ export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ModelProviderConfig = z.infer<typeof ModelProviderConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type KeyConfig = z.infer<typeof KeyConfigSchema>;
+
+export function isKeyDisabled(key: Pick<KeyConfig, 'expiresAt' | 'disabledAt'>, at = Date.now()) {
+  return key.disabledAt !== undefined || (key.expiresAt !== undefined && key.expiresAt <= at);
+}
 export type ModelTarget = z.infer<typeof ModelTargetSchema>;
 export type ModelTargetGroup = z.infer<typeof ModelTargetGroupSchema>;
 export type SelectorType = z.infer<typeof SelectorTypeSchema>;
@@ -1226,34 +1214,14 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
   }
 
   // Startup registry validation: warn (non-fatally) for any configured
-  // (pi_ai_provider, pi_ai_model_id) pair that resolves neither via the custom
-  // registries nor the built-in pi-ai registry. getModel() returns undefined
-  // for unknown pairs; this is a warning (not fatal) so new/unreleased model IDs
-  // or in-progress custom defs don't prevent Plexus from starting.
-  const customModels = config.pi_ai_custom_models ?? {};
-  const customProviders = config.pi_ai_custom_providers ?? {};
-  // getModel may return undefined (pi-ai 0.79.x) or throw (older versions /
-  // mocked) for unknown pairs — treat both as "not found".
-  const registryHas = (provider: string, modelId: string): boolean => {
-    try {
-      return getBuiltinModel(provider as any, modelId as any) != null;
-    } catch {
-      return false;
-    }
-  };
-  const piPairResolves = (provider: string, modelId: string): boolean => {
-    // Custom model: resolves if standalone (has api) or its inheritance base exists.
-    const compoundKey = modelId.includes(':') ? modelId : `${provider}:${modelId}`;
-    const cm = customModels[compoundKey] ?? customModels[modelId];
-    if (cm && cm.provider === provider) {
-      if (cm.inherits) return registryHas(cm.inherits.provider, cm.inherits.model_id);
-      return cm.api != null;
-    }
-    // Custom provider: resolves (supplies api/compat; base may be a skeleton).
-    if (customProviders[provider]) return true;
-    // Built-in registry.
-    return registryHas(provider, modelId);
-  };
+  // (pi_ai_provider, pi_ai_model_id) pair that does not resolve via the
+  // pi-ai model catalog (built-in baseline + pi.dev overlay). The catalog
+  // returns null for unknown pairs; this is a warning (not fatal) so renamed
+  // registry entries do not prevent Plexus from starting.
+  const registryHas = (provider: string, modelId: string): boolean =>
+    getCatalogModel(provider, modelId) != null;
+  const piPairResolves = (provider: string, modelId: string): boolean =>
+    registryHas(provider, modelId);
   for (const [providerId, providerConfig] of Object.entries(resolvedProviders)) {
     const pc = providerConfig as ProviderConfig;
     if (!pc.pi_ai_provider) continue;
@@ -1267,16 +1235,26 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
         logger.warn(
           `pi-ai registry: provider "${providerId}" model "${modelName}" references ` +
             `pi_ai_provider="${pc.pi_ai_provider}" pi_ai_model_id="${piAiModelId}" ` +
-            `which resolves via neither the custom registries nor the pi-ai model ` +
-            `registry. The beta inference path will skip this provider/model combination.`
+            `which does not resolve via the pi-ai model registry. Registry-aware ` +
+            `compatibility mapping will no-op for this provider/model combination.`
         );
       }
     }
   }
 
+  // Normalize legacy `quota` → `quotas` for every key at load time (explicit
+  // `quotas` always wins — see normalizeKeyConfig).
+  const normalizedKeys = Object.fromEntries(
+    Object.entries(config.keys).map(([keyName, keyConfig]) => [
+      keyName,
+      normalizeKeyConfig(keyConfig),
+    ])
+  );
+
   return {
     ...config,
     providers: resolvedProviders,
+    keys: normalizedKeys,
     failover: FailoverPolicySchema.parse(config.failover ?? {}),
     cooldown: CooldownPolicySchema.parse(config.cooldown ?? {}),
     quotas: buildProviderQuotaConfigs(config),
@@ -1400,7 +1378,7 @@ function buildProviderQuotaConfigs(config: z.infer<typeof RawPlexusConfigSchema>
 export function getConfig(): PlexusConfig {
   // Try ConfigService first (database-backed config)
   try {
-    const { ConfigService } = require('./services/config-service');
+    const { ConfigService } = require('./services/configuration/config-service');
     const instance = ConfigService.getInstance();
     return instance.getConfig();
   } catch (e: any) {
@@ -1453,7 +1431,7 @@ export function setConfigForTesting(config: PlexusConfig) {
 
   currentConfig = normalised;
   try {
-    const { ConfigService } = require('./services/config-service');
+    const { ConfigService } = require('./services/configuration/config-service');
     ConfigService.setInstanceForTesting(normalised);
   } catch {
     // ConfigService may not be available in all test environments

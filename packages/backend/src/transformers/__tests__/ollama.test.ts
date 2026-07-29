@@ -341,6 +341,113 @@ describe('OllamaTransformer', () => {
       const lastLine = lines[lines.length - 1];
       expect(lastLine).toBe('data: [DONE]');
     });
+
+    test('renders a hard unified error chunk as an error payload, not a successful empty completion', async () => {
+      const unifiedStream = new ReadableStream<UnifiedChatStreamChunk>({
+        start(controller) {
+          controller.enqueue({
+            id: 'msg_error',
+            model: 'claude-sonnet-4-6',
+            created: 1691143939,
+            event: 'error',
+            delta: {},
+            error: {
+              statusCode: 500,
+              code: 'api_error',
+              message: 'Internal server error.',
+            },
+          });
+          controller.close();
+        },
+      });
+
+      const sseStream = transformer.formatStream(unifiedStream);
+      const reader = sseStream.getReader();
+      const decoder = new TextDecoder();
+      let output = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        output += decoder.decode(value);
+      }
+
+      const lines = output.split('\n\n').filter(Boolean);
+      const payloads = lines
+        .map((line) => line.replace(/^data:\s*/, ''))
+        .filter((line) => line !== '[DONE]')
+        .map((line) => JSON.parse(line));
+
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]).toEqual({
+        error: {
+          message: 'Internal server error.',
+          type: 'server_error',
+          code: 'api_error',
+        },
+      });
+      expect(payloads[0].choices).toBeUndefined();
+      expect(payloads[0].usage).toBeUndefined();
+      expect(output.trim().endsWith('data: [DONE]')).toBe(true);
+    });
+
+    test('includes final usage on a hard unified error chunk when present', async () => {
+      const unifiedStream = new ReadableStream<UnifiedChatStreamChunk>({
+        start(controller) {
+          controller.enqueue({
+            id: 'msg_failusage',
+            model: 'claude-sonnet-4-6',
+            created: 1691143939,
+            event: 'error',
+            delta: {},
+            usage: {
+              input_tokens: 10,
+              output_tokens: 18,
+              total_tokens: 28,
+              reasoning_tokens: 0,
+              cached_tokens: 0,
+              cache_creation_tokens: 0,
+            },
+            error: {
+              statusCode: 500,
+              code: 'response_failed',
+              message: 'The model response failed.',
+            },
+          });
+          controller.close();
+        },
+      });
+
+      const sseStream = transformer.formatStream(unifiedStream);
+      const reader = sseStream.getReader();
+      const decoder = new TextDecoder();
+      let output = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        output += decoder.decode(value);
+      }
+
+      const lines = output.split('\n\n').filter(Boolean);
+      const payloads = lines
+        .map((line) => line.replace(/^data:\s*/, ''))
+        .filter((line) => line !== '[DONE]')
+        .map((line) => JSON.parse(line));
+
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0].error).toEqual({
+        message: 'The model response failed.',
+        type: 'server_error',
+        code: 'response_failed',
+      });
+      expect(payloads[0].usage).toEqual({
+        prompt_tokens: 10,
+        completion_tokens: 18,
+        total_tokens: 28,
+        reasoning_tokens: 0,
+      });
+    });
   });
 
   describe('extractUsage', () => {

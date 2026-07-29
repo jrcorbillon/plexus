@@ -397,6 +397,39 @@ describe('transformGeminiStream', () => {
     expect(finishChunk?.finish_reason).toBe('recitation');
   });
 
+  test('should emit a retryable error event for MALFORMED_FUNCTION_CALL', async () => {
+    const sseData = [
+      JSON.stringify({
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [{ text: 'Formattingcall:default_api:bash{command:bun run format}' }],
+            },
+            finishReason: 'MALFORMED_FUNCTION_CALL',
+            finishMessage: 'Malformed function call: Failed to parse function call',
+            index: 0,
+          },
+        ],
+        responseId: 'resp_malformed',
+        modelVersion: 'gemini-3.6-flash',
+      }),
+    ];
+
+    const chunks = await readAllChunks(transformGeminiStream(createSSEStream(sseData)));
+    const errorChunk = chunks.find((chunk) => chunk.event === 'error');
+
+    expect(errorChunk?.error).toEqual({
+      statusCode: 503,
+      code: 'MALFORMED_FUNCTION_CALL',
+      message: expect.stringContaining('please retry your request'),
+    });
+    expect(chunks.some((chunk) => chunk.finish_reason === 'malformed_function_call')).toBe(false);
+    // Leaked tool-call text must not reach clients before the error.
+    expect(chunks.some((chunk) => typeof chunk.delta?.content === 'string')).toBe(false);
+    expect(chunks.some((chunk) => chunk.event === 'text_delta')).toBe(false);
+  });
+
   test('should handle usage-only chunk (no candidate)', async () => {
     const sseData = [
       '{"usageMetadata":{"promptTokenCount":123,"candidatesTokenCount":456,"totalTokenCount":579},"responseId":"resp_123","modelVersion":"gemini-1.5-flash"}',

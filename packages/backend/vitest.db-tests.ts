@@ -10,6 +10,7 @@ export const DB_TEST_FILES = [
   'src/routes/management/__tests__/model-insights.test.ts',
   'src/routes/management/__tests__/provider-insights.test.ts',
   'src/services/__tests__/usage-storage-performance.test.ts',
+  'src/services/oauth/__tests__/dropped-oauth-providers.test.ts',
   'src/services/quota/__tests__/quota-enforcer.test.ts',
   'src/services/quota/__tests__/quota-scheduler.test.ts',
 ] as const;

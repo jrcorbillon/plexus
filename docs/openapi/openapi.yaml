@@ -32,7 +32,12 @@ info:
        API key (limited access, scoped to that key's own data). Endpoints
        marked with the `AdminOnly` note reject limited principals with 403.
 
-    3. **MCP Proxy** (`/mcp/:name`) — Proxies JSON-RPC and SSE traffic to
+    3. **Raw Provider Proxy** (`/raw/{provider}/*`) — Relays provider-native
+       HTTP traffic without model routing or payload transformation. Requires
+       explicit provider and inference-key opt-in.
+
+
+    4. **MCP Proxy** (`/mcp/:name`) — Proxies JSON-RPC and SSE traffic to
        database-registered MCP servers. Plus unauthenticated MCP OAuth
        discovery under `/.well-known/*` and `POST /register`.
 
@@ -210,7 +215,7 @@ tags:
       | `defined` | Explicit pricing ranges from `pricing.range` in model config. |
       | `per_request` | Flat fee per call; full amount in `costInput`, others zero. |
   - name: Management — Debug
-    description: Per-request debug capture toggles and logs.
+    description: In-memory debug capture targets and stored debug trace logs.
   - name: Management — Errors
     description: Inference error log storage.
   - name: Management — MCP Logs
@@ -251,19 +256,11 @@ tags:
       Upstream provider quota checkers (`checkerId`-based).
 
       Each checker periodically polls an upstream provider for its current
-      quota utilisation and stores a `QuotaSample` snapshot.
-
-      ### Window types
-
-      | Window Type | Description |
-      |---|---|
-      | `subscription` | Monthly/billing-cycle quota or prepaid balance. |
-      | `hourly` | Hourly rolling window. |
-      | `five_hour` | 5-hour rolling window (common across multiple providers). |
-      | `daily` | Daily reset quota. |
-      | `weekly` | 7-day rolling window (common across multiple providers). |
-      | `monthly` | Calendar month quota. |
-      | `custom` | Provider-specific window. |
+      quota utilisation and persists a `Meter` snapshot (one row per meter).
+      Each meter is identified by a provider-specific `meterKey` (e.g.
+      `balance`, `five_hour`, `daily`) rather than a fixed window-type enum.
+      Use `GET /quotas/{checkerId}/history?meterKey=...` for historical rows,
+      and `GET /quotas/{checkerId}` for the latest meter readings.
 
       ### Status thresholds
 
@@ -384,6 +381,8 @@ paths:
     $ref: paths/v1_metadata_search.yaml
   /v1/metadata/lookup:
     $ref: paths/v1_metadata_lookup.yaml
+  /raw/{provider}/{path}:
+    $ref: paths/raw_{provider}_{path}.yaml
   /v0/management/auth/verify:
     $ref: paths/v0_management_auth_verify.yaml
   /v0/management/self/me:
@@ -418,6 +417,14 @@ paths:
     $ref: paths/v0_management_config_exploration-rate.yaml
   /v0/management/config/failover:
     $ref: paths/v0_management_config_failover.yaml
+  /v0/management/config/capture-trace-on-error:
+    $ref: paths/v0_management_config_capture-trace-on-error.yaml
+  /v0/management/config/trusted-proxies:
+    $ref: paths/v0_management_config_trusted-proxies.yaml
+  /v0/management/config/compaction:
+    $ref: paths/v0_management_config_compaction.yaml
+  /v0/management/config/mcp-enabled:
+    $ref: paths/v0_management_config_mcp-enabled.yaml
   /v0/management/system-settings:
     $ref: paths/v0_management_system-settings.yaml
   /v0/management/providers:
@@ -442,26 +449,32 @@ paths:
     $ref: paths/v0_management_models_huggingface_{modelId}.yaml
   /v0/management/models/metadata/refresh:
     $ref: paths/v0_management_models_metadata_refresh.yaml
+  /v0/management/models/metadata/resolve:
+    $ref: paths/v0_management_models_metadata_resolve.yaml
   /v0/management/keys:
     $ref: paths/v0_management_keys.yaml
   /v0/management/keys/{name}:
     $ref: paths/v0_management_keys_{name}.yaml
+  /v0/management/keys/{name}/disable:
+    $ref: paths/v0_management_keys_{name}_disable.yaml
   /v0/management/mcp-servers:
     $ref: paths/v0_management_mcp-servers.yaml
   /v0/management/mcp-servers/{serverName}:
     $ref: paths/v0_management_mcp-servers_{serverName}.yaml
+  /v0/management/mcp-servers/{serverName}/status:
+    $ref: paths/v0_management_mcp-servers_{serverName}_status.yaml
+  /v0/management/mcp-servers/{serverName}/start:
+    $ref: paths/v0_management_mcp-servers_{serverName}_start.yaml
+  /v0/management/mcp-servers/{serverName}/stop:
+    $ref: paths/v0_management_mcp-servers_{serverName}_stop.yaml
+  /v0/management/mcp-servers/{serverName}/restart:
+    $ref: paths/v0_management_mcp-servers_{serverName}_restart.yaml
+  /v0/management/mcp-servers/{serverName}/process-logs:
+    $ref: paths/v0_management_mcp-servers_{serverName}_process-logs.yaml
   /v0/management/quota-checker-types:
     $ref: paths/v0_management_quota-checker-types.yaml
   /v0/management/quota-checkers:
     $ref: paths/v0_management_quota-checkers.yaml
-  /v0/management/quotas/backup-legacy-snapshots:
-    $ref: paths/v0_management_quotas_backup-legacy-snapshots.yaml
-  /v0/management/quotas/legacy-snapshot-status:
-    $ref: paths/v0_management_quotas_legacy-snapshot-status.yaml
-  /v0/management/quotas/migrate-legacy-snapshots:
-    $ref: paths/v0_management_quotas_migrate-legacy-snapshots.yaml
-  /v0/management/quotas/truncate-legacy-snapshots:
-    $ref: paths/v0_management_quotas_truncate-legacy-snapshots.yaml
   /v0/management/usage:
     $ref: paths/v0_management_usage.yaml
   /v0/management/usage/summary:
@@ -528,6 +541,8 @@ paths:
     $ref: paths/v0_management_user-quotas_{name}.yaml
   /v0/management/quota/clear:
     $ref: paths/v0_management_quota_clear.yaml
+  /v0/management/quota/recompute:
+    $ref: paths/v0_management_quota_recompute.yaml
   /v0/management/quota/status/{key}:
     $ref: paths/v0_management_quota_status_{key}.yaml
   /v0/management/test:
@@ -548,6 +563,8 @@ paths:
     $ref: paths/v0_system_logs_recent.yaml
   /mcp/{name}:
     $ref: paths/mcp_{name}.yaml
+  /mcp/plexus:
+    $ref: paths/mcp_plexus.yaml
   /.well-known/oauth-authorization-server:
     $ref: paths/.well-known_oauth-authorization-server.yaml
   /.well-known/oauth-protected-resource:
@@ -556,6 +573,12 @@ paths:
     $ref: paths/.well-known_openid-configuration.yaml
   /register:
     $ref: paths/register.yaml
+  /v1/completions:
+    $ref: paths/v1_completions.yaml
+  /completions:
+    $ref: paths/completions.yaml
+  /healthz:
+    $ref: paths/healthz.yaml
 components:
   schemas:
     WebSearchCoercionAdapterOptions:

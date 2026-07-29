@@ -1,8 +1,8 @@
 import { FastifyInstance } from 'fastify';
 import bearerAuth from '@fastify/bearer-auth';
 import { createAuthHook } from '../../utils/auth';
-import { Dispatcher } from '../../services/dispatcher';
-import { UsageStorageService } from '../../services/usage-storage';
+import { Dispatcher } from '../../services/dispatch/dispatcher';
+import { UsageStorageService } from '../../services/observability/usage-storage';
 import { QuotaEnforcer } from '../../services/quota/quota-enforcer';
 import { registerModelsRoute } from './models';
 import { registerChatRoute } from './chat';
@@ -13,7 +13,7 @@ import { registerTranscriptionsRoute } from './transcriptions';
 import { registerSpeechRoute } from './speech';
 import { registerImagesRoute } from './images';
 import { registerResponsesRoute } from './responses';
-import { registerInferenceV2Routes } from '../../inference-v2/index';
+import { registerCompletionsRoute } from './completions';
 
 export async function registerInferenceRoutes(
   fastify: FastifyInstance,
@@ -24,7 +24,7 @@ export async function registerInferenceRoutes(
   // Public Routes (Excluded from Auth)
   await registerModelsRoute(fastify);
 
-  // Protected Routes (v1, v1beta, and /beta)
+  // Protected Routes (v1 and v1beta)
   fastify.register(async (protectedRoutes) => {
     const auth = createAuthHook();
 
@@ -36,10 +36,10 @@ export async function registerInferenceRoutes(
     await registerMessagesRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerGeminiRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerResponsesRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
+    await registerCompletionsRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerEmbeddingsRoute(protectedRoutes, dispatcher, usageStorage);
     await registerTranscriptionsRoute(protectedRoutes, dispatcher, usageStorage);
     await registerSpeechRoute(protectedRoutes, dispatcher, usageStorage);
     await registerImagesRoute(protectedRoutes, dispatcher, usageStorage);
-    await registerInferenceV2Routes(protectedRoutes, usageStorage, quotaEnforcer);
   });
 }

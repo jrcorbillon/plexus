@@ -32,12 +32,19 @@ Use `PLEXUS_STAGING_URL` as the instance root, for example `https://plexus.examp
 
 Useful usage query params include `limit`, `offset`, `sortBy`, `sortDir`, `startDate`, `endDate`, `apiKey`, `attribution`, `incomingApiType`, `provider`, `incomingModelAlias`, `selectedModelName`, `outgoingApiType`, `responseStatus`, `minDurationMs`, `maxDurationMs`, and `fields`.
 
+Raw provider records have `isRaw: true`, `incomingApiType: "raw"`, and include
+`requestMethod` plus the upstream `requestPath`. `isPassthrough` describes a
+different transformed-inference optimization and remains false for raw calls.
+For recognized Chat Completions, Messages, Responses, and Gemini paths, usage
+records also include any model, token, cache/reasoning, and provider cost data
+that Plexus can observe without changing the raw traffic.
+
 ## Debug Tracing
 
 | Action | Method | Path |
 | --- | --- | --- |
 | Get debug state | `GET` | `/v0/management/debug` |
-| Update global debug state | `PATCH` | `/v0/management/debug` |
+| Update in-memory debug state | `PATCH` | `/v0/management/debug` |
 | Toggle current key debug | `POST` | `/v0/management/self/debug/toggle` |
 | List debug logs | `GET` | `/v0/management/debug/logs` |
 | Get one debug log | `GET` | `/v0/management/debug/logs/{requestId}` |
@@ -47,10 +54,16 @@ Useful usage query params include `limit`, `offset`, `sortBy`, `sortDir`, `start
 Debug state body examples:
 
 ```json
-{"enabled":true,"providers":null}
-{"enabled":true,"providers":["openai","anthropic"]}
+{"enabled":true}
+{"enabled":false,"keys":["mobile-app"],"aliases":["gpt-4o-mini"],"providers":["openai","anthropic"]}
+{"keys":null,"aliases":null,"providers":null}
 {"enabled":false}
 ```
+
+Debug target state is in-memory only. Capture is inclusive: a request is
+recorded when any enabled dimension matches the request key, canonical model
+alias, selected provider, or global flag. `providers` is a provider target list,
+not a filter that suppresses global/key/alias capture.
 
 ## Providers And Provider Quotas
 
@@ -76,6 +89,16 @@ Minimal provider body:
 ```
 
 Provider quota checkers are configured in the provider's `quota_checker` field. Discover supported checker types with `/v0/management/quota-checker-types` or `/v0/management/quota-checkers` before writing config.
+
+Raw provider configuration:
+
+```json
+{"raw_passthrough":{"enabled":true,"base_url":"https://openrouter.ai/api","auth":"bearer"}}
+```
+
+This exposes `/raw/{provider}/*` for static API-key providers. It bypasses model
+routing, failover, adapters, and payload transformation. Inspect key access before
+enabling it; callers need `allowRawPassthrough: true` and provider policy access.
 
 ## Model Aliases
 
@@ -114,7 +137,11 @@ Selectors include `random`, `in_order`, `cost`, `latency`, `usage`, `performance
 | Create or replace key | `PUT` | `/v0/management/keys/{name}` |
 | Delete key | `DELETE` | `/v0/management/keys/{name}` |
 
-Key bodies require `secret`. Optional fields include `comment`, `allowedProviders`, `excludedProviders`, `allowedModels`, `excludedModels`, `allowedIps`, and `quota`.
+Key bodies require `secret`. Optional fields include `comment`, `allowedProviders`, `excludedProviders`, `allowedModels`, `excludedModels`, `allowedIps`, `allowRawPassthrough`, and `quota`.
+
+`allowRawPassthrough: true` grants provider-wide access to each raw-enabled
+provider permitted by the key's provider allow/deny lists. Model restrictions do
+not apply to raw traffic.
 
 For no quota, omit the `quota` field. Do not send `quota: null` to create/update key endpoints; the current write schema accepts only strings when `quota` is present.
 

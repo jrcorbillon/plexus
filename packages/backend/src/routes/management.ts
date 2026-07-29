@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { UsageStorageService } from '../services/usage-storage';
+import { UsageStorageService } from '../services/observability/usage-storage';
 import { registerConfigRoutes } from './management/config';
 import { registerUsageRoutes } from './management/usage';
 import { registerCooldownRoutes } from './management/cooldowns';
@@ -11,7 +11,6 @@ import { registerTestRoutes } from './management/test';
 import { registerQuotaRoutes } from './management/quotas';
 import { registerQuotaEnforcementRoutes } from './management/quota-enforcement';
 import { registerUserQuotaRoutes } from './management/user-quotas';
-import { registerPiAiCustomRoutes } from './management/pi-ai-custom';
 import { registerOAuthRoutes } from './management/oauth';
 import { registerMcpLogRoutes } from './management/mcp-logs';
 import { registerLoggingRoutes } from './management/logging';
@@ -25,8 +24,8 @@ import { registerBackupRoutes } from './management/backup';
 import { registerConcurrencyRoutes } from './management/concurrency';
 import { registerModelInsightsRoutes } from './management/model-insights';
 import { registerProviderInsightsRoutes } from './management/provider-insights';
-import { Dispatcher } from '../services/dispatcher';
-import { ProbeService } from '../services/probe-service';
+import { Dispatcher } from '../services/dispatch/dispatcher';
+import { ProbeService } from '../services/probes/probe-service';
 import { QuotaScheduler } from '../services/quota/quota-scheduler';
 import { QuotaEnforcer } from '../services/quota/quota-enforcer';
 import { McpUsageStorageService } from '../services/mcp-proxy/mcp-usage-storage';
@@ -69,6 +68,7 @@ export async function registerManagementRoutes(
         allowedModels: p.allowedModels,
         excludedProviders: p.excludedProviders,
         excludedModels: p.excludedModels,
+        quotaNames: p.quotaNames,
         quotaName: p.quotaName ?? null,
         comment: p.comment ?? null,
       });
@@ -117,8 +117,6 @@ export async function registerManagementRoutes(
         await registerQuotaEnforcementRoutes(adminOnly, quotaEnforcer);
       }
       await registerUserQuotaRoutes(adminOnly);
-      // pi-ai custom provider / model registries (inference-v2)
-      await registerPiAiCustomRoutes(adminOnly);
       // Model routes for AI energy calculations
       await registerModelRoutes(adminOnly);
       // Backup and restore routes

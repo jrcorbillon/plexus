@@ -41,6 +41,20 @@ export function formatAnthropicStream(stream: ReadableStream): ReadableStream {
         safeEnqueue(encode({ event, data: JSON.stringify(data) }));
       };
 
+      if (hasSentFinish) return;
+
+      if (chunk.event === 'error') {
+        sendEvent('error', {
+          type: 'error',
+          error: {
+            type: 'api_error',
+            message: chunk.error?.message,
+          },
+        });
+        hasSentFinish = true;
+        return;
+      }
+
       // Accumulate Usage
       if (chunk.usage) {
         lastUsage = chunk.usage;
@@ -160,7 +174,8 @@ export function formatAnthropicStream(stream: ReadableStream): ReadableStream {
             const shouldStartToolBlock =
               activeBlockType !== 'tool_use' ||
               activeBlockIndex === null ||
-              (toolCallId !== undefined && toolCallId !== activeToolCallId);
+              // Empty IDs identify continuation chunks; coerce explicitly to keep this boolean.
+              (Boolean(toolCallId) && toolCallId !== activeToolCallId);
 
             if (shouldStartToolBlock) {
               if (!toolCallId) {

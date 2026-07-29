@@ -1,6 +1,6 @@
 /**
- * Tests for enforceContextLimitForRoute — the thin bridge helper that gates
- * the inference-v2 / beta / pi path against context-window limits.
+ * Tests for enforceContextLimitForRoute — the thin bridge helper that gates a
+ * context-shaped request against context-window limits.
  *
  * TDD: these tests were written BEFORE the implementation (RED), then the
  * helper was added to enforce-limits.ts (GREEN).
@@ -9,12 +9,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { Context } from '@earendil-works/pi-ai';
 import type { ModelConfig } from '../../config';
-import { ModelMetadataManager } from '../model-metadata-manager';
+import { ModelMetadataManager } from '../models/model-metadata-manager';
 import {
   ContextLengthExceededError,
   enforceContextLimitForRoute,
   type EnforceRouteInfo,
-} from '../enforce-limits';
+} from '../models/enforce-limits';
 
 // ---------------------------------------------------------------------------
 // Helpers

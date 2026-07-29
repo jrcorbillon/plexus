@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from 'vitest';
-import { StickySessionManager } from '../sticky-session-manager';
+import { StickySessionManager } from '../routing/sticky-session-manager';
 import type { UnifiedChatRequest } from '../../types/unified';
 
 function mgr() {
@@ -91,28 +91,43 @@ describe('StickySessionManager get/set', () => {
   beforeEach(() => mgr());
 
   test('returns null for unknown key', () => {
-    expect(mgr().get('alias', 'k')).toBeNull();
+    expect(mgr().get('alias', 'chat', 'k')).toBeNull();
   });
 
   test('round-trips provider/model', () => {
     const m = mgr();
-    m.set('alias', 'k', 'prov', 'mod');
-    expect(m.get('alias', 'k')).toEqual({ provider: 'prov', model: 'mod' });
+    m.set('alias', 'chat', 'k', 'prov', 'mod');
+    expect(m.get('alias', 'chat', 'k')).toEqual({ provider: 'prov', model: 'mod' });
   });
 
   test('isolates entries by alias', () => {
     const m = mgr();
-    m.set('aliasA', 'k', 'provA', 'modA');
-    m.set('aliasB', 'k', 'provB', 'modB');
-    expect(m.get('aliasA', 'k')).toEqual({ provider: 'provA', model: 'modA' });
-    expect(m.get('aliasB', 'k')).toEqual({ provider: 'provB', model: 'modB' });
+    m.set('aliasA', 'chat', 'k', 'provA', 'modA');
+    m.set('aliasB', 'chat', 'k', 'provB', 'modB');
+    expect(m.get('aliasA', 'chat', 'k')).toEqual({ provider: 'provA', model: 'modA' });
+    expect(m.get('aliasB', 'chat', 'k')).toEqual({ provider: 'provB', model: 'modB' });
+  });
+
+  test('isolates entries by API type and subtype', () => {
+    const m = mgr();
+    m.set('alias', 'responses', 'k', 'provResponses', 'modelResponses');
+    m.set('alias', 'responses:lite', 'k', 'provLite', 'modelLite');
+
+    expect(m.get('alias', 'responses', 'k')).toEqual({
+      provider: 'provResponses',
+      model: 'modelResponses',
+    });
+    expect(m.get('alias', 'responses:lite', 'k')).toEqual({
+      provider: 'provLite',
+      model: 'modelLite',
+    });
   });
 
   test('set overwrites existing entry', () => {
     const m = mgr();
-    m.set('alias', 'k', 'p1', 'm1');
-    m.set('alias', 'k', 'p2', 'm2');
-    expect(m.get('alias', 'k')).toEqual({ provider: 'p2', model: 'm2' });
+    m.set('alias', 'chat', 'k', 'p1', 'm1');
+    m.set('alias', 'chat', 'k', 'p2', 'm2');
+    expect(m.get('alias', 'chat', 'k')).toEqual({ provider: 'p2', model: 'm2' });
     expect(m.size()).toBe(1);
   });
 
@@ -122,14 +137,14 @@ describe('StickySessionManager get/set', () => {
     // re-`get` followed by adding many entries keeps the touched entry alive
     // longer than an untouched one of the same age.
     const m = mgr();
-    m.set('alias', 'old-untouched', 'p', 'm1');
-    m.set('alias', 'old-touched', 'p', 'm2');
+    m.set('alias', 'chat', 'old-untouched', 'p', 'm1');
+    m.set('alias', 'chat', 'old-touched', 'p', 'm2');
     // Touch the second entry, moving it to the tail.
-    expect(m.get('alias', 'old-touched')).not.toBeNull();
+    expect(m.get('alias', 'chat', 'old-touched')).not.toBeNull();
     // Both are still present here; the meaningful guarantee is verified at
     // the implementation level. Sanity check that recency refresh doesn't
     // drop the entry.
-    expect(m.get('alias', 'old-touched')).not.toBeNull();
-    expect(m.get('alias', 'old-untouched')).not.toBeNull();
+    expect(m.get('alias', 'chat', 'old-touched')).not.toBeNull();
+    expect(m.get('alias', 'chat', 'old-untouched')).not.toBeNull();
   });
 });

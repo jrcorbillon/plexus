@@ -38,6 +38,7 @@ export const providers = sqliteTable(
     gpuFlopsTflop: real('gpu_flops_tflop'), // FLOPS in TFLOP
     gpuPowerDrawWatts: integer('gpu_power_draw_watts'), // Power draw in watts
     adapter: text('adapter'), // JSON: string[] — provider-level adapter names
+    autoCompat: integer('auto_compat').notNull().default(0), // Enable pi-ai registry-aware compatibility mapping
     timeoutMs: integer('timeout_ms'), // Per-provider upstream request timeout in ms (NULL = use global default)
     // Per-provider stall detection overrides (NULL = use global setting)
     stallTtfbMs: integer('stall_ttfb_ms'), // TTFB timeout in ms
@@ -47,6 +48,7 @@ export const providers = sqliteTable(
     stallGracePeriodMs: integer('stall_grace_period_ms'), // Grace period in ms before throughput enforcement
     maxConcurrency: integer('max_concurrency'), // Max concurrent requests for this provider (NULL = no limit)
     piAiProvider: text('pi_ai_provider'), // pi-ai provider name (e.g. 'anthropic', 'openai', 'google')
+    rawPassthrough: text('raw_passthrough'), // JSON: { enabled, base_url, auth }
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
   },

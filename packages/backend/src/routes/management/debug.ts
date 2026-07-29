@@ -33,7 +33,9 @@ export async function registerDebugRoutes(
         enabledForKey,
         providers: debugManager.getProviderFilter(),
         keys: [scopeKey].filter((key) => debugManager.isKeyDimensionEnabled(key)),
-        aliases: debugManager.getEnabledAliases(),
+        // Alias capture targets are admin-configured global state; limited
+        // callers must not enumerate them (UI also hides alias config).
+        aliases: [],
       });
     }
     return reply.send({

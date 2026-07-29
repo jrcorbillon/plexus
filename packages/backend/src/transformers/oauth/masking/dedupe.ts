@@ -3,22 +3,22 @@
  * `cc-tools.ts`'s `stripDescriptionsAndInjectSyntheticTools()` has run with
  * our own computed `toolRenames` (see `registry.ts`).
  *
- * That injector unconditionally *prepends* a fixed set of synthetic Claude
- * Code tool stubs (Agent, NotebookEdit) to make the tool set fingerprint
- * like a real Claude Code session — required for OAuth masking; Anthropic
- * flags tool sets that don't resemble this list as non-Claude-Code traffic.
- * The injector has no awareness of the caller's actual tools, so if a
- * computed rename happens to target one of those reserved names, the result
- * is two tools with the same name — which Anthropic rejects with `400
- * tools: Tool names must be unique.`
+ * That injector optionally *prepends* synthetic Claude
+ * Code tool stubs from `CC_SYNTHETIC_TOOLS` to make the tool set fingerprint
+ * like a real Claude Code session. The injector has no awareness of the
+ * caller's actual tools, so if a computed rename happens to target one of
+ * those reserved names, the result is two tools with the same name — which
+ * Anthropic rejects with `400 tools: Tool names must be unique.`
  *
  * The registry's shapes are designed to avoid this (each shape only
- * proposes a rename when schema-compatible with the target name), so in
- * practice this should be a no-op; it's kept as a defensive backstop in
- * case a future shape's rename target collides unexpectedly. The synthetic
- * stubs are always inserted before the client's real tools, so keeping the
- * LAST occurrence of each name preserves the client's richer tool
- * definition and drops only the redundant synthetic stub.
+ * proposes a rename when schema-compatible with the target name), and
+ * `CC_SYNTHETIC_TOOLS` is currently empty (stubs the caller cannot execute
+ * were removed), so in practice this should be a no-op; it's kept as a
+ * defensive backstop in case a future shape's rename target collides
+ * unexpectedly. When synthetics are present they are always inserted before
+ * the client's real tools, so keeping the LAST occurrence of each name
+ * preserves the client's richer tool definition and drops only the
+ * redundant synthetic stub.
  *
  * @param body - Parsed JSON request body (already tool-renamed and
  *   synthetic-tool-injected)

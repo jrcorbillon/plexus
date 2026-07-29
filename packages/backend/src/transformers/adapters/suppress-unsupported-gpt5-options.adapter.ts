@@ -9,7 +9,9 @@ const GPT5_UNSUPPORTED_OPTIONS = [
   'presence_penalty',
   'logit_bias',
   'truncation',
-  'max_output_tokens',
+  // max_output_tokens is a supported Responses API output cap on direct
+  // OpenAI GPT-5 routes — preserve it. Codex-OAuth still strips token-cap
+  // fields in oauth-native-request.ts because that backend rejects them.
   'max_completion_tokens',
   // Client-only Responses API field some upstreams reject outright (e.g.
   // updated LobeHub sends this on gpt-5.5 traffic; ChatGPT/Codex-OAuth and

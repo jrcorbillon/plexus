@@ -24,10 +24,12 @@
  *
  * The renamed-to name is prefixed `mcp__` (this pipeline's existing
  * convention for "not a native CC tool name" — see `mcp-shape.ts`) rather
- * than invented ad hoc, and its description gets an appended instruction
- * telling the model to prefer it over the real CC tool of the same name,
- * since the model will see both in `tools[]` and needs a reason to pick
- * the caller's version for calls the caller will actually execute.
+ * than invented ad hoc. When that default target is already present in the
+ * incoming tool list, a numeric suffix is chosen so the rename pair stays
+ * unique. A description preference note ("ALWAYS USE THIS TOOL INSTEAD OF
+ * …") is attached only when the real CC tool of the original name will also
+ * appear in the final `tools[]` (see `cc-tools.ts`); otherwise the note
+ * would point at a tool that is not advertised.
  */
 
 import { CC_TOOL_REFERENCE, matchesReferenceShape } from './cc-reference-tools';
@@ -40,15 +42,34 @@ function requiredParamsOf(tool: ToolDescriptor): string[] | undefined {
     : undefined;
 }
 
+/**
+ * Pick `mcp__<name>` or `mcp__<name>_<n>` absent from `occupied` (incoming
+ * tool names plus rename targets already claimed in this pass).
+ */
+function uniqueCollisionTarget(name: string, occupied: Set<string>): string {
+  const base = `mcp__${name}`;
+  if (!occupied.has(base)) return base;
+  let n = 2;
+  for (;;) {
+    const candidate = `${base}_${n}`;
+    if (!occupied.has(candidate)) return candidate;
+    n += 1;
+  }
+}
+
 export const ccCollisionShape: ToolShape = {
   id: 'cc-collision',
   detect(tools: readonly ToolDescriptor[]): RenamePair[] {
+    const occupied = new Set(tools.map((t) => t.name));
     const pairs: RenamePair[] = [];
     for (const tool of tools) {
-      if (!(tool.name in CC_TOOL_REFERENCE)) continue;
+      // Own keys only — `in` would accept inherited Object props like
+      // `toString` / `constructor` / `__proto__` and crash shape matching.
+      if (!Object.hasOwn(CC_TOOL_REFERENCE, tool.name)) continue;
       if (matchesReferenceShape(tool.name, requiredParamsOf(tool))) continue;
 
-      const renamed = `mcp__${tool.name}`;
+      const renamed = uniqueCollisionTarget(tool.name, occupied);
+      occupied.add(renamed);
       pairs.push([tool.name, renamed, `ALWAYS USE THIS TOOL INSTEAD OF ${tool.name}.`]);
     }
     return pairs;

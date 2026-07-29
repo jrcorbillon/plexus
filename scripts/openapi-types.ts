@@ -437,33 +437,33 @@ export interface paths {
     };
     /**
      * Raw GET to a provider
-     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
+     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Authentication is header-only (`Authorization` Bearer, `x-api-key`, or `x-goog-api-key`). The `?key=` query parameter is not accepted on this route. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
      */
     get: operations['rawProviderGet'];
     /**
      * Raw PUT to a provider
-     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
+     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Authentication is header-only (`Authorization` Bearer, `x-api-key`, or `x-goog-api-key`). The `?key=` query parameter is not accepted on this route. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
      */
     put: operations['rawProviderPut'];
     /**
      * Raw POST to a provider
-     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
+     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Authentication is header-only (`Authorization` Bearer, `x-api-key`, or `x-goog-api-key`). The `?key=` query parameter is not accepted on this route. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
      */
     post: operations['rawProviderPost'];
     /**
      * Raw DELETE to a provider
-     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
+     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Authentication is header-only (`Authorization` Bearer, `x-api-key`, or `x-goog-api-key`). The `?key=` query parameter is not accepted on this route. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
      */
     delete: operations['rawProviderDelete'];
     options?: never;
     /**
      * Raw HEAD to a provider
-     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
+     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Authentication is header-only (`Authorization` Bearer, `x-api-key`, or `x-goog-api-key`). The `?key=` query parameter is not accepted on this route. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
      */
     head: operations['rawProviderHead'];
     /**
      * Raw PATCH to a provider
-     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
+     * @description Relays the method, path, query, non-authentication headers, and body to the selected provider without model routing or application-level transformation. Requires both provider `raw_passthrough.enabled` and key `allowRawPassthrough`; the key's provider allow/deny policy also applies. Authentication is header-only (`Authorization` Bearer, `x-api-key`, or `x-goog-api-key`). The `?key=` query parameter is not accepted on this route. Plexus authentication headers are replaced with provider authentication. Upstream status, headers, and body are returned unchanged, with Plexus request/quota metadata added as response headers. Recognized LLM request/response formats are observationally parsed for model, token, cache/reasoning, and cost metadata without altering traffic.
      */
     patch: operations['rawProviderPatch'];
     trace?: never;
@@ -3628,8 +3628,11 @@ export interface paths {
      *     ## Response structure
      *
      *     - `checkerId` — The checker this history is for
-     *     - `meterKey` — The meter filter used (null if no filter)
-     *     - `since` — The timestamp of the earliest sample (null if no `since` filter)
+     *     - `meterKey` — Echo of the `meterKey` query filter; omitted when no filter
+     *       was supplied
+     *     - `since` — Normalized filter cutoff as an ISO-8601 timestamp (absolute
+     *       input or resolved relative `Nd` window); omitted when no `since` filter
+     *       was supplied
      *     - `history` — Array of `QuotaSample` snapshot rows
      *
      *     ## Retention
@@ -4545,12 +4548,15 @@ export interface paths {
     get?: never;
     put?: never;
     /**
-     * TODO - Add summary for POST /v1/completions
-     * @description TODO - Add detailed description.
+     * OpenAI-compatible text completions
+     * @description Drop-in replacement for `POST https://api.openai.com/v1/completions`.
+     *     Accepts the legacy OpenAI Completions request shape (`model`, `prompt`,
+     *     optional `suffix` for fill-in-the-middle, `stream`, etc.).
      *
-     *     **Admin only** — limited principals receive 403.
+     *     Requests are routed through configured aliases and may be transformed to
+     *     the target provider's native format (chat, messages, Gemini, or Responses).
      */
-    post: operations['postV0v1_completions'];
+    post: operations['postV1Completions'];
     delete?: never;
     options?: never;
     head?: never;
@@ -4567,12 +4573,14 @@ export interface paths {
     get?: never;
     put?: never;
     /**
-     * TODO - Add summary for POST /completions
-     * @description TODO - Add detailed description.
+     * OpenAI-compatible text completions (unversioned alias)
+     * @description Alias for `POST /v1/completions`. Same handler, auth, request body, and
+     *     response behaviour.
      *
-     *     **Admin only** — limited principals receive 403.
+     *     Authenticated with a Plexus inference key (`PlexusApiKey`), not the
+     *     management `x-admin-key`.
      */
-    post: operations['postV0completions'];
+    post: operations['postCompletions'];
     delete?: never;
     options?: never;
     head?: never;
@@ -4587,12 +4595,10 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * TODO - Add summary for GET /healthz
-     * @description TODO - Add detailed description.
-     *
-     *     **Admin only** — limited principals receive 403.
+     * Health check (JSON)
+     * @description Returns `{ "ok": true }` while the process is accepting traffic. Public unauthenticated probe (alongside `GET /health`).
      */
-    get: operations['getV0healthz'];
+    get: operations['getHealthz'];
     put?: never;
     post?: never;
     delete?: never;
@@ -5227,6 +5233,11 @@ export interface components {
                         options?: {
                           [key: string]: unknown;
                         };
+                        /**
+                         * @description Set to `false` to remove earlier instances of this adapter, including provider-level and implicitly injected ones. A later entry with `enabled: true` restores it.
+                         * @default true
+                         */
+                        enabled: boolean;
                       }
                   )[];
             };
@@ -5325,7 +5336,18 @@ export interface components {
        *       Messages, OpenAI Responses, and Gemini native).
        *       See [`WebSearchCoercionAdapterOptions`](#/components/schemas/WebSearchCoercionAdapterOptions).
        *
-       *     Pass-through optimisation is automatically disabled when any adapter is active.
+       *     - `normalize_anthropic_tool_ids` — Rewrites `tool_use` / `tool_result`
+       *       identifiers that violate Anthropic's tool-id charset
+       *       `^[a-zA-Z0-9_-]+$` (e.g. Moonshot's `functions.WebSearch:3`), which
+       *       Anthropic rejects with a hard HTTP 400. Injected automatically when the
+       *       route's outbound wire format is Anthropic Messages AND the provider
+       *       looks Anthropic (base URL containing `anthropic.com`, Anthropic OAuth,
+       *       or Claude masking). Override per provider or model with
+       *       `{ name: 'normalize_anthropic_tool_ids', options: {}, enabled: true }`
+       *       to force it on for an Anthropic-compatible gateway hosted elsewhere, or
+       *       `{ name: 'normalize_anthropic_tool_ids', enabled: false }` to opt out.
+       *
+       *     Adapters run on the outbound body whether or not the pass-through optimisation is active — a same-format request skips the transformer, but its body is still cloned, given the target model and the provider/model config fields, and run through the adapter chain before dispatch.
        */
       adapter?:
         | string
@@ -5338,6 +5360,11 @@ export interface components {
                 options?: {
                   [key: string]: unknown;
                 };
+                /**
+                 * @description Set to `false` to remove earlier instances of this adapter, including implicitly injected defaults. A later entry with `enabled: true` restores it.
+                 * @default true
+                 */
+                enabled: boolean;
               }
           )[];
       /** @description Optional per-provider upstream request timeout in milliseconds. When omitted, Plexus uses the global timeout from `/v0/management/config/timeout`. */
@@ -5462,6 +5489,16 @@ export interface components {
        * @default false
        */
       sticky_session: boolean;
+      /**
+       * @description Number of full alias retry rounds when all targets fail in a round. Each round re-resolves candidates.
+       * @default 1
+       */
+      max_attempts: number;
+      /**
+       * @description Fixed wait in seconds before starting each subsequent retry round. No delay before the first round.
+       * @default 0
+       */
+      retry_delay_seconds: number;
       /** @description Model metadata strategy. When omitted or set to `auto`, Plexus derives a canonical identity from the alias targets, looks for an exact catalog entry, and falls back to conservative name and modality heuristics. Catalog sources pin a specific entry, `custom` supplies all fields, and `disabled` suppresses enrichment. Overrides win over resolved values. */
       metadata?:
         | {
@@ -5780,9 +5817,9 @@ export interface components {
       /** @description Human-readable label for the meter (e.g. `Five-hour window`). */
       label: string;
       /** @description Optional grouping label for multi-tenant or sub-account setups. */
-      group?: string;
+      group?: string | null;
       /** @description Optional scope qualifier for the meter. */
-      scope?: string;
+      scope?: string | null;
       /**
        * @description What the meter tracks.
        *     - **balance** — A prepaid account balance (unit typically `usd`).
@@ -6241,6 +6278,11 @@ export interface components {
       success?: boolean;
       /** @description Error message when the most recent check failed. Omitted on success. */
       error?: string;
+      /**
+       * Format: date-time
+       * @description ISO-8601 timestamp when this snapshot was captured. Omitted when no prior check result is available.
+       */
+      checkedAt?: string;
       /** @description Current meter readings for this checker (one `Meter` per quota dimension). Empty when the last check failed. */
       meters?: components['schemas']['Meter'][];
     };
@@ -7101,6 +7143,10 @@ export interface operations {
       /** @description Not Modified. The client's cached version is still current based on ETag or Last-Modified. */
       304: {
         headers: {
+          /** @description A SHA-256 hash of the JSON response payload. */
+          ETag?: string;
+          /** @description The date when the response hash last changed. */
+          'Last-Modified'?: string;
           [name: string]: unknown;
         };
         content?: never;
@@ -7145,6 +7191,10 @@ export interface operations {
       /** @description Not Modified. The client's cached version is still current based on ETag or Last-Modified. */
       304: {
         headers: {
+          /** @description A SHA-256 hash of the JSON response payload. */
+          ETag?: string;
+          /** @description The date when the response hash last changed. */
+          'Last-Modified'?: string;
           [name: string]: unknown;
         };
         content?: never;
@@ -8686,6 +8736,13 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description Limited principals cannot access this endpoint. */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
       /** @description Internal server error. */
       500: {
         headers: {
@@ -8726,6 +8783,13 @@ export interface operations {
       };
       /** @description Authentication required or invalid credentials. */
       401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Limited principals cannot access this endpoint. */
+      403: {
         headers: {
           [name: string]: unknown;
         };
@@ -9754,6 +9818,13 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description Authentication required or invalid credentials. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
     };
   };
   getV0ManagementMcpservers: {
@@ -10160,6 +10231,17 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
+      };
+      /** @description MCP server not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            error?: string;
+          };
+        };
       };
     };
   };
@@ -11623,9 +11705,13 @@ export interface operations {
         content: {
           'application/json': {
             checkerId?: string;
-            meterKey?: string | null;
-            /** Format: date-time */
-            since?: string | null;
+            /** @description Echo of the `meterKey` query filter. Omitted (not null) when no meter filter was supplied. */
+            meterKey?: string;
+            /**
+             * Format: date-time
+             * @description Normalized filter cutoff as ISO-8601. Absolute `since` values are echoed; relative `Nd` values are resolved to a concrete timestamp. Omitted (not null) when no `since` filter was supplied.
+             */
+            since?: string;
             history?: components['schemas']['QuotaSample'][];
           };
         };
@@ -12572,10 +12658,10 @@ export interface operations {
       content: {
         'application/json': {
           /** @constant */
-          jsonrpc?: '2.0';
+          jsonrpc: '2.0';
           id?: string | number;
           /** @description JSON-RPC method, for example `tools/list` or `tools/call`. */
-          method?: string;
+          method: string;
           /** @description Method-specific parameters. */
           params?: Record<string, never>;
         };
@@ -12782,21 +12868,47 @@ export interface operations {
       };
     };
   };
-  postV0v1_completions: {
+  postV1Completions: {
     parameters: {
       query?: never;
       header?: never;
       path?: never;
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Alias or `provider/model` identifier. */
+          model: string;
+          /** @description Prompt text, or an array of prompt strings joined with newlines. */
+          prompt: string | string[];
+          /** @description Optional suffix enabling fill-in-the-middle completion. */
+          suffix?: string;
+          /** @description When true, response is Server-Sent Events. */
+          stream?: boolean;
+          echo?: boolean;
+          max_tokens?: number;
+          temperature?: number;
+        } & {
+          [key: string]: unknown;
+        };
+      };
+    };
     responses: {
-      /** @description Successful response. */
+      /**
+       * @description A non-streamed JSON Completions response or, when `stream: true`,
+       *     a `text/event-stream` of Completions deltas.
+       */
       200: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': {
+            [key: string]: unknown;
+          };
+          'text/event-stream': string;
+        };
       };
       /** @description Authentication required or invalid credentials. */
       401: {
@@ -12805,8 +12917,8 @@ export interface operations {
         };
         content?: never;
       };
-      /** @description Resource not found. */
-      404: {
+      /** @description Quota exceeded. */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -12814,21 +12926,47 @@ export interface operations {
       };
     };
   };
-  postV0completions: {
+  postCompletions: {
     parameters: {
       query?: never;
       header?: never;
       path?: never;
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Alias or `provider/model` identifier. */
+          model: string;
+          /** @description Prompt text, or an array of prompt strings joined with newlines. */
+          prompt: string | string[];
+          /** @description Optional suffix enabling fill-in-the-middle completion. */
+          suffix?: string;
+          /** @description When true, response is Server-Sent Events. */
+          stream?: boolean;
+          echo?: boolean;
+          max_tokens?: number;
+          temperature?: number;
+        } & {
+          [key: string]: unknown;
+        };
+      };
+    };
     responses: {
-      /** @description Successful response. */
+      /**
+       * @description A non-streamed JSON Completions response or, when `stream: true`,
+       *     a `text/event-stream` of Completions deltas.
+       */
       200: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': {
+            [key: string]: unknown;
+          };
+          'text/event-stream': string;
+        };
       };
       /** @description Authentication required or invalid credentials. */
       401: {
@@ -12837,8 +12975,8 @@ export interface operations {
         };
         content?: never;
       };
-      /** @description Resource not found. */
-      404: {
+      /** @description Quota exceeded. */
+      429: {
         headers: {
           [name: string]: unknown;
         };
@@ -12846,7 +12984,7 @@ export interface operations {
       };
     };
   };
-  getV0healthz: {
+  getHealthz: {
     parameters: {
       query?: never;
       header?: never;
@@ -12855,22 +12993,20 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Successful response. */
+      /** @description Server is healthy. */
       200: {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
-      };
-      /** @description Authentication required or invalid credentials. */
-      401: {
-        headers: {
-          [name: string]: unknown;
+        content: {
+          'application/json': {
+            /** @constant */
+            ok: true;
+          };
         };
-        content?: never;
       };
-      /** @description Resource not found. */
-      404: {
+      /** @description Bad request. */
+      400: {
         headers: {
           [name: string]: unknown;
         };

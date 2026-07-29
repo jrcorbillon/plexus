@@ -95,8 +95,8 @@ describe('Speech Route Debug Logging', () => {
     debugManager.setEnabled(wasDebugEnabled);
   });
 
-  it('captures the incoming request text (input) for TTS in the debug log', async () => {
-    const testInput = 'Verify that this exact text is captured in the debug log!';
+  it('logs metadata only and redacts speech input/instructions', async () => {
+    const testInput = 'Verify that this exact text is NOT captured in the debug log!';
 
     const response = await fastify.inject({
       method: 'POST',
@@ -109,6 +109,7 @@ describe('Speech Route Debug Logging', () => {
         model: 'gpt-4o-mini-tts',
         input: testInput,
         voice: 'alloy',
+        instructions: 'Speak slowly and clearly',
         response_format: 'mp3',
       },
     });
@@ -125,8 +126,10 @@ describe('Speech Route Debug Logging', () => {
     expect(debugLog.rawRequest.model).toBe('gpt-4o-mini-tts');
     expect(debugLog.rawRequest.voice).toBe('alloy');
     expect(debugLog.rawRequest.inputLength).toBe(testInput.length);
+    expect(debugLog.rawRequest.instructions).toBe('(provided)');
 
-    // CRITICAL: Ensure the input text itself is captured
-    expect(debugLog.rawRequest.input).toBe(testInput);
+    // CRITICAL: Ensure the speech text itself is NOT captured
+    expect(debugLog.rawRequest.input).toBeUndefined();
+    expect(JSON.stringify(debugLog)).not.toContain(testInput);
   });
 });

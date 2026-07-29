@@ -69,4 +69,21 @@ describe('injectClaudeCodeIdentity — non-mutation', () => {
     expect(content).toContain('<system-reminder>');
     expect(content).toContain('hello');
   });
+
+  it('hashes the billing header from the post-relocation first user text', () => {
+    const withSystem = injectClaudeCodeIdentity({
+      system: [{ type: 'text', text: 'caller system prompt' }],
+      messages: [{ role: 'user', content: 'hello from the user' }],
+    });
+    const withoutSystem = injectClaudeCodeIdentity({
+      system: [],
+      messages: [{ role: 'user', content: 'hello from the user' }],
+    });
+
+    // Relocation prepends <system-reminder>, so indices used by the build
+    // hash differ from the bare user text when system content was present.
+    expect(withSystem.system[0].text).not.toBe(withoutSystem.system[0].text);
+    expect(withSystem.system[0].text).toMatch(/^x-anthropic-billing-header:/);
+    expect(withoutSystem.system[0].text).toMatch(/^x-anthropic-billing-header:/);
+  });
 });

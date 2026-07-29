@@ -133,6 +133,12 @@ describe('Gemini -> OpenAI stream regression', () => {
       code: 'upstream_malformed_function_call',
     });
     expect(chunks).not.toContain('[DONE]');
+    // Leaked tool-call text must not reach the OpenAI client.
+    expect(
+      chunks.some(
+        (chunk) => chunk !== '[DONE]' && typeof chunk.choices?.[0]?.delta?.content === 'string'
+      )
+    ).toBe(false);
   });
 
   test('preserves upstream function call ids when Gemini provides them', async () => {

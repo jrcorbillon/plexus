@@ -49,6 +49,15 @@ get:
               - count
     '304':
       description: Not Modified. The client's cached version is still current based on ETag or Last-Modified.
+      headers:
+        ETag:
+          schema:
+            type: string
+          description: A SHA-256 hash of the JSON response payload.
+        Last-Modified:
+          schema:
+            type: string
+          description: The date when the response hash last changed.
     '400':
       description: Bad request.
     '503':

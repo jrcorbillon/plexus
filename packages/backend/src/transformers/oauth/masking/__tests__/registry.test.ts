@@ -16,9 +16,32 @@ describe('buildToolRenamePairs', () => {
     expect(pairs).toEqual([['Write', 'mcp__Write', 'ALWAYS USE THIS TOOL INSTEAD OF Write.']]);
   });
 
+  it('does not rename inherited Object property names that are not CC tools', () => {
+    // `in` would match toString/constructor/__proto__; own-key checks must not.
+    for (const name of ['toString', 'constructor', '__proto__']) {
+      expect(buildToolRenamePairs([tool(name, ['x'])])).toEqual([]);
+    }
+  });
+
   it('does not rename a tool whose name collides with a real Claude Code tool and already matches its shape', () => {
     // Genuinely the same tool as real CC's Bash — nothing to disambiguate.
     const tools = [tool('Bash', ['command'])];
+    expect(buildToolRenamePairs(tools)).toEqual([]);
+  });
+
+  it('picks a unique mcp__ target when the default collision name is already present', () => {
+    const tools = [tool('Write', ['filePath', 'content']), tool('mcp__Write', ['x'])];
+    const pairs = buildToolRenamePairs(tools);
+    expect(pairs).toEqual([['Write', 'mcp__Write_2', 'ALWAYS USE THIS TOOL INSTEAD OF Write.']]);
+  });
+
+  it('does not re-rename tools already in mcp__<server>__<tool> form', () => {
+    const tools = [
+      tool('mcp__github__search_users'),
+      tool('mcp__github__get_me'),
+      tool('mcp__github__list_issues'),
+      tool('mcp__github__create_gist'),
+    ];
     expect(buildToolRenamePairs(tools)).toEqual([]);
   });
 

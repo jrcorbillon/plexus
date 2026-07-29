@@ -290,8 +290,18 @@ function adornCodexResponsesBody(body: any): any {
   next.text = { ...(next.text ?? {}), verbosity: next.text?.verbosity ?? 'low' };
   if (next.tool_choice == null) next.tool_choice = 'auto';
   if (next.parallel_tool_calls == null) next.parallel_tool_calls = true;
-  // Token-cap fields are removed by stripUnsupportedGpt5Options (the backend
-  // accepts none).
+  return next;
+}
+
+/**
+ * Codex backend rejects every max-tokens field name. Direct OpenAI GPT-5
+ * Responses keeps `max_output_tokens` (see suppress-unsupported-gpt5-options),
+ * so strip token caps only on this Codex-OAuth path.
+ */
+function stripCodexUnsupportedTokenCaps(payload: Record<string, any>): Record<string, any> {
+  const next = { ...payload };
+  delete next.max_output_tokens;
+  delete next.max_completion_tokens;
   return next;
 }
 
@@ -308,9 +318,10 @@ function prepareCodexOAuthRequest(
 ): PreparedOAuthRequest {
   // Preserve final-path suppression for native CLI pass-through, whose body may
   // be mutated after adapter resolution. All GPT-5 routes receive the same
-  // suppression through the implicit model adapter.
-  const body = stripUnsupportedGpt5Options(
-    passthrough ? nativeBody : adornCodexResponsesBody(nativeBody)
+  // sampling-option suppression through the implicit model adapter; token caps
+  // are Codex-only (direct OpenAI supports max_output_tokens).
+  const body = stripCodexUnsupportedTokenCaps(
+    stripUnsupportedGpt5Options(passthrough ? nativeBody : adornCodexResponsesBody(nativeBody))
   );
 
   const baseUrl = resolveOAuthBaseUrl('openai-codex' as OAuthProvider, modelId);

@@ -425,6 +425,9 @@ describe('transformGeminiStream', () => {
       message: expect.stringContaining('please retry your request'),
     });
     expect(chunks.some((chunk) => chunk.finish_reason === 'malformed_function_call')).toBe(false);
+    // Leaked tool-call text must not reach clients before the error.
+    expect(chunks.some((chunk) => typeof chunk.delta?.content === 'string')).toBe(false);
+    expect(chunks.some((chunk) => chunk.event === 'text_delta')).toBe(false);
   });
 
   test('should handle usage-only chunk (no candidate)', async () => {

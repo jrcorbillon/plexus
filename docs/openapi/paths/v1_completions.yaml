@@ -1,18 +1,70 @@
 post:
   tags:
     - Inference
-  summary: TODO - Add summary for POST /v1/completions
+  summary: OpenAI-compatible text completions
   description: |
-    TODO - Add detailed description.
-    
-    **Admin only** — limited principals receive 403.
-  security:
-    - AdminKey: []
+    Drop-in replacement for `POST https://api.openai.com/v1/completions`.
+    Accepts the legacy OpenAI Completions request shape (`model`, `prompt`,
+    optional `suffix` for fill-in-the-middle, `stream`, etc.).
+
+    Requests are routed through configured aliases and may be transformed to
+    the target provider's native format (chat, messages, Gemini, or Responses).
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          type: object
+          required:
+            - model
+            - prompt
+          properties:
+            model:
+              type: string
+              description: Alias or `provider/model` identifier.
+            prompt:
+              oneOf:
+                - type: string
+                - type: array
+                  items:
+                    type: string
+              description: Prompt text, or an array of prompt strings joined with newlines.
+            suffix:
+              type: string
+              description: Optional suffix enabling fill-in-the-middle completion.
+            stream:
+              type: boolean
+              description: When true, response is Server-Sent Events.
+            echo:
+              type: boolean
+            max_tokens:
+              type: integer
+            temperature:
+              type: number
+          additionalProperties: true
+        examples:
+          simple:
+            summary: Minimal non-streaming call
+            value:
+              model: fast-model
+              prompt: 'def hello():'
   responses:
     '200':
-      description: Successful response.
+      description: |
+        A non-streamed JSON Completions response or, when `stream: true`,
+        a `text/event-stream` of Completions deltas.
+      content:
+        application/json:
+          schema:
+            type: object
+            description: OpenAI Completions response object.
+            additionalProperties: true
+        text/event-stream:
+          schema:
+            type: string
+            description: SSE frames of Completions deltas.
     '401':
       description: Authentication required or invalid credentials.
-    '404':
-      description: Resource not found.
-  operationId: postV0v1_completions
+    '429':
+      description: Quota exceeded.
+  operationId: postV1Completions

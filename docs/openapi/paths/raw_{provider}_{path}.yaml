@@ -21,11 +21,13 @@ get:
     selected provider without model routing or application-level transformation.
     Requires both provider `raw_passthrough.enabled` and key
     `allowRawPassthrough`; the key's provider allow/deny policy also applies.
-    Plexus authentication headers are replaced with provider authentication.
-    Upstream status, headers, and body are returned unchanged, with Plexus
-    request/quota metadata added as response headers.
-    Recognized LLM request/response formats are observationally parsed for
-    model, token, cache/reasoning, and cost metadata without altering traffic.
+    Authentication is header-only (`Authorization` Bearer, `x-api-key`, or
+    `x-goog-api-key`). The `?key=` query parameter is not accepted on this
+    route. Plexus authentication headers are replaced with provider
+    authentication. Upstream status, headers, and body are returned unchanged,
+    with Plexus request/quota metadata added as response headers. Recognized
+    LLM request/response formats are observationally parsed for model, token,
+    cache/reasoning, and cost metadata without altering traffic.
   security: &rawSecurity
     - PlexusApiKey: []
   responses: &rawResponses

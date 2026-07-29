@@ -31,6 +31,9 @@ post:
         schema:
           type: object
           description: JSON-RPC 2.0 request envelope.
+          required:
+            - jsonrpc
+            - method
           properties:
             jsonrpc:
               type: string

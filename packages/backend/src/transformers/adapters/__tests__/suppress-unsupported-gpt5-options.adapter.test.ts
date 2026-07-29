@@ -18,7 +18,25 @@ describe('suppressUnsupportedGpt5OptionsAdapter', () => {
       max_completion_tokens: 10,
     });
 
-    expect(payload).toEqual({ model: 'gpt-5.2', input: 'hello' });
+    // max_output_tokens is a supported Responses output cap — preserve it.
+    // max_completion_tokens remains stripped (Chat Completions name rejected
+    // on several GPT-5 Responses upstreams).
+    expect(payload).toEqual({ model: 'gpt-5.2', input: 'hello', max_output_tokens: 10 });
+  });
+
+  it('preserves caller-specified max_output_tokens', () => {
+    const payload = suppressUnsupportedGpt5OptionsAdapter.preDispatch({
+      model: 'gpt-5.2',
+      input: 'hello',
+      max_output_tokens: 256,
+      temperature: 0.5,
+    });
+
+    expect(payload).toEqual({
+      model: 'gpt-5.2',
+      input: 'hello',
+      max_output_tokens: 256,
+    });
   });
 
   // Updated LobeHub sends safety_identifier on gpt-5.5 traffic; some

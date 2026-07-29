@@ -34,4 +34,13 @@ get:
                 description: Timestamped log lines, oldest first.
     '401':
       description: Authentication required or invalid credentials.
+    '404':
+      description: MCP server not found.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
   operationId: getV0ManagementMcpServersByServerNameProcessLogs

@@ -42,10 +42,15 @@ export function reverseToolRenames(text: string, pairs: readonly RenamePair[]): 
   let result = text;
   for (const [orig, renamed] of pairs) {
     const escapedRenamed = escapeForRegex(renamed);
-    result = result.replace(new RegExp(`"name":"${escapedRenamed}"`, 'g'), `"name":"${orig}"`);
+    // Replacer functions — a string replacement would interpret `$&` / `$n`
+    // / `$$` in `orig` if a tool name ever contains `$`.
+    result = result.replace(
+      new RegExp(`"name":"${escapedRenamed}"`, 'g'),
+      () => `"name":"${orig}"`
+    );
     result = result.replace(
       new RegExp(`\\\\"name\\\\":\\\\"${escapedRenamed}\\\\"`, 'g'),
-      `\\"name\\":\\"${orig}\\"`
+      () => `\\"name\\":\\"${orig}\\"`
     );
   }
   return result;

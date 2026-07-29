@@ -184,18 +184,20 @@ export function injectClaudeCodeIdentity(body: any): any {
     userSystemParts.push(txt);
   }
 
-  result.system = [
-    { type: 'text', text: buildBillingHeaderText(body) },
-    { type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT },
-    { type: 'text', text: STATIC_CLAUDE_CODE_PROMPT },
-  ];
-
+  // Relocate caller system content BEFORE building the billing header so
+  // the build-hash fingerprints the first user text actually sent.
   if (userSystemParts.length > 0) {
     const sanitized = sanitizeForwardedSystemPrompt(userSystemParts.join('\n\n'));
     if (sanitized.trim()) {
       result.messages = prependToFirstUserMessage(body.messages, sanitized);
     }
   }
+
+  result.system = [
+    { type: 'text', text: buildBillingHeaderText(result) },
+    { type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT },
+    { type: 'text', text: STATIC_CLAUDE_CODE_PROMPT },
+  ];
 
   return result;
 }

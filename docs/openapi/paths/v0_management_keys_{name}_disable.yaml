@@ -29,4 +29,6 @@ post:
                 type: string
     '400':
       description: The key does not exist or is not time-bound.
+    '401':
+      description: Authentication required or invalid credentials.
   operationId: postV0ManagementKeysBynameDisable

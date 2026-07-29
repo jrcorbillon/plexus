@@ -97,8 +97,13 @@ export async function registerSpeechRoute(
       DebugManager.getInstance().startLog(
         requestId,
         {
-          ...body,
+          model: body.model,
+          voice: body.voice,
           inputLength: body.input?.length || 0,
+          response_format: body.response_format,
+          speed: body.speed,
+          stream_format: body.stream_format,
+          instructions: body.instructions ? '(provided)' : undefined,
         },
         sanitizeHeaders(request.headers as any)
       );

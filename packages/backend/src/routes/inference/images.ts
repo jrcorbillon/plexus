@@ -80,7 +80,11 @@ export async function registerImagesRoute(
       DebugManager.getInstance().startLog(
         requestId,
         {
-          ...body,
+          model: body.model,
+          prompt: body.prompt?.substring(0, 100),
+          n: body.n,
+          size: body.size,
+          response_format: body.response_format,
         },
         sanitizeHeaders(request.headers as any)
       );

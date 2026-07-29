@@ -33,27 +33,22 @@ describe('applyClaudeCodeMasking (regression: debug trace 17404760-e986-49b3-8a2
     expect(uniqueNames.size).toBe(names.length);
   });
 
-  it('injects the synthetic Claude Code tools (Agent, NotebookEdit) with no collision', () => {
+  it('does not inject Agent/NotebookEdit stubs the caller cannot handle', () => {
     const { payload } = applyClaudeCodeMasking(JSON.stringify(buildPiAiOutputFixture()));
     const names: string[] = payload.tools.map((t: any) => t.name);
 
-    // Agent/NotebookEdit have no client-side collision and survive.
-    expect(names).toContain('Agent');
-    expect(names).toContain('NotebookEdit');
+    // Same rationale as the removed Glob/Grep/TodoRead stubs: advertising
+    // tools without a client handler yields unexecutable tool_use calls.
+    expect(names).not.toContain('Agent');
+    expect(names).not.toContain('NotebookEdit');
 
-    // Glob/Grep/TodoRead are no longer injected as synthetic stubs — real
-    // Claude Code stopped sending these (confirmed against a genuine
-    // on-the-wire capture), so padding them in caused clients whose own
-    // tool surface lacks Grep/Glob to receive tool_use calls for tools they
-    // never registered a handler for. The fixture's own Glob/Grep tools
-    // (which our pipeline also leaves untouched — see the "stale-collision"
-    // test below) still exist exactly once each, unaffected.
+    // Fixture's own Glob/Grep tools still exist exactly once each.
     expect(names.filter((n) => n === 'Glob')).toHaveLength(1);
     expect(names.filter((n) => n === 'Grep')).toHaveLength(1);
     expect(names).not.toContain('TodoRead');
 
-    // 161 fixture tools + 2 synthetic (Agent, NotebookEdit) - 0 collisions = 163.
-    expect(payload.tools).toHaveLength(buildFixtureTools().length + 2);
+    // 161 fixture tools + 0 synthetic stubs.
+    expect(payload.tools).toHaveLength(buildFixtureTools().length);
   });
 
   it('renames MCP-server tools to the mcp__<server>__<tool> convention, clustered per server', () => {
@@ -104,11 +99,13 @@ describe('applyClaudeCodeMasking (regression: debug trace 17404760-e986-49b3-8a2
     expect(names).toContain('TodoWrite');
   });
 
-  it('renames a real-CC-name collision with an incompatible shape and appends a preference note', () => {
+  it('renames a real-CC-name collision with an incompatible shape without a false preference note', () => {
     // Fixture's Edit/Read/Write/WebFetch/Skill carry opencode's own argument
     // shape (camelCase, or a differing required set) even though pi-ai
     // capitalized their names to match real CC's — the exact "same name,
     // different shape" collision cc-collision-shape.ts exists to catch.
+    // No real CC twin is retained in tools[], so the description must stay
+    // blank rather than claiming "INSTEAD OF <original>".
     const { payload } = applyClaudeCodeMasking(JSON.stringify(buildPiAiOutputFixture()));
     const toolsByName = new Map(payload.tools.map((t: any) => [t.name, t]));
 
@@ -121,10 +118,21 @@ describe('applyClaudeCodeMasking (regression: debug trace 17404760-e986-49b3-8a2
     ]) {
       expect(toolsByName.has(original)).toBe(false);
       expect(toolsByName.has(renamed)).toBe(true);
-      expect((toolsByName.get(renamed) as any).description).toBe(
-        `ALWAYS USE THIS TOOL INSTEAD OF ${original}.`
-      );
+      expect((toolsByName.get(renamed) as any).description).toBe('');
     }
+  });
+
+  it('injects metadata.user_id with the Claude Code device_id/session_id shape', () => {
+    const { payload } = applyClaudeCodeMasking(JSON.stringify(buildPiAiOutputFixture()));
+
+    expect(typeof payload.metadata?.user_id).toBe('string');
+    const parsed = JSON.parse(payload.metadata.user_id as string);
+    expect(parsed).toEqual({
+      device_id: expect.stringMatching(/^[0-9a-f]{64}$/),
+      session_id: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      ),
+    });
   });
 
   it('replaces system[] with the genuine 3-block Claude Code shape', () => {

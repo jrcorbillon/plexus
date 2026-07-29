@@ -1,18 +1,24 @@
 get:
   tags:
-    - Management
-  summary: TODO - Add summary for GET /healthz
-  description: |
-    TODO - Add detailed description.
-    
-    **Admin only** — limited principals receive 403.
-  security:
-    - AdminKey: []
+    - Health
+  summary: Health check (JSON)
+  description: >-
+    Returns `{ "ok": true }` while the process is accepting traffic. Public
+    unauthenticated probe (alongside `GET /health`).
+  security: []
   responses:
     '200':
-      description: Successful response.
-    '401':
-      description: Authentication required or invalid credentials.
-    '404':
-      description: Resource not found.
-  operationId: getV0healthz
+      description: Server is healthy.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - ok
+            properties:
+              ok:
+                type: boolean
+                const: true
+    '400':
+      description: Bad request.
+  operationId: getHealthz

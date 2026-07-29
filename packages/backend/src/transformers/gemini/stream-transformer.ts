@@ -92,6 +92,43 @@ export function transformGeminiStream(stream: ReadableStream): ReadableStream {
             if (!candidate) return;
 
             const malformedFunctionCall = detectGeminiMalformedFunctionCall(data);
+            // Fail before emitting any parts: the MALFORMED_FUNCTION_CALL
+            // terminal frame often carries leaked tool-call text that clients
+            // must never consume before the retryable error.
+            if (malformedFunctionCall) {
+              if (activeBlockType) {
+                const endEvent = {
+                  id: data.responseId,
+                  model: data.modelVersion,
+                  created: Date.now(),
+                  event: `${activeBlockType}_end` as StreamBlockEventType,
+                  delta: {},
+                };
+                logger.silly(
+                  `Gemini Transformer: Enqueueing unified chunk (${activeBlockType}_end)`,
+                  endEvent
+                );
+                controller.enqueue(endEvent);
+                activeBlockType = null;
+              }
+
+              controller.enqueue({
+                id: data.responseId,
+                model: data.modelVersion,
+                created: Date.now(),
+                event: 'error' as StreamBlockEventType,
+                delta: {},
+                error: {
+                  statusCode: malformedFunctionCall.statusCode,
+                  code: malformedFunctionCall.code,
+                  message: malformedFunctionCall.message,
+                },
+              });
+              messageHasFunctionCalls = false;
+              streamedToolCallCount = 0;
+              return;
+            }
+
             const parts = candidate.content?.parts || [];
 
             // Emit message_start on first valid candidate (even if parts is empty)
@@ -252,24 +289,6 @@ export function transformGeminiStream(stream: ReadableStream): ReadableStream {
                 );
                 controller.enqueue(endEvent);
                 activeBlockType = null;
-              }
-
-              if (malformedFunctionCall) {
-                controller.enqueue({
-                  id: data.responseId,
-                  model: data.modelVersion,
-                  created: Date.now(),
-                  event: 'error' as StreamBlockEventType,
-                  delta: {},
-                  error: {
-                    statusCode: malformedFunctionCall.statusCode,
-                    code: malformedFunctionCall.code,
-                    message: malformedFunctionCall.message,
-                  },
-                });
-                messageHasFunctionCalls = false;
-                streamedToolCallCount = 0;
-                return;
               }
 
               // Determine finish reason: if there are function calls, use the OpenAI-compatible

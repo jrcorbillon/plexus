@@ -29,8 +29,11 @@ get:
     ## Response structure
 
     - `checkerId` — The checker this history is for
-    - `meterKey` — The meter filter used (null if no filter)
-    - `since` — The timestamp of the earliest sample (null if no `since` filter)
+    - `meterKey` — Echo of the `meterKey` query filter; omitted when no filter
+      was supplied
+    - `since` — Normalized filter cutoff as an ISO-8601 timestamp (absolute
+      input or resolved relative `Nd` window); omitted when no `since` filter
+      was supplied
     - `history` — Array of `QuotaSample` snapshot rows
 
     ## Retention
@@ -68,14 +71,18 @@ get:
               checkerId:
                 type: string
               meterKey:
-                type:
-                  - string
-                  - 'null'
+                type: string
+                description: >
+                  Echo of the `meterKey` query filter. Omitted (not null) when
+                  no meter filter was supplied.
               since:
-                type:
-                  - string
-                  - 'null'
+                type: string
                 format: date-time
+                description: >
+                  Normalized filter cutoff as ISO-8601. Absolute `since` values
+                  are echoed; relative `Nd` values are resolved to a concrete
+                  timestamp. Omitted (not null) when no `since` filter was
+                  supplied.
               history:
                 type: array
                 items:

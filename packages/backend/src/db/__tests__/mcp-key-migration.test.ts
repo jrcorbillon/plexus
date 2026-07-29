@@ -87,4 +87,53 @@ describe('MCP key migration', () => {
       Authorization: 'Bearer legacy-secret',
     });
   });
+
+  it('removes every case-variant of the migrated auth header', async () => {
+    const timestamp = Date.now();
+    await db.insert(schema.mcpServers).values({
+      name: 'case-dupes',
+      upstreamUrl: 'https://example.com/mcp',
+      enabled: toDbBoolean(true),
+      headers: encrypt(
+        JSON.stringify({
+          'X-Api-Key': 'primary-secret',
+          'x-api-key': 'duplicate-secret',
+          Accept: 'application/json',
+        })
+      ),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    expect(await runMcpKeyMigration()).toBe(1);
+
+    const [server] = await db.select().from(schema.mcpServers);
+    const keys = await db.select().from(schema.mcpKeys);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]!.key).toBe('primary-secret');
+    expect(server!.authScheme).toBe('x-api-key');
+    expect(decryptJson(server!.headers)).toEqual({ Accept: 'application/json' });
+  });
+
+  it('does not insert duplicate keys when migration runs concurrently', async () => {
+    const timestamp = Date.now();
+    await db.insert(schema.mcpServers).values({
+      name: 'concurrent',
+      upstreamUrl: 'https://example.com/mcp',
+      enabled: toDbBoolean(true),
+      headers: encrypt(JSON.stringify({ Authorization: 'Bearer concurrent-secret' })),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const results = await Promise.all([runMcpKeyMigration(), runMcpKeyMigration()]);
+    expect(results.reduce((sum, count) => sum + count, 0)).toBe(1);
+
+    const keys = await db.select().from(schema.mcpKeys);
+    const [server] = await db.select().from(schema.mcpServers);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]!.key).toBe('concurrent-secret');
+    expect(server!.authScheme).toBe('bearer');
+    expect(server!.headers).toBeNull();
+  });
 });

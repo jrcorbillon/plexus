@@ -67,4 +67,10 @@ describe('reverseToolRenames', () => {
     const input = '{"type":"tool_use","name":"mcp__server.name+1__weird_tool"}';
     expect(reverseToolRenames(input, specialPairs)).toBe('{"type":"tool_use","name":"weird_tool"}');
   });
+
+  it('does not interpret $ sequences in the original tool name as replace patterns', () => {
+    const dollarPairs: [string, string][] = [['cost$&end', 'mcp__cost']];
+    const input = '{"type":"tool_use","name":"mcp__cost"}';
+    expect(reverseToolRenames(input, dollarPairs)).toBe('{"type":"tool_use","name":"cost$&end"}');
+  });
 });

@@ -13,14 +13,18 @@
  *
  * Fields renamed (confirmed against pi-ai's own Anthropic Messages
  * serializer, `@earendil-works/pi-ai/dist/api/anthropic-messages.js`,
- * `convertMessages()`/`convertTools()`/`buildParams()`):
+ * `convertMessages()`/`convertTools()`/`buildParams()`, plus v1's
+ * `remapOAuthToolNames` for `tool_reference`):
  *   - `tools[].name`
  *   - `tool_choice.name` (when `tool_choice.type === "tool"`)
  *   - assistant message `content[]` blocks with `type === "tool_use"`, `.name`
+ *   - `tool_reference.tool_name` (top-level content blocks and nested
+ *     inside `tool_result.content[]`)
  *
  * NOT renamed (verified unaffected):
  *   - `tool_result` blocks correlate to their originating call by
- *     `tool_use_id` (a call ID), never by tool name.
+ *     `tool_use_id` (a call ID), never by tool name — but nested
+ *     `tool_reference` children inside a result are renamed above.
  *
  * This stage only renames the `name` field. A pair carrying a third element
  * (see `cc-collision-shape.ts`) also needs a description note appended, but
@@ -67,11 +71,35 @@ export function applyToolRenames(body: any, pairs: readonly RenamePair[]): any {
       if (!Array.isArray(msg?.content)) return msg;
       let changed = false;
       const content = msg.content.map((block: any) => {
-        if (block?.type !== 'tool_use') return block;
-        const renamed = renameMap.get(block.name);
-        if (!renamed) return block;
-        changed = true;
-        return { ...block, name: renamed };
+        if (block?.type === 'tool_use') {
+          const renamed = renameMap.get(block.name);
+          if (!renamed) return block;
+          changed = true;
+          return { ...block, name: renamed };
+        }
+
+        if (block?.type === 'tool_reference') {
+          const renamed = renameMap.get(block.tool_name);
+          if (!renamed) return block;
+          changed = true;
+          return { ...block, tool_name: renamed };
+        }
+
+        if (block?.type === 'tool_result' && Array.isArray(block.content)) {
+          let nestedChanged = false;
+          const nestedContent = block.content.map((nested: any) => {
+            if (nested?.type !== 'tool_reference') return nested;
+            const renamed = renameMap.get(nested.tool_name);
+            if (!renamed) return nested;
+            nestedChanged = true;
+            return { ...nested, tool_name: renamed };
+          });
+          if (!nestedChanged) return block;
+          changed = true;
+          return { ...block, content: nestedContent };
+        }
+
+        return block;
       });
       return changed ? { ...msg, content } : msg;
     });

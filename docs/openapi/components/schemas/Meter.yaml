@@ -26,10 +26,14 @@ properties:
     type: string
     description: Human-readable label for the meter (e.g. `Five-hour window`).
   group:
-    type: string
+    type:
+      - string
+      - 'null'
     description: Optional grouping label for multi-tenant or sub-account setups.
   scope:
-    type: string
+    type:
+      - string
+      - 'null'
     description: Optional scope qualifier for the meter.
   kind:
     type: string

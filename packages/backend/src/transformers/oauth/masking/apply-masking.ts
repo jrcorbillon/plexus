@@ -28,9 +28,10 @@
  *   2. `applyToolRenames()` — apply those renames across `tools[]`,
  *      `tool_choice`, and any `tool_use` blocks in message history.
  *   3. `stripDescriptionsAndInjectSyntheticTools()` — strip caller tool
- *      descriptions (fingerprint parity), except collision renames get a
- *      note instructing the model to prefer them over the real CC tool of
- *      their original name; prepend the synthetic Claude Code tool stubs.
+ *      descriptions (fingerprint parity); collision renames only keep an
+ *      "INSTEAD OF" description note when the original CC tool name is still
+ *      present in the final `tools[]`; prepend any synthetic Claude Code
+ *      stubs from `CC_SYNTHETIC_TOOLS` (currently none — see that constant).
  *   4. `dedupeSyntheticToolCollisions()` — defensive backstop for the rare
  *      case a computed rename collides with one of the synthetic names.
  *   5. `injectClaudeCodeIdentity()` — replace `system[]` with the genuine
@@ -81,11 +82,11 @@ export function applyClaudeCodeMasking(payloadStr: string): ClaudeCodeMaskingRes
 
   let payload = applyToolRenames(parsedPayload, toolRenamePairs);
   payload = stripDescriptionsAndInjectSyntheticTools(payload, toolRenamePairs);
-  // A computed rename above may target one of the reserved synthetic tool
-  // names (Agent/NotebookEdit), producing a duplicate Anthropic rejects with
+  // A computed rename above may target a reserved synthetic tool name,
+  // producing a duplicate Anthropic rejects with
   // `400 tools: Tool names must be unique.`. This is a defensive backstop;
   // in practice the tool-fingerprint shapes are designed to avoid it (see
-  // cc-collision-shape.ts).
+  // cc-collision-shape.ts) and CC_SYNTHETIC_TOOLS is currently empty.
   payload = dedupeSyntheticToolCollisions(payload);
   payload = injectClaudeCodeIdentity(payload);
   payload = injectClaudeCodeMetadata(payload);

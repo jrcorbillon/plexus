@@ -44,6 +44,11 @@ export const mcpShape: ToolShape = {
     const byPrefix = new Map<string, string[]>();
 
     for (const tool of tools) {
+      // Already-canonical Claude Code MCP names (`mcp__<server>__<tool>`)
+      // must not be re-clustered: their first underscore splits as
+      // prefix=`mcp`, and four or more of them would be rewritten to
+      // `mcp__mcp___…`.
+      if (tool.name.startsWith('mcp__')) continue;
       const split = firstUnderscoreSplit(tool.name);
       if (!split) continue;
       const list = byPrefix.get(split.prefix) ?? [];

@@ -38,6 +38,12 @@ properties:
   error:
     type: string
     description: Error message when the most recent check failed. Omitted on success.
+  checkedAt:
+    type: string
+    format: date-time
+    description: >
+      ISO-8601 timestamp when this snapshot was captured. Omitted when no
+      prior check result is available.
   meters:
     type: array
     items:

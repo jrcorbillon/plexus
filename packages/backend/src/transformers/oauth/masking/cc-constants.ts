@@ -77,47 +77,24 @@ export const REQUIRED_BETAS: readonly string[] = [
 ];
 
 /**
- * Synthetic Claude Code tool stubs injected into the outgoing `tools[]` so
- * the tool set fingerprints like a real Claude Code session even when the
- * caller's own tool surface doesn't include them. Their schemas are
- * intentionally minimal — the model isn't expected to call these, they only
- * need to exist in the tool list.
+ * Synthetic Claude Code tool stubs optionally injected into the outgoing
+ * `tools[]` so the tool set fingerprints like a real Claude Code session.
+ *
+ * Kept empty on purpose: padding tools the caller does not implement caused
+ * the model to emit `tool_use` calls the originating client cannot execute
+ * (the same failure mode that removed `Glob`/`Grep`/`TodoRead` stubs, and
+ * previously `Agent`/`NotebookEdit`). Callers that already expose a real
+ * CC-shaped `Agent`/`NotebookEdit` keep their own definitions; fingerprint
+ * parity for everyone else comes from system/billing/MCP renaming instead.
  *
  * SOURCE: vendor/eliza's CC_SYNTHETIC_TOOLS (itself ported from
  * proxy.js v2.2.3's inline tool-array insertion).
- * TO UPDATE: a genuine Claude Code session's `tools[]` array contains the
- * full real tool set (see pi-ai's own `claudeCodeTools` list in
- * anthropic-messages.js for the 17 canonical names, sourced from
- * https://cchistory.mariozechner.at/data/prompts-2.1.11.md /
- * https://github.com/badlogic/cchistory) — these are the subset most likely
- * to be MISSING from a third-party client's own tool surface and therefore
- * worth padding in. Add/remove entries here if a captured real CC session's
- * tool list diverges. `Glob`, `Grep`, and `TodoRead` were removed: real
- * Claude Code no longer sends these (confirmed against a genuine on-the-wire
- * capture, see rawrequest.json), so injecting them caused the model to call
- * a tool the real client never registers a handler for.
+ * TO UPDATE: only re-add an entry here if (a) a genuine CC capture still
+ * requires it for fingerprinting AND (b) calls can be translated or the
+ * stub is gated to callers that already register a handler for that name.
  */
 export const CC_SYNTHETIC_TOOLS: readonly {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
-}[] = [
-  {
-    name: 'Agent',
-    description: 'Launch a subagent for complex tasks',
-    input_schema: {
-      type: 'object',
-      properties: { prompt: { type: 'string', description: 'Task description' } },
-      required: ['prompt'],
-    },
-  },
-  {
-    name: 'NotebookEdit',
-    description: 'Edit notebook cells',
-    input_schema: {
-      type: 'object',
-      properties: { notebook_path: { type: 'string' }, cell_index: { type: 'integer' } },
-      required: ['notebook_path'],
-    },
-  },
-];
+}[] = [];

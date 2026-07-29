@@ -18,6 +18,8 @@ get:
             $ref: ../components/schemas/CompactionSettings.yaml
     '401':
       description: Authentication required or invalid credentials.
+    '403':
+      description: Limited principals cannot access this endpoint.
     '500':
       description: Internal server error.
   operationId: getV0ManagementConfigCompaction
@@ -65,6 +67,8 @@ patch:
       description: Invalid request body or compaction configuration.
     '401':
       description: Authentication required or invalid credentials.
+    '403':
+      description: Limited principals cannot access this endpoint.
     '500':
       description: Internal server error.
   operationId: patchV0ManagementConfigCompaction

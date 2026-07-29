@@ -14,10 +14,27 @@ type Command = {
 };
 
 const commands: readonly Command[] = [
+  {
+    label: 'Fetch latest main from origin',
+    cmd: ['git', 'fetch', 'origin', 'main:refs/remotes/origin/main'],
+  },
+  { label: 'Rebase worktree onto origin/main', cmd: ['git', 'rebase', 'origin/main'] },
   { label: 'Trust mise configuration', cmd: ['mise', 'trust'] },
-  { label: 'Install mise-managed tools', cmd: ['mise', 'install'] },
   { label: 'Install Bun dependencies', cmd: ['bun', 'install'] },
   { label: 'Build frontend', cmd: ['bun', 'run', 'build:frontend'] },
+  {
+    label: 'Update Agent Skills',
+    // Using `|| true` to ensure network failures don't crash the worktree setup
+    cmd: ['sh', '-c', 'bunx --bun skills experimental_install || true'],
+  },
+  {
+    label: 'Auto-commit updated skills (if changed)',
+    cmd: [
+      'sh',
+      '-c',
+      'git add .agents/skills/ && git diff-index --quiet HEAD || git commit -m "chore(skills): auto-update agent skills" || true',
+    ],
+  },
 ];
 
 function quoteArg(arg: string): string {

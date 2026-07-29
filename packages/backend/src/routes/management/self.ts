@@ -2,10 +2,12 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import crypto from 'node:crypto';
 import { logger } from '../../utils/logger';
-import { DebugManager } from '../../services/debug-manager';
-import { ConfigService } from '../../services/config-service';
+import { DebugManager } from '../../services/observability/debug-manager';
+import { ConfigService } from '../../services/configuration/config-service';
 import { ConfigRepository } from '../../db/config-repository';
 import { QuotaEnforcer } from '../../services/quota/quota-enforcer';
+import { mostConstrained } from '@plexus/shared';
+import { serializeQuotaSnapshot } from './_quota-response';
 import type { Principal } from './_principal';
 
 const toggleSchema = z.object({
@@ -69,8 +71,9 @@ export async function registerSelfRoutes(fastify: FastifyInstance, quotaEnforcer
       allowedModels: principal.allowedModels,
       excludedProviders: principal.excludedProviders,
       excludedModels: principal.excludedModels,
+      allowRawPassthrough: keyRow?.allowRawPassthrough === true,
+      quotaNames: principal.quotaNames,
       quotaName: principal.quotaName ?? null,
-      beta: keyRow?.beta ?? principal.beta ?? false,
       comment: keyRow?.comment ?? principal.comment ?? null,
       traceEnabled: DebugManager.getInstance().isEnabledForKey(principal.keyName),
       traceEnabledGlobal: DebugManager.getInstance().isEnabled(),
@@ -205,9 +208,17 @@ export async function registerSelfRoutes(fastify: FastifyInstance, quotaEnforcer
       return reply.code(404).send({ error: `Key '${target.keyName}' not found` });
     }
 
-    if (!keyConfig.quota) {
+    // Effective quota-name set: assigned quotas, else default_quotas
+    // (non-stacking substitution — mirrors QuotaEnforcer.loadQuotaContext).
+    const assignedNames =
+      keyConfig.quotas && keyConfig.quotas.length > 0
+        ? keyConfig.quotas
+        : (config.default_quotas ?? []);
+
+    if (assignedNames.length === 0) {
       return reply.send({
         key: target.keyName,
+        quotas: [],
         quotaName: null,
         allowed: true,
         currentUsage: 0,
@@ -224,7 +235,8 @@ export async function registerSelfRoutes(fastify: FastifyInstance, quotaEnforcer
       // as unavailable rather than fabricating numbers.
       return reply.send({
         key: target.keyName,
-        quotaName: keyConfig.quota,
+        quotas: [],
+        quotaName: assignedNames[0] ?? null,
         allowed: true,
         currentUsage: 0,
         limit: null,
@@ -235,11 +247,16 @@ export async function registerSelfRoutes(fastify: FastifyInstance, quotaEnforcer
     }
 
     try {
-      const result = await quotaEnforcer.checkQuota(target.keyName);
+      const ctx = await quotaEnforcer.loadQuotaContext(target.keyName);
+      const checks = ctx?.checks ?? [];
+      const result = mostConstrained(checks);
+      const quotas = checks.map(serializeQuotaSnapshot);
+
       if (!result) {
         return reply.send({
           key: target.keyName,
-          quotaName: keyConfig.quota,
+          quotas,
+          quotaName: assignedNames[0] ?? null,
           allowed: true,
           currentUsage: 0,
           limit: null,
@@ -251,12 +268,13 @@ export async function registerSelfRoutes(fastify: FastifyInstance, quotaEnforcer
 
       return reply.send({
         key: target.keyName,
+        quotas,
         quotaName: result.quotaName,
         allowed: result.allowed,
         currentUsage: result.currentUsage,
         limit: result.limit,
         remaining: result.remaining,
-        resetsAt: result.resetsAt?.toISOString() ?? null,
+        resetsAt: new Date(result.resetsAtMs).toISOString(),
         limitType: result.limitType,
       });
     } catch (err: any) {

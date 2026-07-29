@@ -3,10 +3,10 @@ import Fastify, { FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { setConfigForTesting } from '../../../config';
 import { registerInferenceRoutes } from '../index';
-import { Dispatcher } from '../../../services/dispatcher';
-import { UsageStorageService } from '../../../services/usage-storage';
-import { DebugManager } from '../../../services/debug-manager';
-import { SelectorFactory } from '../../../services/selectors/factory';
+import { Dispatcher } from '../../../services/dispatch/dispatcher';
+import { UsageStorageService } from '../../../services/observability/usage-storage';
+import { DebugManager } from '../../../services/observability/debug-manager';
+import { SelectorFactory } from '../../../services/routing/selectors/factory';
 import FormData from 'form-data';
 
 /**
@@ -221,7 +221,7 @@ describe('Transcriptions Debug Logging', () => {
     expect(debugLog.rawRequest.filename).toBe('test.mp3');
     expect(debugLog.rawRequest.mimeType).toBe('audio/mpeg');
     expect(debugLog.rawRequest.language).toBe('en');
-    expect(debugLog.rawRequest.prompt).toBe('(provided)'); // We log '(provided)' instead of actual prompt
+    expect(debugLog.rawRequest.prompt).toBe('Test prompt');
     expect(debugLog.rawRequest.temperature).toBe(0.5);
 
     // CRITICAL: Binary file should not be in rawRequest

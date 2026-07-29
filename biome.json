@@ -1,5 +1,4 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.0/schema.json",
   "files": {
     "includes": [
       "**",
@@ -13,6 +12,7 @@
       "!!packages/frontend/src/assets/**",
       "!!packages/backend/drizzle/migrations/**",
       "!!packages/backend/drizzle/migrations_pg/**",
+      "!!packages/backend/src/transformers/oauth/__tests__/golden-fixtures/**",
       "!!.claude/**"
     ]
   },

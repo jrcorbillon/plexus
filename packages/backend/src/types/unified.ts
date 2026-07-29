@@ -93,6 +93,12 @@ export interface PlexusMetadata {
   oauthAccount?: string;
   clientHeaders?: Record<string, unknown>;
   plexus_key_policy?: KeyAccessPolicy;
+  /** Attached by attachQuotaContext() (quota-middleware.ts) after the
+   * per-request quota check — read by Dispatcher.applyQuotaFilter() to
+   * narrow candidates around exhausted scoped quotas. `QuotaContext` type
+   * import kept here rather than duplicated; quota-enforcer.ts has no
+   * dependency back on this module. */
+  plexus_quota_context?: import('../services/quota/quota-enforcer').QuotaContext;
 }
 
 export interface UnifiedChatRequest {
@@ -136,14 +142,40 @@ export interface UnifiedChatRequest {
   response_format?: {
     type: 'text' | 'json_object' | 'json_schema';
     json_schema?: any;
+    /**
+     * Structured-output descriptor fields carried from the client (Responses
+     * `text.format.name` / `description` / `strict`) so cross-format
+     * emission preserves the client-supplied values — fabricated fallbacks
+     * (`response_schema`, `strict: true`) apply only when these are absent.
+     */
+    name?: string;
+    description?: string;
+    strict?: boolean;
   };
-  cacheRoutingHeaders?: {
-    session_id?: string;
-    'x-client-request-id'?: string;
-  };
+  prompt?: string | string[];
+  suffix?: string | null;
+  echo?: boolean;
+  logprobs?: number | null;
+  best_of?: number;
+  stop?: string | string[];
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  seed?: number;
+  user?: string;
+  cacheRoutingHeaders?: CacheRoutingHeaders;
+  anthropicBeta?: string;
   incomingApiType?: string;
   originalBody?: any;
   metadata?: Record<string, any> & { plexus_metadata?: PlexusMetadata };
+}
+
+export interface CacheRoutingHeaders {
+  session_id?: string;
+  'x-client-request-id'?: string;
+  'x-session-affinity'?: string;
+  'x-session-id'?: string;
+  'x-prompt-cache-isolation-key'?: string;
+  'x-multi-turn-session-id'?: string;
 }
 
 // Unified Response
@@ -166,6 +198,32 @@ export interface UnifiedUsage {
   reasoning_tokens: number;
   cached_tokens: number;
   cache_creation_tokens: number;
+}
+
+/**
+ * A COMPLETED Responses-API `image_generation_call` output item carried typed
+ * through the unified layer (mirroring how tool_calls are carried) so
+ * same-format (responses -> responses) non-bypass routes can re-emit the
+ * native item instead of a lossy markdown rendering. The typed item always
+ * carries the full base64 `result`, never size-capped.
+ *
+ * UNARY: transformResponse carries images typed ONLY — unified `content`
+ * stays pure authored text, and chat/messages-facing formatters compose the
+ * size-guarded markdown projection themselves from this field (see
+ * transformers/image-rendering.ts) while responses-facing formatters re-emit
+ * the native item with no string surgery.
+ *
+ * STREAMING: transformStream pairs the typed chunk-level carry with the
+ * chat-format markdown rendering on the SAME chunk's `delta.content`;
+ * responses-facing formatStream re-emits the native item and structurally
+ * skips that paired content delta (keyed on the typed items being present on
+ * the chunk — never on string matching).
+ */
+export interface UnifiedImageGenerationCall {
+  id?: string;
+  status?: string;
+  /** Base64 image payload, byte-intact (no inline-size cap at this layer). */
+  result: string;
 }
 
 export interface UnifiedChatResponse {
@@ -206,12 +264,29 @@ export interface UnifiedChatResponse {
       arguments: string;
     };
   }>;
+  /**
+   * Completed image_generation_call output items, typed (see
+   * UnifiedImageGenerationCall). The ONLY carrier of unary image output:
+   * `content` stays pure authored text. Chat/messages-facing formatters
+   * compose their markdown projection from these (see
+   * transformers/image-rendering.ts); responses-facing formatters re-emit
+   * them natively with no string surgery on the text; empty-completion
+   * detection counts entries with a non-empty `result` as visible output.
+   */
+  image_generation_calls?: UnifiedImageGenerationCall[];
   annotations?: Annotation[];
   stream?: ReadableStream | any;
   bypassTransformation?: boolean;
   rawResponse?: any;
   rawStream?: ReadableStream;
   finishReason?: string | null;
+  clientError?: UnifiedClientError;
+}
+
+export interface UnifiedClientError {
+  statusCode: number;
+  code: string;
+  message: string;
 }
 
 /**
@@ -232,6 +307,7 @@ export type StreamBlockEventType =
   | 'message_delta'
   | 'message_end'
   | 'usage'
+  | 'error'
   | 'done';
 
 export interface UnifiedChatStreamChunk {
@@ -261,6 +337,29 @@ export interface UnifiedChatStreamChunk {
   };
   finish_reason?: string | null;
   usage?: UnifiedUsage;
+  error?: UnifiedClientError;
+  /**
+   * Present only on an `event: 'error'` chunk that represents a Responses
+   * API "ended incomplete" outcome (`response.incomplete` — e.g.
+   * max_output_tokens or content_filter cutoff) rather than a hard failure
+   * (`response.failed`). Lets a client-facing `formatStream` render the more
+   * specific incomplete semantics (e.g. Responses' own `response.incomplete`
+   * event, status 'incomplete') instead of a generic failure.
+   */
+  incomplete_details?: { reason: string };
+  /**
+   * Completed image_generation_call items carried typed (see
+   * UnifiedImageGenerationCall), paired with their chat-format markdown
+   * rendering on `delta.content` in the SAME chunk. Deliberately a CHUNK-level
+   * field (not inside `delta`, where tool_calls live): the chat-facing
+   * formatters (openai.ts, ollama.ts) forward `delta` BY REFERENCE into the
+   * client SSE chunk, so a delta-level field would leak the (possibly
+   * multi-megabyte, uncapped) base64 into chat-format wire chunks — top-level
+   * unified-chunk fields are never copied by those formatters. The
+   * responses-facing formatStream re-emits these as native output items and
+   * skips the paired markdown content delta.
+   */
+  image_generation_calls?: UnifiedImageGenerationCall[];
 }
 
 // Unified Embeddings Request

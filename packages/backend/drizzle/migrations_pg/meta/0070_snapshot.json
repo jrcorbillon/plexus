@@ -1,5 +1,5 @@
 {
-  "id": "9ddd4cf3-7ef5-497d-b940-937bff2841e0",
+  "id": "10bb629a-89f6-48d6-aa4e-c87558ce6dd1",
   "prevId": "babd2c10-ad30-447c-95f1-9ed6456ad52b",
   "version": "7",
   "dialect": "postgresql",
@@ -171,6 +171,12 @@
         },
         "quota_name": {
           "name": "quota_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quota_names": {
+          "name": "quota_names",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -2210,7 +2216,7 @@
         "key_name": {
           "name": "key_name",
           "type": "text",
-          "primaryKey": true,
+          "primaryKey": false,
           "notNull": true
         },
         "quota_name": {
@@ -2247,7 +2253,15 @@
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
+      "compositePrimaryKeys": {
+        "quota_state_key_name_quota_name_pk": {
+          "name": "quota_state_key_name_quota_name_pk",
+          "columns": [
+            "key_name",
+            "quota_name"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -2749,20 +2763,6 @@
           "notNull": true,
           "default": false
         },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "retry_delay_seconds": {
-          "name": "retry_delay_seconds",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
         "preferred_api": {
           "name": "preferred_api",
           "type": "jsonb",
@@ -2948,6 +2948,43 @@
         "duration": {
           "name": "duration",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "allowed_models": {
+          "name": "allowed_models",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "allowed_providers": {
+          "name": "allowed_providers",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "excluded_models": {
+          "name": "excluded_models",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "excluded_providers": {
+          "name": "excluded_providers",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "shared": {
+          "name": "shared",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "warn_at": {
+          "name": "warn_at",
+          "type": "real",
           "primaryKey": false,
           "notNull": false
         },

@@ -1,19 +1,21 @@
 import { FastifyInstance } from 'fastify';
 import { logger } from '../../utils/logger';
-import { Dispatcher } from '../../services/dispatcher';
+import { Dispatcher } from '../../services/dispatch/dispatcher';
 import { AnthropicTransformer } from '../../transformers';
-import { UsageStorageService } from '../../services/usage-storage';
+import { UsageStorageService } from '../../services/observability/usage-storage';
 import { UsageRecord } from '../../types/usage';
-import { handleResponse } from '../../services/response-handler';
+import { handleResponse } from '../../services/responses/response-handler';
 import { getClientIp } from '../../utils/ip';
-import { DebugManager } from '../../services/debug-manager';
+import { DebugManager } from '../../services/observability/debug-manager';
 import { QuotaEnforcer } from '../../services/quota/quota-enforcer';
-import { checkQuotaMiddleware } from '../../services/quota/quota-middleware';
+import { checkQuotaMiddleware, attachQuotaContext } from '../../services/quota/quota-middleware';
+import { saveQuotaBlockedUsage, saveQuotaExceededUsage } from './_quota-error';
 import { attachKeyAccessPolicy } from '../../utils/auth';
 import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/timeout';
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
 import { sanitizeHeaders } from '../../utils/sanitize-headers';
-import { handleBetaMessages } from '../../inference-v2';
+import { CLIENT_REQUEST_ID_HEADER, getClientRequestId } from '../../utils/client-request-id';
+import { getCacheRoutingHeaders, getHeaderValue } from '../../utils/cache-routing-headers';
 
 export async function registerMessagesRoute(
   fastify: FastifyInstance,
@@ -26,15 +28,14 @@ export async function registerMessagesRoute(
    * Anthropic Compatible Endpoint.
    */
   fastify.post('/v1/messages', async (request, reply) => {
-    if ((request as any).keyConfig?.beta === true) {
-      return handleBetaMessages(request, reply, { usageStorage, quotaEnforcer });
-    }
-
     const requestId = crypto.randomUUID();
+    const clientRequestId = getClientRequestId(request.headers);
     reply.header('x-request-id', requestId);
+    if (clientRequestId) reply.header(CLIENT_REQUEST_ID_HEADER, clientRequestId);
     const startTime = Date.now();
     let usageRecord: Partial<UsageRecord> = {
       requestId,
+      clientRequestId,
       date: new Date().toISOString(),
       sourceIp: getClientIp(request),
       incomingApiType: 'messages',
@@ -69,6 +70,8 @@ export async function registerMessagesRoute(
       unifiedRequest.incomingApiType = 'messages';
       unifiedRequest.originalBody = body;
       unifiedRequest.requestId = requestId;
+      unifiedRequest.cacheRoutingHeaders = getCacheRoutingHeaders(request.headers);
+      unifiedRequest.anthropicBeta = getHeaderValue(request.headers, 'anthropic-beta');
       unifiedRequest = attachKeyAccessPolicy(request, unifiedRequest);
       const xAppHeader = Array.isArray(request.headers['x-app'])
         ? request.headers['x-app'][0]
@@ -85,12 +88,16 @@ export async function registerMessagesRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(requestId, body, request.headers);
+      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
 
       // Check quota before processing
       if (quotaEnforcer) {
-        const allowed = await checkQuotaMiddleware(request, reply, quotaEnforcer);
-        if (!allowed) return;
+        const quotaCheck = await checkQuotaMiddleware(request, reply, quotaEnforcer);
+        if (!quotaCheck.ok) {
+          saveQuotaBlockedUsage(usageRecord, usageStorage, requestId, startTime);
+          return;
+        }
+        unifiedRequest = attachQuotaContext(unifiedRequest, quotaCheck.context);
       }
 
       const abortController = new AbortController();
@@ -153,6 +160,10 @@ export async function registerMessagesRoute(
           `Request ${requestId}: ${e.message}, usage recorded as ${e?.routingContext?.code === 'upstream_timeout' ? 'timeout' : 'cancelled'}`
         );
         return;
+      }
+      if (e?.routingContext?.code === 'quota_exceeded') {
+        saveQuotaExceededUsage(e, 'messages', usageRecord, usageStorage, requestId, startTime);
+        return reply.code(429).send(e.routingContext.body);
       }
       usageRecord.responseStatus =
         e?.routingContext?.code === 'upstream_timeout' ? 'timeout' : 'error';

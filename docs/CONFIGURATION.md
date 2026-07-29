@@ -1,8 +1,10 @@
 # Configuration
 
+> **Plexus does not support file-based application configuration.** It does not load providers, models, keys, quotas, or settings from YAML, JSON, TOML, or other configuration files. Code examples in this document show request payload shapes only; apply them through the Admin UI or Management API.
+
 Plexus stores all configuration in the database and manages it via the **Admin UI** (recommended) or **Management API**.
 
-**Environment variables** control server-level settings. Everything else (providers, models, keys, quotas) is stored in the database.
+**Environment variables** control server-level settings. Everything else (providers, models, keys, quotas, and settings) is stored in the database.
 
 ---
 
@@ -15,7 +17,7 @@ Plexus stores all configuration in the database and manages it via the **Admin U
 | `ENCRYPTION_KEY` | 32-byte key for encrypting sensitive data at rest. Generated via: `openssl rand -hex 32` | No |
 | `DATA_DIR` | Directory for SQLite database. | No |
 | `LOG_LEVEL` | Verbosity: `error`, `warn`, `info`, `debug`, `silly` | No |
-| `PORT` | HTTP server port. | No |
+| `PORT` | HTTP server port (defaults to 4000; auto-derived from git worktree name when running `bun run dev`). | No |
 | `HOST` | Address to bind to. | No |
 
 ### Quick Start
@@ -60,13 +62,34 @@ For programmatic configuration, use the Management API (`/v0/management/*`). All
 | `GET /v0/management/keys` | List all API keys |
 | `PUT /v0/management/keys/{name}` | Create/update key |
 | `DELETE /v0/management/keys/{name}` | Remove key |
+| `GET /v0/management/debug` | Read in-memory debug capture state |
+| `PATCH /v0/management/debug` | Update in-memory global/key/alias/provider debug capture targets |
 | `GET /v0/management/user-quotas` | List quota definitions |
 | `PUT /v0/management/user-quotas/{name}` | Create/update quota |
 | `DELETE /v0/management/user-quotas/{name}` | Remove quota |
 | `GET /v0/management/config/export` | Export full config as JSON |
 | `PUT /v0/management/config` | Import config (replace all) |
 
-See the [API Reference](/docs/openapi/openapi.yaml) for complete endpoint documentation.
+See the [API Reference](openapi/openapi.yaml) for complete endpoint documentation.
+
+### Debug Trace Capture
+
+Debug trace targeting is runtime-only. `GET /v0/management/debug` returns the
+current in-memory state, and `PATCH /v0/management/debug` can update:
+
+```json
+{
+  "enabled": false,
+  "keys": ["mobile-app"],
+  "aliases": ["gpt-4o-mini"],
+  "providers": ["openai"]
+}
+```
+
+Capture is inclusive: a request is recorded when any enabled dimension matches
+the request key, canonical model alias, selected provider, or global flag. Setting
+`providers` does not filter out global/key/alias capture. `keys`, `aliases`, and
+`providers` can be set to `null` or `[]` to clear that target list.
 
 ---
 
@@ -93,6 +116,8 @@ A **provider** represents an upstream AI service that Plexus routes requests to.
 | **Upstream Timeout** | Per-provider request timeout override in milliseconds. If unset, the global timeout is used. | No |
 | **Disable Cooldown** | Exclude from automatic cooldown on errors | No |
 | **Stall Detection Overrides** | Optional per-provider overrides for TTFB/throughput stall detection. Empty = inherit global setting for that field. | No |
+| **pi-ai Provider** | Builtin pi-ai provider ID used for registry model lookup (for example, `anthropic`, `openai`, `google`) | No |
+| **Auto Compat** | Use pi-ai registry metadata to automatically map reasoning/thinking and generation options for models with a `pi_ai_model_id` | No (default: false) |
 | **Adapters** | Request/response rewrite hooks applied to every model under this provider (see [Provider Adapters](#provider-adapters)) | No |
 
 ### Multi-Protocol Providers
@@ -118,8 +143,6 @@ Plexus supports OAuth-backed providers via the [pi-ai](https://www.npmjs.com/pac
 - Anthropic Claude
 - GitHub Copilot
 - OpenAI Codex
-- Gemini CLI
-- Antigravity
 - OpenAI o1-pro
 
 **Configuration:**
@@ -130,18 +153,109 @@ Plexus supports OAuth-backed providers via the [pi-ai](https://www.npmjs.com/pac
 
 Once configured, log in via the Admin UI to authorize Plexus. Tokens are stored encrypted (when `ENCRYPTION_KEY` is set) and auto-refreshed.
 
+### Registry-Aware Compatibility
+
+Plexus can use pi-ai's builtin model registry as compatibility metadata while still
+preserving v1 pass-through request fidelity. This is separate from OAuth execution and
+does not re-enable the removed `inference-v2` path.
+
+Enable it with `auto_compat: true` at the provider level or on an individual provider
+model. A model must also have `pi_ai_model_id` set to a builtin pi-ai model ID. When the
+provider has `pi_ai_provider`, Plexus validates that the pair resolves in the builtin
+registry and warns rather than failing if it does not.
+
+When enabled, Plexus extracts the client's reasoning/thinking intent from the incoming
+request and maps it to the provider fields supported by the resolved registry model. If
+the model has no resolvable `pi_ai_model_id`, the compatibility step is skipped.
+
+```json
+PUT /v0/management/providers/anthropic_oauth
+{
+  "api_base_url": "oauth://",
+  "api_key": "oauth",
+  "oauth_provider": "anthropic",
+  "oauth_account": "work",
+  "pi_ai_provider": "anthropic",
+  "auto_compat": true,
+  "models": {
+    "claude-opus-4-6": {
+      "type": "text",
+      "pi_ai_model_id": "claude-opus-4-6"
+    }
+  }
+}
+```
+
+You can also enable compatibility only for selected models:
+
+```json
+{
+  "pi_ai_provider": "anthropic",
+  "models": {
+    "claude-opus-4-6": {
+      "type": "text",
+      "pi_ai_model_id": "claude-opus-4-6",
+      "auto_compat": true
+    }
+  }
+}
+```
+
+`reasoning_rewrite` remains available as a manual escape hatch, but it overlaps with
+`auto_compat`. Prefer `auto_compat` for registry-backed models, and revisit existing
+custom rewrites before running both surfaces in parallel.
+
+### Raw Provider Passthrough
+
+Static API-key providers can expose an opt-in raw endpoint that bypasses model routing,
+failover, adapters, and request/response transformation:
+
+```json
+PUT /v0/management/providers/openrouter
+{
+  "api_base_url": "https://openrouter.ai/api/v1",
+  "api_key": "sk-or-...",
+  "raw_passthrough": {
+    "enabled": true,
+    "base_url": "https://openrouter.ai/api",
+    "auth": "bearer"
+  }
+}
+```
+
+`POST /raw/openrouter/v1/responses?trace=true` is sent to
+`https://openrouter.ai/api/v1/responses?trace=true`. The method, query string, request body,
+upstream status, response headers, and response body are relayed without application-level
+transformation. Plexus client credentials are removed and the request `Host` is selected from the
+configured upstream URL; other client headers are preserved. The provider's configured API key is
+inserted using `bearer`, `x-api-key`, or `x-goog-api-key` authentication. Responses preserve
+upstream headers and add `x-request-id`, `x-plexus-request-id`, and applicable quota metadata.
+For recognized Chat Completions, Messages, Responses, and Gemini paths, Plexus also feeds the
+unmodified response through its existing debug reconstruction and usage normalization pipeline to
+record the requested model, tokens, reasoning/cache usage, and provider-reported costs when present.
+This observation does not alter bytes sent in either direction.
+
+Raw access is default-deny and requires `allowRawPassthrough: true` on the calling key. The
+key's existing provider allow/deny lists still apply, but model allow/deny lists do not: raw
+access is a privileged provider-wide capability. Request-count quotas can be enforced by
+provider; model-scoped and token/cost enforcement cannot be guaranteed for opaque traffic.
+OAuth providers are not supported by the raw endpoint.
+
 ### Provider Adapters
 
 Adapters rewrite request payloads outbound to a provider and raw response payloads inbound, fixing provider-specific field-name incompatibilities without modifying the core transformer pipeline.
 
-Adapters can be set at **provider level** (applied to every model under the provider) or at **model level** (appended after provider-level adapters for a specific model). Both accept a single name or a list.
+Adapters can be set at **provider level** (applied to every model under the provider) or at **model level** (appended after provider-level adapters for a specific model). Both accept a single name or a list. Use `{ "name": "...", "enabled": false }` at provider or model level to disable an inherited or automatic adapter; a later enabled entry restores it.
 
 | Adapter | Description |
 |---------|-------------|
 | `reasoning_content` | Renames `reasoning` / `thinking.content` → `reasoning_content` on outbound assistant messages for providers that use Fireworks/DeepSeek field naming (e.g. Fireworks DeepSeek-R1). Fixes *"Extra inputs are not permitted, field: messages[N].reasoning"* errors. |
 | `suppress_developer_role` | Rewrites the `developer` role to `system` on outbound messages for providers that do not support the newer OpenAI `developer` role. |
 | `model_override` | Conditionally rewrites the provider model name based on request payload fields. Used for providers that expose reasoning variants as separate model names rather than respecting reasoning-related fields in the request body. See [Model Override Adapter](#model-override-adapter) below. |
+| `reasoning_rewrite` | Manually rewrites reasoning/thinking request fields for providers with bespoke compatibility requirements. Prefer `auto_compat` for models linked to the pi-ai builtin registry; this adapter is now best treated as an escape hatch. |
 | `web_search_coercion` | Translates server-side web search tool entries to the format expected by the target provider. Clients can use any web search format; Plexus rewrites it transparently. See [Web Search Coercion Adapter](#web-search-coercion-adapter) below. |
+| `suppress_unsupported_gpt5_options` | Removes generation options unsupported by GPT-5 models. Enabled automatically for the GPT-5 family; set `enabled: false` for a model to opt out. |
+| `normalize_anthropic_tool_ids` | Rewrites `tool_use` / `tool_result` ids that violate Anthropic's `^[a-zA-Z0-9_-]+$` charset (e.g. Moonshot's `functions.WebSearch:3`), which Anthropic rejects with a hard HTTP 400. Enabled automatically when the outbound wire format is Anthropic Messages **and** the provider looks Anthropic (base URL containing `anthropic.com`, Anthropic OAuth, or Claude masking). Add `{ "name": "normalize_anthropic_tool_ids", "options": {}, "enabled": true }` to force it on for an Anthropic-compatible gateway hosted on another domain; set `enabled: false` to opt out. |
 
 **Example — provider-level:**
 ```json
@@ -164,7 +278,7 @@ PUT /v0/management/providers/fireworks
 }
 ```
 
-Adapters are applied in order on outbound (preDispatch) and in reverse on inbound (postDispatch). Pass-through optimisation is automatically disabled when any adapter is active.
+Adapters are applied in order on outbound (preDispatch) and in reverse on inbound (postDispatch). They run whether or not the pass-through optimisation is active: a same-format request skips the transformer, but its body is still cloned, given the target model and the provider/model config fields, and run through the adapter chain before dispatch.
 
 ### Model Override Adapter
 
@@ -314,7 +428,7 @@ Quota checkers monitor upstream provider rate limits and prevent routing to exha
 - `intervalMinutes`: Polling frequency (minimum 1)
 - `maxUtilizationPercent`: Treat provider as exhausted when any window reaches this % (default 99)
 
-Quota data is available via the Management API — see [API Reference: Quota Management](/docs/openapi/openapi.yaml#/paths/~1v0~1management~1quotas).
+Quota data is available via the Management API — see [API Reference: Quota Management](openapi/openapi.yaml#/paths/~1v0~1management~1quotas).
 
 ### Provider Timeout Overrides
 
@@ -433,6 +547,19 @@ The inline `performanceExplorationRate` / `latencyExplorationRate` / `e2ePerform
 - **`selector` (default)**: Selector picks a provider within each group first, then matches API format.
 - **`api_match`**: Filter targets to those whose provider supports the incoming API format first, then apply the group's selector. Best for tools requiring specific API features (e.g., Claude Code with Anthropic messages).
 
+### Preferred API
+
+For text aliases, when `preferred_api` is omitted, Plexus advertises a recommended API in
+`GET /v1/models` using the canonical target model:
+
+- Anthropic/Claude models: `messages`
+- GPT models: `responses`
+- Gemini models: `gemini`
+- Everything else: `chat_completions`
+
+An explicitly configured `preferred_api` always takes precedence.
+Non-text aliases do not receive an inferred preferred API.
+
 ### Targets
 
 Each target specifies:
@@ -442,7 +569,55 @@ Each target specifies:
 
 ### External Metadata
 
-Link an alias to an external model catalog to return enriched metadata in `GET /v1/models`:
+Model metadata is resolved automatically for every alias and returned by `GET /v1/models`.
+Plexus derives a canonical model identity from, in order:
+
+1. The alias `pi_model` hint.
+2. The target provider's `pi_ai_provider` and model's `pi_ai_model_id` hints.
+3. The enabled target's provider and model names.
+
+It then looks for an exact entry in the configured catalogs. If no exact entry exists,
+Plexus only infers a display name and input/output modalities from the model name. Context
+windows, pricing, and supported parameters are never guessed.
+
+For example, this alias needs no metadata configuration:
+
+```yaml
+models:
+  claude-sonnet:
+    target_groups:
+      - name: default
+        selector: random
+        targets:
+          - provider: anthropic
+            model: claude-sonnet-4-5
+```
+
+Automatic matching is the default. Use `source: auto` only when adding overrides:
+
+```yaml
+metadata:
+  source: auto
+  overrides:
+    context_length: 180000
+```
+
+To pin an alias to a specific catalog entry instead:
+
+```yaml
+metadata:
+  source: models.dev
+  source_path: anthropic.claude-sonnet-4-5
+```
+
+To suppress enriched metadata entirely:
+
+```yaml
+metadata:
+  source: disabled
+```
+
+Available external catalogs:
 
 | Source | URL | Format |
 |--------|-----|--------|
@@ -450,7 +625,8 @@ Link an alias to an external model catalog to return enriched metadata in `GET /
 | `models.dev` | models.dev | `providerid.modelid` |
 | `catwalk` | catwalk.charm.sh | `providerid.modelid` |
 
-Metadata loads at startup. Failures are non-fatal — Plexus operates without enriched data if a source is unavailable.
+Metadata loads at startup. Failures are non-fatal; automatic resolution falls back to the
+safe name-based defaults when no exact catalog entry is available.
 
 ### Direct Model Routing
 
@@ -598,7 +774,7 @@ Set `disable_cooldown: true` on a provider to exclude it from the cooldown syste
 - `DELETE /v0/management/cooldowns` — clear all
 - `DELETE /v0/management/cooldowns/:provider?model=:model` — clear specific
 
-See [API Reference: Cooldown Management](/docs/openapi/openapi.yaml#/paths/~1v0~1management~1cooldowns).
+See [API Reference: Cooldown Management](openapi/openapi.yaml#/paths/~1v0~1management~1cooldowns).
 
 ---
 

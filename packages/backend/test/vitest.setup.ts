@@ -118,6 +118,26 @@ const mockGetModels = (provider: string) => {
       },
     ];
   }
+  if (provider === 'github-copilot') {
+    // Copilot really does serve GPT-5.x alongside Claude models (matches the
+    // bundled pi-ai registry); list both so model-support checks are accurate.
+    return [
+      {
+        id: 'gpt-5.4',
+        name: 'GPT-5.4',
+        contextWindow: 128000,
+        provider: 'github-copilot',
+        api: 'openai-responses',
+      },
+      {
+        id: 'claude-sonnet-4',
+        name: 'Claude Sonnet 4',
+        contextWindow: 200000,
+        provider: 'github-copilot',
+        api: 'anthropic-messages',
+      },
+    ];
+  }
   return [
     {
       id: 'claude-opus-4',
@@ -143,13 +163,31 @@ const mockGetModels = (provider: string) => {
   ];
 };
 
-const mockGetModel = (provider: string, modelId: string) => ({
-  id: modelId,
-  name: modelId,
-  contextWindow: 200000,
-  provider,
-  api: provider === 'openai-codex' ? 'openai-codex-responses' : 'anthropic-messages',
-});
+const mockGetModel = (provider: string, modelId: string) => {
+  let api = 'anthropic-messages';
+  if (provider === 'openai-codex') {
+    api = 'openai-codex-responses';
+  } else if (provider === 'github-copilot') {
+    // Copilot is multi-API: resolve the wire API per model id so
+    // copilotWireApiType() can map chat/messages/responses in tests.
+    if (modelId.includes('claude')) api = 'anthropic-messages';
+    else if (modelId === 'gpt-5.4' || modelId.includes('responses')) api = 'openai-responses';
+    else api = 'openai-completions';
+  }
+  return {
+    id: modelId,
+    name: modelId,
+    contextWindow: 200000,
+    provider,
+    api,
+    // Copilot resolves its real baseURL from the token proxy-ep at request time;
+    // the registry baseUrl is only a fallback. Other providers keep none here so
+    // their own resolvers/defaults apply (e.g. Codex → chatgpt.com backend).
+    ...(provider === 'github-copilot'
+      ? { baseUrl: 'https://api.individual.githubcopilot.com' }
+      : {}),
+  };
+};
 
 const mockGetProviders = () => ['anthropic', 'openai-codex', 'openai', 'google'];
 
@@ -171,13 +209,20 @@ const mockGetProviders = () => ['anthropic', 'openai-codex', 'openai', 'google']
 //     dispatches on model.api and crashes with \"No API provider registered\"
 //     if it is missing.
 // ---------------------------------------------------------------------------
-vi.mock('@earendil-works/pi-ai', () => ({
-  complete: mockModels.complete,
-  stream: mockModels.stream,
-  calculateCost: vi.fn(() => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 })),
-  clampThinkingLevel: (_m: any, l: string) => l,
-  getSupportedThinkingLevels: () => ['off', 'low', 'medium', 'high'],
-}));
+vi.mock('@earendil-works/pi-ai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-ai')>();
+  return {
+    complete: mockModels.complete,
+    stream: mockModels.stream,
+    calculateCost: vi.fn(() => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 })),
+    clampThinkingLevel: (_m: any, l: string) => l,
+    getSupportedThinkingLevels: () => ['off', 'low', 'medium', 'high'],
+    // The model catalog overlay delegates merge/restore/persist to pi-ai's
+    // real createProvider — keep it real so catalog tests exercise genuine
+    // library semantics.
+    createProvider: actual.createProvider,
+  };
+});
 
 vi.mock('@earendil-works/pi-ai/providers/all', () => ({
   builtinModels: () => mockModels,
@@ -203,7 +248,7 @@ const mockModels = {
   getModels: mockGetModels,
   getProviders: mockGetProviders,
   // Returns a truthy stub for known builtin provider ids, undefined otherwise.
-  // Mirrors the real piAiModels.getProvider() used by toDispatchModel().
+  // Mirrors the real piAiModels.getProvider() (used internally by pi-ai routing).
   getProvider: (id: string) => (MOCK_BUILTIN_PROVIDER_IDS.has(id) ? { id } : undefined),
 };
 
@@ -232,7 +277,7 @@ vi.mock('../src/utils/logger', () => ({
   },
 }));
 
-const { DebugManager } = await import('../src/services/debug-manager');
+const { DebugManager } = await import('../src/services/observability/debug-manager');
 
 DebugManager.getInstance().setStorage({
   saveRequest: vi.fn(),

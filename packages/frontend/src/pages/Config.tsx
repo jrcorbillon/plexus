@@ -147,6 +147,11 @@ export const Config = () => {
   const [statusCodesText, setStatusCodesText] = useState('');
   const [errorsText, setErrorsText] = useState('');
 
+  // Capture-trace-on-error toggle (persisted admin setting)
+  const [captureTraceOnError, setCaptureTraceOnError] = useState(false);
+  const [captureTraceLoaded, setCaptureTraceLoaded] = useState(false);
+  const [captureTraceSaving, setCaptureTraceSaving] = useState(false);
+
   // Trusted proxies (which immediate peers' forwarding headers are believed)
   const [trustedProxies, setTrustedProxies] = useState<string[]>([]);
   const [trustedProxiesLoaded, setTrustedProxiesLoaded] = useState(false);
@@ -347,6 +352,33 @@ export const Config = () => {
       toast.error('Failed to load failover settings');
     }
   }, [toast]);
+
+  const loadCaptureTraceOnError = useCallback(async () => {
+    try {
+      const { enabled } = await api.getCaptureTraceOnError();
+      setCaptureTraceOnError(enabled);
+      setCaptureTraceLoaded(true);
+    } catch (e) {
+      console.error('Failed to load capture-trace-on-error setting:', e);
+      toast.error('Failed to load trace capture settings');
+    }
+  }, [toast]);
+
+  const handleToggleCaptureTraceOnError = async (checked: boolean) => {
+    const previous = captureTraceOnError;
+    setCaptureTraceOnError(checked);
+    setCaptureTraceSaving(true);
+    try {
+      const { enabled } = await api.setCaptureTraceOnError(checked);
+      setCaptureTraceOnError(enabled);
+      toast.success(`Capture trace on error ${enabled ? 'enabled' : 'disabled'}`);
+    } catch (e) {
+      setCaptureTraceOnError(previous);
+      toast.error((e as Error).message, 'Failed to update trace capture settings');
+    } finally {
+      setCaptureTraceSaving(false);
+    }
+  };
 
   const loadCooldownPolicy = useCallback(async () => {
     try {
@@ -664,6 +696,7 @@ export const Config = () => {
   useEffect(() => {
     loadConfig();
     loadFailoverPolicy();
+    loadCaptureTraceOnError();
     loadCooldownPolicy();
     loadTrustedProxies();
     loadTimeoutConfig();
@@ -980,6 +1013,30 @@ export const Config = () => {
             </div>
           </Disclosure>
 
+          {/* ─── Trace Capture ──────────────────────────────────────── */}
+          <Disclosure title="Trace Capture" defaultOpen={false}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={16} className="text-primary" />
+                <div>
+                  <p className="font-body text-[12px] font-medium text-text">
+                    Capture Trace on Error
+                  </p>
+                  <p className="font-body text-[11px] text-text-muted">
+                    When enabled, debug traces are stored for requests that write to the inference
+                    error log or trigger a cooldown, even while global debug tracing is off.
+                  </p>
+                </div>
+              </div>
+              <Switch
+                checked={captureTraceOnError}
+                onChange={handleToggleCaptureTraceOnError}
+                disabled={!captureTraceLoaded || captureTraceSaving}
+                aria-label="Toggle capture trace on error"
+              />
+            </div>
+          </Disclosure>
+
           {/* ─── Cooldown Settings ──────────────────────────────────── */}
           <Disclosure
             title="Cooldown Settings"
@@ -1274,10 +1331,6 @@ export const Config = () => {
             }
           >
             <div className="flex flex-col gap-3">
-              <p className="font-body text-[11px] text-text-muted">
-                Applies to <code>/beta/</code> (inference-v2) routes.
-              </p>
-
               {/* enabled toggle */}
               <div className="flex items-center justify-between gap-4">
                 <div>

@@ -1,10 +1,10 @@
 import type { ModelParams, GpuParams } from '@plexus/shared';
 import { logger } from '../../utils/logger';
 import { PassThrough } from 'stream';
-import { UsageStorageService } from '../usage-storage';
+import { UsageStorageService } from '../observability/usage-storage';
 import { UsageRecord } from '../../types/usage';
 import { calculateCosts } from '../../utils/calculate-costs';
-import { DebugManager } from '../debug-manager';
+import { DebugManager } from '../observability/debug-manager';
 import { estimateTokensFromReconstructed, estimateInputTokens } from '../../utils/estimate-tokens';
 import {
   normalizeAnthropicUsage,
@@ -13,10 +13,84 @@ import {
   normalizeOpenAIResponsesUsage,
   extractUsageCostDetails,
 } from '../../utils/usage-normalizer';
-import { estimateKwhUsed } from '../inference-energy';
+import { estimateKwhUsed } from '../observability/inference-energy';
 import { applyProviderReportedCost, applyUsageCostDetails } from '../../utils/provider-cost';
 import { DEFAULT_MODEL, DEFAULT_GPU_PARAMS } from '@plexus/shared';
 import { recordQuotaUsage } from '../quota/quota-middleware';
+
+export interface ExtractedObservedUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}
+
+export function extractUsageFromReconstructed(
+  reconstructed: any,
+  apiType: string
+): ExtractedObservedUsage | null {
+  if (!reconstructed) return null;
+
+  switch (apiType) {
+    case 'chat': {
+      if (!reconstructed.usage) return null;
+      const usage = normalizeOpenAIChatUsage(reconstructed.usage);
+      return {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cachedTokens: usage.cached_tokens,
+        cacheWriteTokens: usage.cache_creation_tokens,
+        reasoningTokens: usage.reasoning_tokens,
+      };
+    }
+    case 'responses': {
+      if (!reconstructed.usage) return null;
+      const usage = normalizeOpenAIResponsesUsage(reconstructed.usage);
+      return {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cachedTokens: usage.cached_tokens,
+        cacheWriteTokens: usage.cache_creation_tokens,
+        reasoningTokens: usage.reasoning_tokens,
+      };
+    }
+    case 'messages': {
+      if (!reconstructed.usage) return null;
+      const usage = normalizeAnthropicUsage(reconstructed.usage);
+      return {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cachedTokens: usage.cached_tokens,
+        cacheWriteTokens: usage.cache_creation_tokens,
+        reasoningTokens: usage.reasoning_tokens,
+      };
+    }
+    case 'gemini': {
+      if (!reconstructed.usageMetadata) return null;
+      const usage = normalizeGeminiUsage(reconstructed.usageMetadata);
+      return {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cachedTokens: usage.cached_tokens,
+        cacheWriteTokens: usage.cache_creation_tokens,
+        reasoningTokens: usage.reasoning_tokens,
+      };
+    }
+    case 'oauth':
+      return reconstructed.usage
+        ? {
+            inputTokens: reconstructed.usage.input_tokens || 0,
+            outputTokens: reconstructed.usage.output_tokens || 0,
+            cachedTokens: reconstructed.usage.cached_tokens || 0,
+            cacheWriteTokens: reconstructed.usage.cache_creation_tokens || 0,
+            reasoningTokens: reconstructed.usage.reasoning_tokens || 0,
+          }
+        : null;
+    default:
+      return null;
+  }
+}
 
 export class UsageInspector extends PassThrough {
   private usageStorage: UsageStorageService;
@@ -25,7 +99,12 @@ export class UsageInspector extends PassThrough {
   private providerDiscount?: number;
   private startTime: number;
   private shouldEstimateTokens: boolean;
-  private apiType: string;
+  /** API type of the UPSTREAM PROVIDER's raw response stream — keys how the
+   * raw-mode reconstruction is read (usage/metadata extraction dialect). */
+  private providerApiType: string;
+  /** API type the CLIENT is speaking (matches `request.incomingApiType`
+   * elsewhere) — keys input-token estimation over the original request and
+   * how the transformed-mode (client-facing) snapshot is read. */
   private incomingApiType: string;
   private originalRequest?: any;
   private firstChunk = true;
@@ -44,7 +123,7 @@ export class UsageInspector extends PassThrough {
     providerDiscount: number | undefined,
     startTime: number,
     shouldEstimateTokens: boolean = false,
-    apiType: string = 'chat',
+    providerApiType: string = 'chat',
     incomingApiType?: string,
     originalRequest?: any,
     gpuParams: GpuParams = DEFAULT_GPU_PARAMS,
@@ -59,8 +138,8 @@ export class UsageInspector extends PassThrough {
     this.providerDiscount = providerDiscount;
     this.startTime = startTime;
     this.shouldEstimateTokens = shouldEstimateTokens;
-    this.apiType = apiType;
-    this.incomingApiType = incomingApiType || apiType;
+    this.providerApiType = providerApiType;
+    this.incomingApiType = incomingApiType || providerApiType;
     this.originalRequest = originalRequest;
     this.gpuParams = gpuParams;
     this.modelParams = modelParams;
@@ -90,9 +169,9 @@ export class UsageInspector extends PassThrough {
     try {
       const debugManager = DebugManager.getInstance();
       const reconstructed = debugManager.getReconstructedRawResponse(this.usageRecord.requestId!);
+      const usage = this.readObservedUsage(debugManager, reconstructed);
 
-      if (reconstructed) {
-        const usage = this.extractUsageFromReconstructed(reconstructed, this.apiType);
+      if (reconstructed || usage) {
         if (usage) {
           stats.inputTokens = usage.inputTokens || 0;
           stats.outputTokens = usage.outputTokens || 0;
@@ -101,27 +180,44 @@ export class UsageInspector extends PassThrough {
           stats.reasoningTokens = usage.reasoningTokens || 0;
         }
 
-        // Extract response metadata (tool calls count and finish reason)
-        const responseMetadata = this.extractResponseMetadataFromReconstructed(
-          reconstructed,
-          this.apiType
-        );
-        this.usageRecord.toolCallsCount = responseMetadata.toolCallsCount;
-        this.usageRecord.finishReason = responseMetadata.finishReason;
+        if (reconstructed) {
+          // Extract response metadata (tool calls count and finish reason) —
+          // raw-mode only: the transformed snapshot never feeds metadata.
+          const responseMetadata = this.extractResponseMetadataFromReconstructed(
+            reconstructed,
+            this.providerApiType
+          );
+          this.usageRecord.toolCallsCount = responseMetadata.toolCallsCount;
+          this.usageRecord.finishReason = responseMetadata.finishReason;
 
-        if (this.shouldEstimateTokens) {
-          logger.debug(
-            `No usage data found for ${this.usageRecord.requestId}, attempting estimation`
-          );
-          const estimated = estimateTokensFromReconstructed(reconstructed, this.apiType);
-          stats.outputTokens = estimated.output;
-          stats.reasoningTokens = estimated.reasoning;
-          this.usageRecord.tokensEstimated = 1;
-          logger.debug(
-            `Estimated tokens for ${this.usageRecord.requestId}: ` +
-              `output=${stats.outputTokens}, reasoning=${stats.reasoningTokens}`
-          );
-          debugManager.discardEphemeral(this.usageRecord.requestId!);
+          if (this.shouldEstimateTokens) {
+            // Estimation is a FALLBACK for responses that carried no usage at
+            // all: it must never overwrite real usage extracted from the raw
+            // reconstruction or the transformed-snapshot fallback above (for
+            // a 'responses' provider the estimator has no dialect support
+            // and returns zeros — the overwrite would zero out real counts
+            // and corrupt costs/quota).
+            if (!usage) {
+              logger.debug(
+                `No usage data found for ${this.usageRecord.requestId}, attempting estimation`
+              );
+              const estimated = estimateTokensFromReconstructed(
+                reconstructed,
+                this.providerApiType
+              );
+              stats.outputTokens = estimated.output;
+              stats.reasoningTokens = estimated.reasoning;
+              this.usageRecord.tokensEstimated = 1;
+              logger.debug(
+                `Estimated tokens for ${this.usageRecord.requestId}: ` +
+                  `output=${stats.outputTokens}, reasoning=${stats.reasoningTokens}`
+              );
+            }
+            // The ephemeral capture was made solely for this estimation pass —
+            // discard it whether estimation ran or real usage won, so the
+            // marker doesn't leak past this request.
+            debugManager.discardEphemeral(this.usageRecord.requestId!);
+          }
         }
 
         if (this.originalRequest && stats.inputTokens === 0) {
@@ -192,10 +288,13 @@ export class UsageInspector extends PassThrough {
         logger.error(`Failed to save usage record for ${this.usageRecord.requestId}:`, err);
       });
 
-      // Record quota usage after costs are calculated (fire-and-forget)
+      // Record quota usage after costs are calculated (fire-and-forget) —
+      // against the FINAL attempt's resolved provider/model.
       if (this.quotaEnforcer && this.keyName) {
         recordQuotaUsage(
           this.keyName,
+          this.usageRecord.finalAttemptProvider,
+          this.usageRecord.finalAttemptModel,
           {
             tokensInput: this.usageRecord.tokensInput,
             tokensOutput: this.usageRecord.tokensOutput,
@@ -210,7 +309,11 @@ export class UsageInspector extends PassThrough {
         });
       }
 
-      if (this.usageRecord.provider && this.usageRecord.selectedModelName) {
+      if (
+        this.usageRecord.responseStatus === 'success' &&
+        this.usageRecord.provider &&
+        this.usageRecord.selectedModelName
+      ) {
         // Fire-and-forget: updatePerformanceMetrics is async but _flush is synchronous
         // Attach error handler to prevent unhandled promise rejections
         this.usageStorage
@@ -272,15 +375,19 @@ export class UsageInspector extends PassThrough {
 
       const debugManager = DebugManager.getInstance();
       const reconstructed = debugManager.getReconstructedRawResponse(this.usageRecord.requestId!);
-      if (reconstructed) {
-        const usage = this.extractUsageFromReconstructed(reconstructed, this.apiType);
-        if (usage) {
-          this.usageRecord.tokensInput = usage.inputTokens || null;
-          this.usageRecord.tokensOutput = usage.outputTokens || null;
-          this.usageRecord.tokensCached = usage.cachedTokens || null;
-          this.usageRecord.tokensCacheWrite = usage.cacheWriteTokens || null;
-          this.usageRecord.tokensReasoning = usage.reasoningTokens || null;
-        }
+      // Same read-raw-then-fallback as _flush (readObservedUsage): a stream
+      // destroyed mid-flight can have usage only in the transformed-mode
+      // snapshot, and without the fallback the cancelled/timeout record
+      // would finalize with no tokens at all.
+      const usage = this.readObservedUsage(debugManager, reconstructed);
+      if (usage) {
+        this.usageRecord.tokensInput = usage.inputTokens || null;
+        this.usageRecord.tokensOutput = usage.outputTokens || null;
+        this.usageRecord.tokensCached = usage.cachedTokens || null;
+        this.usageRecord.tokensCacheWrite = usage.cacheWriteTokens || null;
+        this.usageRecord.tokensReasoning = usage.reasoningTokens || null;
+      }
+      if (reconstructed || usage) {
         calculateCosts(this.usageRecord, this.pricing, this.providerDiscount);
       }
 
@@ -299,71 +406,28 @@ export class UsageInspector extends PassThrough {
     callback(err);
   }
 
-  private extractUsageFromReconstructed(reconstructed: any, apiType: string): any {
-    if (!reconstructed) return null;
-
-    switch (apiType) {
-      case 'chat':
-        if (!reconstructed.usage) return null;
-        {
-          const usage = normalizeOpenAIChatUsage(reconstructed.usage);
-          return {
-            inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens,
-            cachedTokens: usage.cached_tokens,
-            cacheWriteTokens: usage.cache_creation_tokens,
-            reasoningTokens: usage.reasoning_tokens,
-          };
-        }
-      case 'responses':
-        if (!reconstructed.usage) return null;
-        {
-          const usage = normalizeOpenAIResponsesUsage(reconstructed.usage);
-          return {
-            inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens,
-            cachedTokens: usage.cached_tokens,
-            cacheWriteTokens: usage.cache_creation_tokens,
-            reasoningTokens: usage.reasoning_tokens,
-          };
-        }
-      case 'messages':
-        if (!reconstructed.usage) return null;
-        {
-          const usage = normalizeAnthropicUsage(reconstructed.usage);
-          return {
-            inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens,
-            cachedTokens: usage.cached_tokens,
-            cacheWriteTokens: usage.cache_creation_tokens,
-            reasoningTokens: usage.reasoning_tokens,
-          };
-        }
-      case 'gemini':
-        if (!reconstructed.usageMetadata) return null;
-        {
-          const usage = normalizeGeminiUsage(reconstructed.usageMetadata);
-          return {
-            inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens,
-            cachedTokens: usage.cached_tokens,
-            cacheWriteTokens: usage.cache_creation_tokens,
-            reasoningTokens: usage.reasoning_tokens,
-          };
-        }
-      case 'oauth':
-        return reconstructed.usage
-          ? {
-              inputTokens: reconstructed.usage.input_tokens || 0,
-              outputTokens: reconstructed.usage.output_tokens || 0,
-              cachedTokens: reconstructed.usage.cached_tokens || 0,
-              cacheWriteTokens: reconstructed.usage.cache_creation_tokens || 0,
-              reasoningTokens: reconstructed.usage.reasoning_tokens || 0,
-            }
-          : null;
-      default:
-        return null;
+  /**
+   * Reads observed usage for this request, shared by BOTH finalization paths
+   * (_flush for streams that end normally, _destroy for cancelled/timed-out
+   * streams). The raw-mode reconstruction is AUTHORITATIVE for usage. Only
+   * when it yields no usage at all (no reconstruction, or a reconstruction
+   * without a usage block) fall back to the transformed-mode snapshot — the
+   * client-facing stream reconstruction the transformed DebugLoggingInspector
+   * writes — mirroring the raw extraction per api type (the transformed
+   * snapshot is keyed by the CLIENT api type).
+   */
+  private readObservedUsage(
+    debugManager: DebugManager,
+    reconstructed: any
+  ): ExtractedObservedUsage | null {
+    let usage = extractUsageFromReconstructed(reconstructed, this.providerApiType);
+    if (!usage) {
+      const transformedSnapshot = debugManager.getPendingLog(
+        this.usageRecord.requestId!
+      )?.transformedResponseSnapshot;
+      usage = extractUsageFromReconstructed(transformedSnapshot, this.incomingApiType);
     }
+    return usage;
   }
 
   private extractResponseMetadataFromReconstructed(
@@ -434,8 +498,23 @@ export class UsageInspector extends PassThrough {
             (item: any) => item.type === 'function_call'
           ).length;
         }
-        // Responses API doesn't have a direct finish_reason, use status instead
-        const finishReason = reconstructed.status === 'completed' ? 'stop' : reconstructed.status;
+        // Responses API doesn't have a direct finish_reason, use status instead.
+        // 'failed' maps to 'error' so failed/truncated streams are recorded as
+        // errors instead of leaking the raw Responses API status string.
+        // 'incomplete' maps from incomplete_details.reason: 'content_filter'
+        // stays 'content_filter', everything else (including
+        // 'max_output_tokens' and any unknown/absent reason) defaults to
+        // 'length', matching the OpenAI-compatible finish reason vocabulary.
+        const finishReason =
+          reconstructed.status === 'completed'
+            ? 'stop'
+            : reconstructed.status === 'failed'
+              ? 'error'
+              : reconstructed.status === 'incomplete'
+                ? reconstructed.incomplete_details?.reason === 'content_filter'
+                  ? 'content_filter'
+                  : 'length'
+                : reconstructed.status;
         return { toolCallsCount: toolCallsCount > 0 ? toolCallsCount : null, finishReason };
       }
       case 'messages': {

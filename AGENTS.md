@@ -17,9 +17,10 @@ This file is a **guardrail**, not general documentation.
 - **NEVER** manually create SQL migrations.
 - **NEVER** run `drizzle-kit generate` directly.
 - **NEVER** produce implementation or summary documents unless specifically requested.
+- **NEVER** assume Plexus supports file-based configuration. Providers, models, keys, quotas, and settings are database-backed; manage them through the Admin UI or Management API. Environment variables are only for server-level settings.
 - **AVOID** searching library type definitions for documentation. Use context/search skills first when available.
 - **ASK** when requirements are ambiguous.
-
+- **NEVER** use --delete-branch on gh commands
 ## Task triggers
 
 ### If the task changes database schema
@@ -59,20 +60,6 @@ Before editing tests:
    - `utils/logger` and `@earendil-works/pi-ai` are globally mocked; do not re-mock them in test files.
    - Reset singletons via `resetForTesting()` methods in `beforeEach`.
 
-### If the task changes the Pi assistant workflow
-
-Files:
-- Workflow: `.github/workflows/pi-assistant.yml`
-- Prompt: `.github/prompts/pi-assistant.md`
-
-Rules:
-- To change agent instructions, edit `.github/prompts/pi-assistant.md`.
-- Do **not** put prompt text directly in the workflow YAML.
-- Available placeholders:
-  - `{{context.*}}` for `@actions/github` context
-  - `{{env.*}}` for environment variables passed to the step
-- Current explicit env passthrough: `INITIAL_COMMENT_ID`
-- If a needed value is not in `context.*`, add it to the `env:` block on the **Run Pi agent** step and reference it as `{{env.YOUR_VAR_NAME}}`.
 
 ### If the task touches frontend CSS/assets/Tailwind
 
@@ -91,11 +78,23 @@ Rules:
 - Import assets with ES6 imports only.
 - Do not use dynamic asset paths.
 
+### If the task changes the frontend UI
+
+After editing anything a user sees in the browser (React `.tsx`/`.jsx`, routes, forms,
+Tailwind/CSS, layout, or any file under `packages/frontend/src`), verify it yourself
+instead of handing it back unchecked:
+
+1. Read the **`frontend-testing`** skill.
+2. Boot the worktree-safe dev stack, auto-log into the UI, and drive it with a real
+   browser to confirm your change renders and behaves correctly.
+
 ## Canonical project commands
 
 Use these commands exactly:
 
 - Dev server: `bun run dev`
+- Dev stack for agents (background, worktree-safe): `bun run dev:agent` (or `bun run dev:agent [target]`, e.g. `dev:pglite`, `dev:full`)
+- Stop the agent dev stack: `bun run dev:stop` (or `bun run dev:stop [target]`)
 - Dev port: `PORT=$(bun run dev:get:port)`
 - Dev DB path: `DB_PATH=$(bun run dev:get:db_path)`
 - Tests: `bun run test`
@@ -105,10 +104,10 @@ Use these commands exactly:
 
 Notes:
 - `bun run dev` derives the backend port from the worktree name and runs the frontend watcher.
+- `bun run dev:agent` boots or attaches to a workspace script target (defaults to `dev:full`), managed by Paseo when available with automatic log streaming, and falling back seamlessly to direct background process execution for non-Paseo environments. Use `--detach` to return immediately once healthy.
 - `bun test` is intentionally blocked. Use `bun run test`.
 
 ## Project overview
 
 **Plexus** is a unified API gateway for LLMs built on **Bun** + **Fastify**. It exposes OpenAI- and Anthropic-compatible endpoints and routes requests to backend providers while handling request/response transformation.
-
 **Stack:** Bun, Fastify, Drizzle ORM (SQLite/Postgres), Zod, React frontend (Tailwind v4).

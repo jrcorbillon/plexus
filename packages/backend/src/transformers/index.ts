@@ -1,5 +1,6 @@
 export * from './anthropic';
 export * from './openai';
+export * from './completions';
 export * from './gemini';
 export * from './ollama';
 export * from './responses';
@@ -7,5 +8,4 @@ export * from './embeddings';
 export * from './transcriptions';
 export * from './speech';
 export * from './image';
-export * from './oauth/oauth-transformer';
 export * from './oauth/oauth-claude';

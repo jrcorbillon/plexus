@@ -2,9 +2,9 @@ import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import { setConfigForTesting } from '../../../config';
 import { registerManagementRoutes } from '../../management';
-import { UsageStorageService } from '../../../services/usage-storage';
-import { Dispatcher } from '../../../services/dispatcher';
-import { ProbeService } from '../../../services/probe-service';
+import { UsageStorageService } from '../../../services/observability/usage-storage';
+import { Dispatcher } from '../../../services/dispatch/dispatcher';
+import { ProbeService } from '../../../services/probes/probe-service';
 import { closeDatabase, getDatabase, getSchema, initializeDatabase } from '../../../db/client';
 import { runMigrations } from '../../../db/migrate';
 import {

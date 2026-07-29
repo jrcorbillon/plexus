@@ -1,6 +1,8 @@
 import { test, expect, describe } from 'vitest';
+import { createParser, type EventSourceMessage } from 'eventsource-parser';
 import { AnthropicTransformer } from '../anthropic';
 import { transformAnthropicStream } from '../anthropic/stream-transformer';
+import { OpenAITransformer } from '../openai';
 import { UnifiedChatStreamChunk } from '../../types/unified';
 
 describe('AnthropicTransformer Stream Formatting', () => {
@@ -172,6 +174,158 @@ describe('AnthropicTransformer Stream Formatting', () => {
 
     expect(data.usage).toBeDefined();
     expect(data.usage.thinkingTokens).toBe(0);
+  });
+
+  test('preserves OpenAI tool arguments when continuation chunks use empty metadata', async () => {
+    const chunks = [
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'Read' },
+                },
+              ],
+            },
+            index: 0,
+          },
+        ],
+        id: 'chat_1',
+        model: 'model',
+        object: 'chat.completion.chunk',
+      },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: '',
+                  type: 'function',
+                  function: { name: '', arguments: '{"file_path": ' },
+                },
+              ],
+            },
+            index: 0,
+          },
+        ],
+        id: 'chat_1',
+        model: 'model',
+        object: 'chat.completion.chunk',
+      },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: '',
+                  type: 'function',
+                  function: { name: '', arguments: '"/tmp/h' },
+                },
+              ],
+            },
+            index: 0,
+          },
+        ],
+        id: 'chat_1',
+        model: 'model',
+        object: 'chat.completion.chunk',
+      },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: '',
+                  type: 'function',
+                  function: { name: '', arguments: 'ello.txt"' },
+                },
+              ],
+            },
+            index: 0,
+          },
+        ],
+        id: 'chat_1',
+        model: 'model',
+        object: 'chat.completion.chunk',
+      },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: '',
+                  type: 'function',
+                  function: { name: '', arguments: '}' },
+                },
+              ],
+            },
+            index: 0,
+          },
+        ],
+        id: 'chat_1',
+        model: 'model',
+        object: 'chat.completion.chunk',
+      },
+      {
+        choices: [{ delta: {}, finish_reason: 'tool_calls', index: 0 }],
+        id: 'chat_1',
+        model: 'model',
+        object: 'chat.completion.chunk',
+      },
+    ];
+    const encoder = new TextEncoder();
+    const rawStream = new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        }
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    const unifiedStream = new OpenAITransformer().transformStream(rawStream);
+    const formattedStream = new AnthropicTransformer().formatStream(unifiedStream);
+    const events: Array<{ event?: string; data: any }> = [];
+    const parser = createParser({
+      onEvent(event: EventSourceMessage) {
+        events.push({ event: event.event, data: JSON.parse(event.data) });
+      },
+    });
+    const reader = formattedStream.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.feed(decoder.decode(value, { stream: true }));
+    }
+
+    const toolStarts = events.filter(
+      ({ event, data }) =>
+        event === 'content_block_start' && data.content_block?.type === 'tool_use'
+    );
+    const partialJson = events
+      .filter(
+        ({ event, data }) =>
+          event === 'content_block_delta' && data.delta?.type === 'input_json_delta'
+      )
+      .map(({ data }) => data.delta.partial_json)
+      .join('');
+
+    expect(toolStarts).toHaveLength(1);
+    expect(partialJson).toBe('{"file_path": "/tmp/hello.txt"}');
   });
 });
 
@@ -580,5 +734,186 @@ describe('transformAnthropicStream tool call index remapping', () => {
       (c) => c.delta?.tool_calls?.[0]?.function?.arguments === '{"url":"x"}'
     );
     expect(argChunksForBlock2[0].delta.tool_calls[0].index).toBe(1);
+  });
+
+  test('formats transient upstream failures as terminal Anthropic error events', async () => {
+    const transformer = new AnthropicTransformer();
+    const stream = new ReadableStream<UnifiedChatStreamChunk>({
+      start(controller) {
+        controller.enqueue({
+          id: 'msg_error',
+          model: 'gemini-3.6-flash',
+          created: Date.now(),
+          event: 'error',
+          delta: {},
+          error: {
+            statusCode: 503,
+            code: 'MALFORMED_FUNCTION_CALL',
+            message:
+              'Upstream Gemini returned MALFORMED_FUNCTION_CALL — please retry your request. [503]',
+          },
+        });
+        controller.enqueue({
+          id: 'msg_error',
+          model: 'gemini-3.6-flash',
+          created: Date.now(),
+          event: 'done',
+          delta: {},
+        });
+        controller.close();
+      },
+    });
+
+    // Parse the SSE frames structurally (same approach as
+    // openai-stream.test.ts's readOpenAISSEChunks) and assert on the parsed
+    // error object instead of raw-output substrings.
+    const reader = transformer.formatStream(stream).getReader();
+    const decoder = new TextDecoder();
+    const events: { event: string | undefined; data: any }[] = [];
+    const parser = createParser({
+      onEvent(event: EventSourceMessage) {
+        events.push({ event: event.event, data: JSON.parse(event.data) });
+      },
+    });
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.feed(decoder.decode(value, { stream: true }));
+    }
+
+    const errorEvents = events.filter((e) => e.event === 'error');
+    expect(errorEvents).toHaveLength(1);
+    // Full parsed Anthropic error payload: `error.type` is the wire "code"
+    // and `error.message` carries the upstream message verbatim.
+    expect(errorEvents[0]?.data).toEqual({
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message:
+          'Upstream Gemini returned MALFORMED_FUNCTION_CALL — please retry your request. [503]',
+      },
+    });
+    // The terminal error must not be followed by a normal stop.
+    expect(events.some((e) => e.event === 'message_stop')).toBe(false);
+  });
+
+  test('maps an Anthropic error event to a unified error chunk', async () => {
+    const sseEvents = [
+      {
+        event: 'message_start',
+        data: {
+          type: 'message_start',
+          message: {
+            id: 'msg_err',
+            model: 'claude-sonnet-4-6',
+            role: 'assistant',
+            content: [],
+            usage: { input_tokens: 10, output_tokens: 0 },
+          },
+        },
+      },
+      {
+        event: 'error',
+        data: {
+          type: 'error',
+          error: { type: 'overloaded_error', message: 'Overloaded: please retry later.' },
+        },
+      },
+    ];
+
+    const rawStream = makeAnthropicSSE(sseEvents);
+    const unifiedStream = transformAnthropicStream(rawStream);
+    const chunks = await drainUnifiedStream(unifiedStream);
+
+    const errorChunk = chunks.find((c) => c.event === 'error');
+    expect(errorChunk).toBeDefined();
+    expect(errorChunk.error.message).toBe('Overloaded: please retry later.');
+    expect(errorChunk.error.code).toBe('overloaded_error');
+    expect(errorChunk.id).toBe('msg_err');
+    expect(errorChunk.model).toBe('claude-sonnet-4-6');
+  });
+
+  test('OpenAI client sees the Anthropic error chunk and terminates cleanly with [DONE]', async () => {
+    const sseEvents = [
+      {
+        event: 'message_start',
+        data: {
+          type: 'message_start',
+          message: { id: 'msg_err2', model: 'claude-sonnet-4-6', role: 'assistant', content: [] },
+        },
+      },
+      {
+        event: 'error',
+        data: { type: 'error', error: { type: 'api_error', message: 'Internal server error.' } },
+      },
+    ];
+
+    const rawStream = makeAnthropicSSE(sseEvents);
+    const unifiedStream = transformAnthropicStream(rawStream);
+    const formatted = new OpenAITransformer().formatStream(unifiedStream);
+
+    const reader = formatted.getReader();
+    const decoder = new TextDecoder();
+    let output = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      output += decoder.decode(value);
+    }
+
+    const dataLines = output
+      .split('\n\n')
+      .filter(Boolean)
+      .map((block) => block.replace(/^data:\s*/, ''));
+
+    const errorLine = dataLines.find((line) => line !== '[DONE]' && JSON.parse(line).error);
+    expect(errorLine).toBeDefined();
+    const errorPayload = JSON.parse(errorLine as string);
+    expect(errorPayload.error.message).toBe('Internal server error.');
+    // Propagates Anthropic's own error type as the code — not Gemini's
+    // hardcoded legacy `upstream_malformed_function_call` sentinel.
+    expect(errorPayload.error.code).toBe('api_error');
+    expect(output.trim().endsWith('data: [DONE]')).toBe(true);
+  });
+
+  test('OpenAI client still gets a final finish_reason chunk when the stream ends after message_start with no message_delta', async () => {
+    const sseEvents = [
+      {
+        event: 'message_start',
+        data: {
+          type: 'message_start',
+          message: {
+            id: 'msg_abrupt',
+            model: 'claude-sonnet-4-6',
+            role: 'assistant',
+            content: [],
+          },
+        },
+      },
+    ];
+
+    const rawStream = makeAnthropicSSE(sseEvents);
+    const unifiedStream = transformAnthropicStream(rawStream);
+    const formatted = new OpenAITransformer().formatStream(unifiedStream);
+
+    const reader = formatted.getReader();
+    const decoder = new TextDecoder();
+    let output = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      output += decoder.decode(value);
+    }
+
+    const dataLines = output
+      .split('\n\n')
+      .filter(Boolean)
+      .map((block) => block.replace(/^data:\s*/, ''));
+
+    const finishLine = dataLines.find(
+      (line) => line !== '[DONE]' && JSON.parse(line).choices?.[0]?.finish_reason === 'stop'
+    );
+    expect(finishLine).toBeDefined();
+    expect(dataLines.at(-1)).toBe('[DONE]');
   });
 });

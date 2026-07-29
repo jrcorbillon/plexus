@@ -3,10 +3,11 @@ import path from 'path';
 import Fastify from 'fastify';
 import { registerModelsRoute } from '../models';
 import { setConfigForTesting, PlexusConfig } from '../../../config';
-import { ModelMetadataManager } from '../../../services/model-metadata-manager';
+import { ModelMetadataManager } from '../../../services/models/model-metadata-manager';
 
 const FIXTURES = path.join(__dirname, '../../../utils/__tests__/fixtures');
 const openrouterMetadataFixture = path.join(FIXTURES, 'openrouter-metadata-sample.json');
+const openrouterPricingFixture = path.join(FIXTURES, 'openrouter-models.json');
 
 afterEach(() => {
   ModelMetadataManager.resetForTesting();
@@ -75,7 +76,33 @@ describe('GET /v1/models', () => {
     expect(modelIds).toEqual(['simple-model']);
   });
 
-  it('should return base fields for aliases without metadata config', async () => {
+  it('should infer preferred APIs from model families while preserving explicit values', async () => {
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+
+    setConfigForTesting({
+      models: {
+        'claude-sonnet-4-5': { targets: [] },
+        'gpt-5.2': { targets: [] },
+        'gemini-2.5-pro': { targets: [] },
+        'gemini-embedding-001': { targets: [], type: 'embeddings' },
+        'mistral-large': { targets: [] },
+        'gpt-explicit': { targets: [], preferred_api: ['chat_completions'] },
+      },
+    } as unknown as PlexusConfig);
+
+    const response = await fastify.inject({ method: 'GET', url: '/v1/models' });
+    const models = new Map(response.json().data.map((model: any) => [model.id, model]));
+
+    expect((models.get('claude-sonnet-4-5') as any).preferred_api).toEqual(['messages']);
+    expect((models.get('gpt-5.2') as any).preferred_api).toEqual(['responses']);
+    expect((models.get('gemini-2.5-pro') as any).preferred_api).toEqual(['gemini']);
+    expect((models.get('gemini-embedding-001') as any).preferred_api).toBeUndefined();
+    expect((models.get('mistral-large') as any).preferred_api).toEqual(['chat_completions']);
+    expect((models.get('gpt-explicit') as any).preferred_api).toEqual(['chat_completions']);
+  });
+
+  it('should infer safe metadata defaults for aliases without metadata config', async () => {
     const fastify = Fastify();
     await registerModelsRoute(fastify);
 
@@ -93,10 +120,28 @@ describe('GET /v1/models', () => {
     expect(model.object).toBe('model');
     expect(model.owned_by).toBe('plexus');
     expect(typeof model.created).toBe('number');
-    // Should NOT have enriched fields
-    expect(model.name).toBeUndefined();
+    expect(model.name).toBe('Plain Model');
+    expect(model.architecture.input_modalities).toEqual(['text']);
+    expect(model.architecture.output_modalities).toEqual(['text']);
     expect(model.context_length).toBeUndefined();
     expect(model.pricing).toBeUndefined();
+  });
+
+  it('should return only base fields when metadata enrichment is disabled', async () => {
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+
+    setConfigForTesting({
+      models: {
+        'plain-model': { targets: [], metadata: { source: 'disabled' } },
+      },
+    } as unknown as PlexusConfig);
+
+    const response = await fastify.inject({ method: 'GET', url: '/v1/models' });
+    const model = response.json().data[0];
+    expect(model.id).toBe('plain-model');
+    expect(model.name).toBeUndefined();
+    expect(model.architecture).toBeUndefined();
   });
 });
 
@@ -124,7 +169,8 @@ describe('GET /v1/models – vision fallthrough modalities', () => {
 
     expect(vfModel.architecture.input_modalities).toEqual(['text', 'image']);
     expect(vfModel.architecture.output_modalities).toEqual(['text']);
-    expect(noVfModel.architecture).toBeUndefined();
+    expect(noVfModel.architecture.input_modalities).toEqual(['text']);
+    expect(noVfModel.architecture.output_modalities).toEqual(['text']);
   });
 
   it('should not add image when vision_fallthrough is not configured globally', async () => {
@@ -141,7 +187,8 @@ describe('GET /v1/models – vision fallthrough modalities', () => {
     expect(response.statusCode).toBe(200);
 
     const model = response.json().data[0];
-    expect(model.architecture).toBeUndefined();
+    expect(model.architecture.input_modalities).toEqual(['text']);
+    expect(model.architecture.output_modalities).toEqual(['text']);
   });
 
   it('should inject image into existing modalities when metadata is present', async () => {
@@ -266,6 +313,15 @@ describe('GET /v1/models – with metadata', () => {
     expect(model.context_length).toBe(200000);
     expect(model.pricing.prompt).toBe('0.000003');
     expect(model.pricing.completion).toBe('0.000015');
+    expect(model.pricing.tiers).toEqual([
+      {
+        input_tokens_above: 272000,
+        prompt: '0.000010',
+        completion: '0.000045',
+        input_cache_read: '0.000001',
+        input_cache_write: '0.0000125',
+      },
+    ]);
     expect(model.architecture.input_modalities).toContain('text');
     expect(model.supported_parameters).toContain('temperature');
     expect(model.top_provider.max_completion_tokens).toBe(8192);
@@ -364,6 +420,47 @@ describe('GET /v1/models – with metadata', () => {
     // Falls back to base fields when metadata source not loaded
     expect(model.id).toBe('some-model');
     expect(model.name).toBeUndefined();
+  });
+});
+
+describe('GET /v1/models - Caching', () => {
+  it('should return ETag and Last-Modified headers and support 304 Not Modified', async () => {
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+
+    setConfigForTesting({
+      models: {
+        'cached-model': { targets: [] },
+      },
+    } as unknown as PlexusConfig);
+
+    // Initial request
+    const response1 = await fastify.inject({ method: 'GET', url: '/v1/models' });
+    expect(response1.statusCode).toBe(200);
+    const etag = response1.headers.etag;
+    const lastModified = response1.headers['last-modified'];
+    expect(etag).toBeDefined();
+    expect(lastModified).toBeDefined();
+
+    // Second request with If-None-Match
+    const response2 = await fastify.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        'if-none-match': etag as string,
+      },
+    });
+    expect(response2.statusCode).toBe(304);
+
+    // Third request with If-Modified-Since
+    const response3 = await fastify.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        'if-modified-since': lastModified as string,
+      },
+    });
+    expect(response3.statusCode).toBe(304);
   });
 });
 
@@ -600,5 +697,123 @@ describe('GET /v1/metadata/lookup', () => {
     expect(meta.architecture.input_modalities).toContain('image');
     expect(meta.supported_parameters).toContain('tools');
     expect(meta.top_provider.max_completion_tokens).toBe(8192);
+  });
+});
+
+// ─── GET /v1/openrouter/models ──────────────────────────────
+
+describe('GET /v1/openrouter/models', () => {
+  it('should return 503 when the catalog is not yet initialized', async () => {
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+    setConfigForTesting({ models: {} } as unknown as PlexusConfig);
+
+    const response = await fastify.inject({
+      method: 'GET',
+      url: '/v1/openrouter/models',
+    });
+    expect(response.statusCode).toBe(503);
+  });
+
+  it('should return slugs from the shared metadata catalog, filtered by q', async () => {
+    const mgr = ModelMetadataManager.getInstance();
+    await mgr.loadAll({
+      openrouter: openrouterPricingFixture,
+      modelsDev: '/nonexistent',
+      catwalk: '/nonexistent',
+    });
+
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+    setConfigForTesting({ models: {} } as unknown as PlexusConfig);
+
+    const all = await fastify.inject({ method: 'GET', url: '/v1/openrouter/models' });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().count).toBe(mgr.getAllIds('openrouter').length);
+
+    const filtered = await fastify.inject({
+      method: 'GET',
+      url: '/v1/openrouter/models?q=claude',
+    });
+    expect(filtered.statusCode).toBe(200);
+    const slugs = filtered.json().data;
+    expect(slugs.length).toBeGreaterThan(0);
+    expect(slugs.every((slug: string) => slug.toLowerCase().includes('claude'))).toBe(true);
+  });
+
+  it('should reflect catalog refreshes without a restart', async () => {
+    const mgr = ModelMetadataManager.getInstance();
+    await mgr.loadAll({
+      openrouter: openrouterPricingFixture,
+      modelsDev: '/nonexistent',
+      catwalk: '/nonexistent',
+    });
+
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+    setConfigForTesting({ models: {} } as unknown as PlexusConfig);
+
+    // gpt-4.1-nano only exists in the metadata-sample fixture
+    const before = await fastify.inject({
+      method: 'GET',
+      url: '/v1/openrouter/models?q=gpt-4.1-nano',
+    });
+    expect(before.json().data).toEqual([]);
+
+    // Simulate a scheduled/manual catalog refresh swapping in new data
+    await mgr.loadAll({
+      openrouter: openrouterMetadataFixture,
+      modelsDev: '/nonexistent',
+      catwalk: '/nonexistent',
+    });
+
+    const after = await fastify.inject({
+      method: 'GET',
+      url: '/v1/openrouter/models?q=gpt-4.1-nano',
+    });
+    expect(after.json().data).toEqual(['openai/gpt-4.1-nano']);
+  });
+});
+
+describe('GET /v1/openrouter/models - Caching', () => {
+  it('should return ETag and Last-Modified headers and support 304 Not Modified', async () => {
+    const mgr = ModelMetadataManager.getInstance();
+    await mgr.loadAll({
+      openrouter: openrouterPricingFixture,
+      modelsDev: '/nonexistent',
+      catwalk: '/nonexistent',
+    });
+
+    const fastify = Fastify();
+    await registerModelsRoute(fastify);
+    setConfigForTesting({ models: {} } as unknown as PlexusConfig);
+
+    // Initial request
+    const response1 = await fastify.inject({ method: 'GET', url: '/v1/openrouter/models' });
+    expect(response1.statusCode).toBe(200);
+    const etag = response1.headers.etag;
+    const lastModified = response1.headers['last-modified'];
+    expect(etag).toBeDefined();
+    expect(lastModified).toBeDefined();
+
+    // Second request with If-None-Match
+    const response2 = await fastify.inject({
+      method: 'GET',
+      url: '/v1/openrouter/models',
+      headers: {
+        'if-none-match': etag as string,
+      },
+    });
+    expect(response2.statusCode).toBe(304);
+
+    // Third request with If-Modified-Since
+    const response3 = await fastify.inject({
+      method: 'GET',
+      url: '/v1/openrouter/models',
+      headers: {
+        'if-modified-since': lastModified as string,
+      },
+    });
+    expect(response3.statusCode).toBe(304);
   });
 });

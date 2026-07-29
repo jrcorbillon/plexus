@@ -1,12 +1,12 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
-import { Edit2, Trash2, Clock, Play, Loader2, CheckCircle, XCircle, BarChart3 } from 'lucide-react';
+import { Edit2, Trash2, Clock, Play, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { CopyButton } from '../ui/CopyButton';
+import { Badge } from '../ui/Badge';
 import { Switch } from '../ui/Switch';
 import { Alias, Provider, Cooldown } from '../../lib/api';
 import { formatMsToMinSec } from '@plexus/shared';
 import { SELECTOR_LABELS } from '../../lib/selectors';
-import { modelInsightsPath } from '../../lib/model-insights';
+import { getAliasProviderLabels, getAliasTargetCount } from '../../lib/modelList';
 
 interface AliasTableRowProps {
   alias: Alias;
@@ -42,6 +42,9 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
   onTestTarget,
   onDismissTestMessage,
 }) => {
+  const providerLabels = getAliasProviderLabels(alias, providers);
+  const targetCount = getAliasTargetCount(alias);
+
   return (
     <tr className="hover:bg-bg-hover">
       <td
@@ -57,14 +60,6 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
             {alias.id}
           </div>
           <CopyButton value={alias.id} size="sm" />
-          <Link
-            to={modelInsightsPath(alias.id)}
-            className="bg-none border-none cursor-pointer p-1 rounded text-primary opacity-60 transition-opacity hover:opacity-100 no-underline"
-            title={`View insights for ${alias.id}`}
-            aria-label={`View insights for ${alias.id}`}
-          >
-            <BarChart3 size={14} />
-          </Link>
           <button
             onClick={() => onDelete(alias)}
             className="bg-none border-none cursor-pointer p-1 rounded color-danger opacity-60 transition-opacity hover:opacity-100"
@@ -112,6 +107,25 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
             ))}
           </div>
         )}
+      </td>
+
+      <td className="px-4 py-1.5 text-left border-b border-border-glass text-text">
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
+            {providerLabels.length > 0 ? (
+              providerLabels.map((providerLabel) => (
+                <Badge key={providerLabel} status="neutral" noDot>
+                  {providerLabel}
+                </Badge>
+              ))
+            ) : (
+              <span className="text-[11px] text-text-muted">No providers</span>
+            )}
+          </div>
+          <div className="text-[11px] text-text-muted">
+            {targetCount} target{targetCount === 1 ? '' : 's'}
+          </div>
+        </div>
       </td>
 
       <td className="px-4 py-1.5 text-left border-b border-border-glass text-text pr-6">

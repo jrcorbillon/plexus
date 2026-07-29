@@ -3,9 +3,9 @@ import Fastify from 'fastify';
 import { sql } from 'drizzle-orm';
 import { setConfigForTesting } from '../../../config';
 import { registerManagementRoutes } from '../../management';
-import { UsageStorageService } from '../../../services/usage-storage';
-import { Dispatcher } from '../../../services/dispatcher';
-import { ProbeService } from '../../../services/probe-service';
+import { UsageStorageService } from '../../../services/observability/usage-storage';
+import { Dispatcher } from '../../../services/dispatch/dispatcher';
+import { ProbeService } from '../../../services/probes/probe-service';
 import { closeDatabase, getDatabase, getSchema, initializeDatabase } from '../../../db/client';
 import { runMigrations } from '../../../db/migrate';
 
@@ -1270,12 +1270,8 @@ describe('GET /v0/management/model-insights', () => {
       // Provider pendingRates are consistent with provider-level data
       for (const provider of body.providers) {
         const pm = provider.metrics;
-        expect(pm.pendingRate).toBeCloseTo(
-          pm.requests > 0 ? pm.pendingRequests / pm.requests : 0
-        );
-        expect(pm.otherRate).toBeCloseTo(
-          pm.requests > 0 ? pm.otherRequests / pm.requests : 0
-        );
+        expect(pm.pendingRate).toBeCloseTo(pm.requests > 0 ? pm.pendingRequests / pm.requests : 0);
+        expect(pm.otherRate).toBeCloseTo(pm.requests > 0 ? pm.otherRequests / pm.requests : 0);
         // Provider rate reconciliation (legacy: errorRate includes otherRate)
         expect(pm.successRate + pm.errorRate + pm.pendingRate).toBeCloseTo(
           pm.requests > 0 ? 1.0 : 0.0

@@ -2,14 +2,14 @@
   "name": "plexus2",
   "module": "index.ts",
   "devDependencies": {
-    "@biomejs/biome": "2.5.1",
-    "@redocly/cli": "^2.35.0",
-    "agent-browser": "^0.30.1",
+    "@biomejs/biome": "2.5.5",
+    "@redocly/cli": "^2.40.0",
+    "agent-browser": "^0.32.4",
     "bun-types": "1.3.14",
-    "lefthook": "^2.1.9",
+    "lefthook": "^2.1.10",
     "octokit": "^5.0.5",
     "typescript-language-server": "^5.3.0",
-    "vitest": "^4.1.9",
+    "vitest": "^4.1.10",
     "yaml": "^2.9.0"
   },
   "private": true,
@@ -18,6 +18,11 @@
     "profile": "bun run dev --profile",
     "dev:pglite": "bun run scripts/dev.ts --pglite",
     "dev:full": "bun run scripts/dev.ts --full",
+    "dev:agent": "bun run scripts/dev-agent.ts",
+    "dev:agent:pglite": "bun run scripts/dev-agent.ts dev:pglite",
+    "dev:agent:raw": "bun run scripts/dev-agent.ts dev",
+    "dev:script": "bun run scripts/dev-agent.ts",
+    "dev:stop": "bun run scripts/dev-agent.ts stop",
     "dev:get:port": "bun run scripts/dev-config.ts port",
     "dev:get:db_path": "bun run scripts/dev-config.ts db_path",
     "build:frontend": "cd packages/frontend && bun run build",
@@ -35,8 +40,11 @@
     "prep-dev": "bun run scripts/prep-dev.ts",
     "prep-dev:clear": "bun run scripts/prep-dev.ts --clear",
     "prep-dev:reset": "bun run scripts/prep-dev.ts --reset",
+    "clear-dev": "bun run scripts/prep-dev.ts --clear",
     "prep-dev:save": "bun run scripts/prep-dev.ts --save",
     "prep-dev:live": "bun run scripts/prep-dev.ts --live",
+    "populate-dev": "bun run scripts/populate-dev.ts",
+    "build:default-populate": "bun run scripts/build-populate.ts",
     "postinstall": "bun run scripts/wrap-drizzle-kit.ts",
     "prepare": "if [ -z \"$CI\" ]; then lefthook install; fi",
     "format": "bunx biome format --write .",
@@ -49,11 +57,15 @@
     "preview:openapi": "bunx @redocly/cli preview-docs docs/openapi/openapi.yaml",
     "sync:openapi": "bun run scripts/sync-openapi.ts",
     "sync:openapi:write": "bun run scripts/sync-openapi.ts --write",
+    "sync:openapi:types": "bun run bundle:openapi && bunx openapi-typescript docs/openapi.yaml -o scripts/openapi-types.ts",
     "generate-migrations": "bun run scripts/generate-migrations.ts",
     "deploy:staging": "bun run scripts/deploy-staging.ts"
   },
   "type": "module",
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.82.1"
+  }
 }

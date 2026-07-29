@@ -6,6 +6,7 @@ export const requestUsage = sqliteTable(
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
     requestId: text('request_id').notNull().unique(),
+    clientRequestId: text('client_request_id'),
     date: text('date').notNull(),
     sourceIp: text('source_ip'),
     apiKey: text('api_key'),
@@ -39,6 +40,9 @@ export const requestUsage = sqliteTable(
     tokensPerSec: real('tokens_per_sec'),
     isStreamed: integer('is_streamed').notNull().default(0),
     isPassthrough: integer('is_passthrough').notNull().default(0),
+    isRaw: integer('is_raw').notNull().default(0),
+    requestMethod: text('request_method'),
+    requestPath: text('request_path'),
     responseStatus: text('response_status'),
     tokensEstimated: integer('tokens_estimated').notNull().default(0),
     createdAt: integer('created_at').notNull(),
@@ -62,6 +66,7 @@ export const requestUsage = sqliteTable(
     dateIdx: index('idx_request_usage_date').on(table.date),
     providerIdx: index('idx_request_usage_provider').on(table.provider),
     requestIdIdx: index('idx_request_usage_request_id').on(table.requestId),
+    clientRequestIdIdx: index('idx_request_usage_client_request_id').on(table.clientRequestId),
     apiKeyIdx: index('idx_request_usage_api_key').on(table.apiKey, table.startTime),
   })
 );

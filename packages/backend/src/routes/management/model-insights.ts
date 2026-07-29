@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { and, eq, gte, lte } from 'drizzle-orm';
 import { getSchema } from '../../db/client';
-import { UsageStorageService } from '../../services/usage-storage';
+import { UsageStorageService } from '../../services/observability/usage-storage';
 import {
   buildInsightsResponse,
   groupByProvider,

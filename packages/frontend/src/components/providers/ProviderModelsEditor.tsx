@@ -18,9 +18,26 @@ import { Input } from '../ui/Input';
 import { Badge } from '../ui/Badge';
 import { OpenRouterSlugInput } from '../ui/OpenRouterSlugInput';
 import { DebouncedInput } from '../ui/DebouncedInput';
+import { Tooltip } from '../ui/Tooltip';
 import type { Provider } from '../../lib/api';
 import { api } from '../../lib/api';
 import { KNOWN_ADAPTERS } from './ProviderAdvancedEditor';
+import { apiAccessToKey, hasApiAccess, toggleApiAccess } from '../../lib/apiFormats';
+
+const API_ACCESS_OPTIONS = [
+  { type: 'chat', label: 'chat' },
+  { type: 'completions', label: 'completions' },
+  { type: 'messages', label: 'messages' },
+  { type: 'gemini', label: 'gemini' },
+  { type: 'responses', label: 'responses' },
+  { type: 'ollama', label: 'ollama' },
+] as const;
+
+const GPT5_SUPPRESSION_ADAPTER = 'suppress_unsupported_gpt5_options';
+
+function isGpt5Model(modelId: string): boolean {
+  return /^gpt-5(?:[.-]|$)/i.test(modelId);
+}
 
 const getApiBadgeStyle = (apiType: string): React.CSSProperties => {
   switch (apiType.toLowerCase()) {
@@ -28,6 +45,8 @@ const getApiBadgeStyle = (apiType: string): React.CSSProperties => {
       return { backgroundColor: '#D97757', color: 'white', border: 'none' };
     case 'chat':
       return { backgroundColor: '#ebebeb', color: '#333', border: 'none' };
+    case 'completions':
+      return { backgroundColor: '#3b82f6', color: 'white', border: 'none' };
     case 'gemini':
       return { backgroundColor: '#5084ff', color: 'white', border: 'none' };
     case 'embeddings':
@@ -337,9 +356,7 @@ export function ProviderModelsEditor({
                               onChange={(e) => {
                                 const raw = e.target.value;
                                 // Map legacy 'chat' to 'text' on edit.
-                                const newType = (
-                                  raw === 'chat' ? 'text' : raw
-                                ) as
+                                const newType = (raw === 'chat' ? 'text' : raw) as
                                   | 'text'
                                   | 'embeddings'
                                   | 'transcriptions'
@@ -377,50 +394,87 @@ export function ProviderModelsEditor({
                               </label>
                               <div
                                 style={{
-                                  display: 'grid',
-                                  gridTemplateColumns: 'repeat(5, auto)',
+                                  display: 'flex',
+                                  flexWrap: 'wrap',
                                   gap: '4px',
-                                  justifyContent: 'start',
                                 }}
                               >
-                                {['chat', 'messages', 'gemini', 'responses', 'ollama'].map(
-                                  (apiType) => (
-                                    <label
-                                      key={apiType}
-                                      style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '3px',
-                                        cursor: 'pointer',
-                                      }}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={(mCfg.access_via || []).includes(apiType)}
-                                        onChange={() => {
-                                          const current = mCfg.access_via || [];
-                                          const next = current.includes(apiType)
-                                            ? current.filter((a: string) => a !== apiType)
-                                            : [...current, apiType];
-                                          updateModelConfig(mId, { access_via: next });
-                                        }}
-                                      />
-                                      <span
-                                        className="inline-flex items-center rounded-xl font-medium"
-                                        style={{
-                                          ...getApiBadgeStyle(apiType),
-                                          fontSize: '10px',
-                                          padding: '2px 6px',
-                                          opacity: (mCfg.access_via || []).includes(apiType)
-                                            ? 1
-                                            : 0.5,
-                                        }}
-                                      >
-                                        {apiType}
-                                      </span>
-                                    </label>
-                                  )
-                                )}
+                                {API_ACCESS_OPTIONS.map((option) => {
+                                  const key = apiAccessToKey(option);
+                                  const selected = hasApiAccess(mCfg.access_via, key);
+                                  return (
+                                    <div key={key} className="flex items-center gap-2">
+                                      <label className="flex cursor-pointer items-center gap-[3px]">
+                                        <input
+                                          type="checkbox"
+                                          checked={selected}
+                                          onChange={() => {
+                                            let next = toggleApiAccess(mCfg.access_via, option);
+                                            if (key === 'responses' && selected) {
+                                              next = next.filter(
+                                                (entry) =>
+                                                  apiAccessToKey(entry) !== 'responses:lite'
+                                              );
+                                            }
+                                            updateModelConfig(mId, { access_via: next });
+                                          }}
+                                        />
+                                        <span
+                                          className="inline-flex items-center rounded-xl font-medium"
+                                          style={{
+                                            ...getApiBadgeStyle(option.type),
+                                            fontSize: '10px',
+                                            padding: '2px 6px',
+                                            opacity: selected ? 1 : 0.5,
+                                          }}
+                                        >
+                                          {option.label}
+                                        </span>
+                                      </label>
+                                      {key === 'responses' && selected && (
+                                        <div className="flex items-center gap-1">
+                                          <label className="flex cursor-pointer items-center gap-1.5 font-body text-[11px] text-text-secondary">
+                                            <input
+                                              type="checkbox"
+                                              checked={hasApiAccess(
+                                                mCfg.access_via,
+                                                'responses:lite'
+                                              )}
+                                              onChange={() => {
+                                                const next = toggleApiAccess(mCfg.access_via, {
+                                                  type: 'responses',
+                                                  subtype: 'lite',
+                                                });
+                                                updateModelConfig(mId, { access_via: next });
+                                              }}
+                                            />
+                                            <span>Lite</span>
+                                          </label>
+                                          <Tooltip
+                                            position="top"
+                                            content={
+                                              <div className="w-64 whitespace-normal font-body leading-relaxed">
+                                                Passes Codex-specific Responses input through
+                                                unchanged, including additional tools. Enable only
+                                                for targets known to support Responses Lite—usually
+                                                direct OpenAI or Codex endpoints. Most
+                                                OpenAI-compatible proxies do not support it.
+                                              </div>
+                                            }
+                                          >
+                                            <button
+                                              type="button"
+                                              aria-label="About Responses Lite"
+                                              className="flex h-4 w-4 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-bg-hover hover:text-text-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                                            >
+                                              <Info size={12} />
+                                            </button>
+                                          </Tooltip>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
                               </div>
                               {(!mCfg.access_via || mCfg.access_via.length === 0) && (
                                 <span className="font-body text-[11px] text-text-muted italic">
@@ -432,10 +486,7 @@ export function ProviderModelsEditor({
                                 const hasOllamaBaseUrl = Object.entries(providerBaseUrlMap).some(
                                   ([type, url]) => type === 'ollama' && url && url.trim() !== ''
                                 );
-                                if (
-                                  hasOllamaBaseUrl &&
-                                  !(mCfg.access_via || []).includes('ollama')
-                                ) {
+                                if (hasOllamaBaseUrl && !hasApiAccess(mCfg.access_via, 'ollama')) {
                                   return (
                                     <div className="flex items-start gap-2 py-1.5 px-2 bg-info/10 border border-info/30 rounded-sm">
                                       <Info size={14} className="text-info shrink-0 mt-0.5" />
@@ -900,6 +951,75 @@ export function ProviderModelsEditor({
                               background: 'var(--color-bg-subtle)',
                             }}
                           >
+                            {isGpt5Model(mId) &&
+                              (() => {
+                                const modelAdapters: any[] = mCfg.adapter
+                                  ? Array.isArray(mCfg.adapter)
+                                    ? mCfg.adapter
+                                    : [mCfg.adapter]
+                                  : [];
+                                const suppressionDisabled = modelAdapters.some(
+                                  (entry: any) =>
+                                    typeof entry !== 'string' &&
+                                    entry.name === GPT5_SUPPRESSION_ADAPTER &&
+                                    entry.enabled === false
+                                );
+                                return (
+                                  <label
+                                    style={{
+                                      gridColumn: '1 / -1',
+                                      display: 'flex',
+                                      alignItems: 'flex-start',
+                                      gap: '8px',
+                                      cursor: 'pointer',
+                                      padding: '4px 8px',
+                                      borderRadius: 'var(--radius-sm)',
+                                      border: '1px solid var(--color-border-glass)',
+                                      background: suppressionDisabled
+                                        ? 'var(--color-bg-glass)'
+                                        : 'var(--color-bg-hover)',
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={!suppressionDisabled}
+                                      style={{ marginTop: '2px', flexShrink: 0 }}
+                                      onChange={() => {
+                                        const withoutSuppression = modelAdapters.filter(
+                                          (entry: any) =>
+                                            (typeof entry === 'string' ? entry : entry.name) !==
+                                            GPT5_SUPPRESSION_ADAPTER
+                                        );
+                                        const next = suppressionDisabled
+                                          ? withoutSuppression
+                                          : [
+                                              ...withoutSuppression,
+                                              {
+                                                name: GPT5_SUPPRESSION_ADAPTER,
+                                                options: {},
+                                                enabled: false,
+                                              },
+                                            ];
+                                        updateModelConfig(mId, {
+                                          adapter: next.length > 0 ? next : undefined,
+                                        });
+                                      }}
+                                    />
+                                    <div>
+                                      <div className="font-body text-[12px] font-medium text-text">
+                                        Suppress Unsupported GPT-5 Options
+                                      </div>
+                                      <div
+                                        className="font-body text-[11px] text-text-secondary"
+                                        style={{ lineHeight: 1.35 }}
+                                      >
+                                        Enabled by default. Removes generation options GPT-5 does
+                                        not accept.
+                                      </div>
+                                    </div>
+                                  </label>
+                                );
+                              })()}
                             {KNOWN_ADAPTERS.map((a) => {
                               const modelAdapters: any[] = mCfg.adapter
                                 ? Array.isArray(mCfg.adapter)
@@ -2142,6 +2262,14 @@ export function ProviderModelsEditor({
                               Concurrency: {mCfg.maxConcurrency}
                             </Badge>
                           )}
+                          {mCfg.auto_compat === true && (
+                            <Badge
+                              status="neutral"
+                              style={{ fontSize: '10px', padding: '2px 8px' }}
+                            >
+                              Auto Compat
+                            </Badge>
+                          )}
                         </div>
                         {modelAdvancedOpen[mId] && (
                           <div
@@ -2154,6 +2282,28 @@ export function ProviderModelsEditor({
                               background: 'var(--color-bg-subtle)',
                             }}
                           >
+                            <div className="flex flex-col gap-0.5">
+                              <label className="flex items-start gap-2 py-1 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={mCfg.auto_compat === true}
+                                  onChange={(e) =>
+                                    updateModelConfig(mId, {
+                                      auto_compat: e.target.checked ? true : undefined,
+                                    })
+                                  }
+                                />
+                                <div>
+                                  <div className="font-body text-[12px] text-text">Auto Compat</div>
+                                  <div
+                                    className="font-body text-[11px] text-text-muted"
+                                    style={{ lineHeight: 1.35 }}
+                                  >
+                                    Use pi-ai registry hints for this model.
+                                  </div>
+                                </div>
+                              </label>
+                            </div>
                             <div className="flex flex-col gap-0.5">
                               <label className="font-body text-[11px] font-medium text-text-secondary">
                                 Max Concurrency

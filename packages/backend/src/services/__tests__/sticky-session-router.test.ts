@@ -1,9 +1,9 @@
 import { describe, expect, test, beforeEach } from 'vitest';
 import { registerSpy } from '../../../test/test-utils';
-import { Router } from '../router';
+import { Router } from '../routing/router';
 import { setConfigForTesting } from '../../config';
-import { CooldownManager } from '../cooldown-manager';
-import { StickySessionManager } from '../sticky-session-manager';
+import { CooldownManager } from '../runtime/cooldown-manager';
+import { StickySessionManager } from '../routing/sticky-session-manager';
 
 function configWithThreeTargets(): any {
   return {
@@ -54,7 +54,7 @@ describe('Router sticky_session integration', () => {
   test('hoists the sticky target to position 0 when present and healthy', async () => {
     setConfigForTesting(configWithThreeTargets() as any);
 
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'p3', 'm3');
 
     const result = await Router.resolveCandidates('sticky-alias', 'chat', 'm:abc');
 
@@ -72,7 +72,7 @@ describe('Router sticky_session integration', () => {
     cfg.models['sticky-alias'].sticky_session = false;
     setConfigForTesting(cfg as any);
 
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'p3', 'm3');
 
     const result = await Router.resolveCandidates('sticky-alias', 'chat', 'm:abc');
 
@@ -83,7 +83,7 @@ describe('Router sticky_session integration', () => {
   test('does not hoist when no session key is provided (single-turn request)', async () => {
     setConfigForTesting(configWithThreeTargets() as any);
 
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'p3', 'm3');
 
     const result = await Router.resolveCandidates('sticky-alias', 'chat', null);
 
@@ -98,7 +98,7 @@ describe('Router sticky_session integration', () => {
       async (targets: any[]) => targets.filter((t: any) => t.provider !== 'p3')
     );
 
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'p3', 'm3');
 
     const result = await Router.resolveCandidates('sticky-alias', 'chat', 'm:abc');
 
@@ -107,11 +107,27 @@ describe('Router sticky_session integration', () => {
     expect(result[0]?.provider).toBe('p1');
   });
 
+  test('filters incompatible API subtype targets before sticky-session hoisting', async () => {
+    const cfg = configWithThreeTargets();
+    cfg.providers.p1.models.m1.access_via = ['responses'];
+    cfg.providers.p2.models.m2.access_via = [{ type: 'responses', subtype: 'lite' }];
+    cfg.providers.p3.models.m3.access_via = ['chat'];
+    setConfigForTesting(cfg as any);
+
+    // Sticky entry points at p1, but p1 only supports base Responses. A
+    // Responses Lite request must not be pinned there before selection.
+    StickySessionManager.getInstance().set('sticky-alias', 'responses:lite', 'm:abc', 'p1', 'm1');
+
+    const result = await Router.resolveCandidates('sticky-alias', 'responses:lite', 'm:abc');
+
+    expect(result.map((r) => `${r.provider}/${r.model}`)).toEqual(['p2/m2']);
+  });
+
   test('falls back to normal ordering when sticky pick no longer exists in alias targets', async () => {
     setConfigForTesting(configWithThreeTargets() as any);
 
     // Stored target points at a provider that is no longer in the alias config.
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'removed', 'gone');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'removed', 'gone');
 
     const result = await Router.resolveCandidates('sticky-alias', 'chat', 'm:abc');
 
@@ -132,7 +148,7 @@ describe('Router sticky_session integration', () => {
     } as any;
     setConfigForTesting(cfg as any);
 
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'p3', 'm3');
 
     const result = await Router.resolveCandidates('other-alias', 'chat', 'm:abc');
 
@@ -143,7 +159,7 @@ describe('Router sticky_session integration', () => {
   test('different session keys on the same alias route independently (no cross-session leak)', async () => {
     setConfigForTesting(configWithThreeTargets() as any);
 
-    StickySessionManager.getInstance().set('sticky-alias', 'm:session-A', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:session-A', 'p3', 'm3');
 
     // Lookup with a DIFFERENT session key on the same alias — must not hoist p3.
     const result = await Router.resolveCandidates('sticky-alias', 'chat', 'm:session-B');
@@ -154,13 +170,25 @@ describe('Router sticky_session integration', () => {
     expect(resultA[0]?.provider).toBe('p3');
   });
 
+  test('same alias and session route independently by API type', async () => {
+    setConfigForTesting(configWithThreeTargets() as any);
+
+    StickySessionManager.getInstance().set('sticky-alias', 'responses', 'm:abc', 'p3', 'm3');
+
+    const chatResult = await Router.resolveCandidates('sticky-alias', 'chat', 'm:abc');
+    expect(chatResult[0]?.provider).toBe('p1');
+
+    const responsesResult = await Router.resolveCandidates('sticky-alias', 'responses', 'm:abc');
+    expect(responsesResult[0]?.provider).toBe('p3');
+  });
+
   test('uses canonical alias name for sticky lookup when called via additional_alias', async () => {
     const cfg = configWithThreeTargets();
     cfg.models['sticky-alias'].additional_aliases = ['nickname'] as any;
     setConfigForTesting(cfg as any);
 
     // Sticky entry was stored under the canonical name.
-    StickySessionManager.getInstance().set('sticky-alias', 'm:abc', 'p3', 'm3');
+    StickySessionManager.getInstance().set('sticky-alias', 'chat', 'm:abc', 'p3', 'm3');
 
     const result = await Router.resolveCandidates('nickname', 'chat', 'm:abc');
 

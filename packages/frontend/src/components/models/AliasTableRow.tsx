@@ -1,5 +1,6 @@
 import React from 'react';
-import { Edit2, Trash2, Clock, Play, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Edit2, Trash2, Clock, Play, Loader2, CheckCircle, XCircle, BarChart3 } from 'lucide-react';
 import { CopyButton } from '../ui/CopyButton';
 import { Badge } from '../ui/Badge';
 import { Switch } from '../ui/Switch';
@@ -7,6 +8,7 @@ import { Alias, Provider, Cooldown } from '../../lib/api';
 import { formatMsToMinSec } from '@plexus/shared';
 import { SELECTOR_LABELS } from '../../lib/selectors';
 import { getAliasProviderLabels, getAliasTargetCount } from '../../lib/modelList';
+import { modelInsightsPath } from '../../lib/model-insights';
 
 interface AliasTableRowProps {
   alias: Alias;
@@ -60,6 +62,15 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
             {alias.id}
           </div>
           <CopyButton value={alias.id} size="sm" />
+          <Link
+            to={modelInsightsPath(alias.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="bg-none border-none cursor-pointer p-1 rounded text-primary opacity-60 transition-opacity hover:opacity-100 no-underline"
+            title={`View insights for ${alias.id}`}
+            aria-label={`View insights for ${alias.id}`}
+          >
+            <BarChart3 size={14} />
+          </Link>
           <button
             onClick={() => onDelete(alias)}
             className="bg-none border-none cursor-pointer p-1 rounded color-danger opacity-60 transition-opacity hover:opacity-100"

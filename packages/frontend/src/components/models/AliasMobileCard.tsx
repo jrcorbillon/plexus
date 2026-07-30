@@ -1,5 +1,6 @@
 import React from 'react';
-import { Trash2, Loader2, CheckCircle, AlertTriangle, Play } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Trash2, Loader2, CheckCircle, AlertTriangle, Play, BarChart3 } from 'lucide-react';
 import { CopyButton } from '../ui/CopyButton';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -7,6 +8,7 @@ import { Switch } from '../ui/Switch';
 import { ModelTypeBadge } from './ModelTypeBadge';
 import type { Alias, Provider, Cooldown } from '../../lib/api';
 import { getAliasProviderLabels, getAliasTargetCount } from '../../lib/modelList';
+import { modelInsightsPath } from '../../lib/model-insights';
 
 interface Props {
   alias: Alias;
@@ -63,6 +65,15 @@ export const AliasMobileCard: React.FC<Props> = ({
             )}
           </div>
         </button>
+        <Link
+          to={modelInsightsPath(alias.id)}
+          onClick={(e) => e.stopPropagation()}
+          className="flex items-center justify-center h-8 w-8 rounded text-primary no-underline transition-colors hover:bg-bg-hover"
+          title={`View insights for ${alias.id}`}
+          aria-label={`View insights for ${alias.id}`}
+        >
+          <BarChart3 size={14} />
+        </Link>
         <Button
           variant="ghost"
           size="icon"

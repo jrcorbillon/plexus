@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, eq, gte, lte } from 'drizzle-orm';
+import { and, eq, gte, lte, or } from 'drizzle-orm';
 import { getSchema } from '../../db/client';
 import { UsageStorageService } from '../../services/observability/usage-storage';
 import {
@@ -40,7 +40,11 @@ export async function registerModelInsightsRoutes(
       .from(schema.requestUsage)
       .where(
         and(
-          eq(schema.requestUsage.incomingModelAlias, model),
+          // Include alternate aliases resolved to this model, as well as legacy literal matches.
+          or(
+            eq(schema.requestUsage.incomingModelAlias, model),
+            eq(schema.requestUsage.canonicalModelName, model)
+          ),
           gte(schema.requestUsage.startTime, rangeResult.startTimeMs),
           lte(schema.requestUsage.startTime, rangeResult.endTimeMs)
         )

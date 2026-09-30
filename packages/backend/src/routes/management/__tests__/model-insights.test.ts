@@ -209,6 +209,52 @@ describe('GET /v0/management/model-insights', () => {
   // -------------------------------------------------------------------------
   // VAL-API-005: Endpoint is read-only GET surface
   // -------------------------------------------------------------------------
+  it('includes alternate and direct aliases for the canonical model without double counting', async () => {
+    const now = Date.now();
+    await db.insert(schema.requestUsage).values([
+      makeRow({
+        startTime: now - 1000,
+        incomingModelAlias: 'glm-latest',
+        canonicalModelName: 'insight-alias',
+        tokensInput: 100,
+      }),
+      makeRow({
+        startTime: now - 1000,
+        incomingModelAlias: 'direct/insight-alias/default',
+        canonicalModelName: 'insight-alias',
+        tokensInput: 200,
+      }),
+      makeRow({
+        startTime: now - 1000,
+        incomingModelAlias: 'insight-alias',
+        canonicalModelName: 'insight-alias',
+        tokensInput: 300,
+      }),
+      makeRow({
+        startTime: now - 1000,
+        incomingModelAlias: 'different-alias',
+        canonicalModelName: 'insight-alias-extra',
+        tokensInput: 400,
+      }),
+      makeRow({
+        startTime: now - 25 * 60 * 60 * 1000,
+        incomingModelAlias: 'glm-latest',
+        canonicalModelName: 'insight-alias',
+        tokensInput: 500,
+      }),
+    ]);
+
+    const res = await fastify.inject({
+      method: 'GET',
+      url: '/v0/management/model-insights?model=insight-alias&range=24h',
+      headers: { 'x-admin-key': ADMIN_KEY },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().metrics.requests).toBe(3);
+    expect(res.json().metrics.inputTokens).toBe(600);
+  });
+
   it('rejects POST with 404', async () => {
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
       const res = await fastify.inject({

@@ -4,6 +4,8 @@ import { BackupService } from '../../services/configuration/backup-service';
 import type { UsageStorageService } from '../../services/observability/usage-storage';
 import type { McpUsageStorageService } from '../../services/mcp-proxy/mcp-usage-storage';
 
+const RESTORE_BODY_LIMIT = 1024 * 1024 * 1024;
+
 export async function registerBackupRoutes(
   fastify: FastifyInstance,
   usageStorage?: UsageStorageService,
@@ -57,11 +59,7 @@ export async function registerBackupRoutes(
    */
   fastify.post(
     '/v0/management/restore',
-    {
-      // Full backups bundle operational data (request logs, usage, etc.) and can
-      // far exceed the global 30MB limit, so allow a much larger restore payload.
-      bodyLimit: 1024 * 1024 * 1024, // 1GB
-    },
+    { bodyLimit: RESTORE_BODY_LIMIT },
     async (request, reply) => {
       try {
         const contentType = request.headers['content-type'] || '';

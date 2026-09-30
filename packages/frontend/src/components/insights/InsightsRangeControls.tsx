@@ -93,19 +93,11 @@ export const InsightsRangeControls: React.FC<InsightsRangeControlsProps> = ({
         <div className="w-full sm:w-auto flex items-center gap-2">
           <div className="flex items-center gap-2">
             <PlayCircle size={24} color="#94a3b8" />
-            <DateTimePicker
-              value={startDate}
-              onChange={setStartDate}
-              placeholder="Start date"
-            />
+            <DateTimePicker value={startDate} onChange={setStartDate} placeholder="Start date" />
           </div>
           <div className="flex items-center gap-2">
             <Circle size={24} color="#94a3b8" />
-            <DateTimePicker
-              value={endDate}
-              onChange={setEndDate}
-              placeholder="End date"
-            />
+            <DateTimePicker value={endDate} onChange={setEndDate} placeholder="End date" />
           </div>
           {(startDate || endDate) && (
             <button

@@ -1,3 +1,9 @@
+colors: false
+
+output:
+  - summary
+  - failure
+
 pre-commit:
   # Skip the entire hook in CI — GitHub Actions runs each check independently
   # in dedicated workflow steps, making the hook redundant and harmful
@@ -40,6 +46,7 @@ pre-commit:
       exclude:
         - "packages/backend/drizzle/migrations/**"
         - "packages/backend/drizzle/migrations_pg/**"
+        - "packages/backend/src/assets/openapi.json"
       run: bunx biome format --write {staged_files} && git add {staged_files}
 
     # --- Biome: lint all sources ---------------------------------------------

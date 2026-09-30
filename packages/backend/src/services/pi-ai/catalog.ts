@@ -25,13 +25,20 @@ import path from 'node:path';
 import { createProvider } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type {
+  AnyModel,
   Api,
+  ClassifierApi,
+  ClassifierModel,
+  ImageApi,
+  ImageModel,
   Model,
+  ModelsPublication,
   ModelsStore,
   ModelsStoreEntry,
+  ModelType,
+  ModelTypeMap,
   MutableModels,
   Provider,
-  ProviderModelsStore,
   ProviderStreams,
 } from '@earendil-works/pi-ai';
 import { logger } from '../../utils/logger';
@@ -48,7 +55,7 @@ const SELF_REFRESHING_PROVIDERS = new Set(['radius']);
 // ─── pi.dev protocol client ─────────────────────────────────────────────────
 
 /** pi.dev answers model-ID keyed objects; tolerate array/{models:[]} shapes too. */
-function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
+function parseCatalog(providerId: string, value: unknown): AnyModel[] {
   const entries = Array.isArray(value)
     ? value
     : typeof value === 'object' &&
@@ -60,11 +67,15 @@ function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
         ? Object.values(value)
         : undefined;
   if (!entries) throw new Error(`Invalid model catalog for provider "${providerId}"`);
-  return entries
+  // Preserve every model type: pi-ai 0.99 catalogs carry chat, image, and
+  // classifier entries. Plexus routes images (/v1/images) and decisions
+  // (/v1/decisions) through the media dispatcher, so dropping non-chat
+  // entries here would lose overlay data.
+  return (entries as AnyModel[])
     .filter(
-      (entry): entry is Model<Api> => typeof entry === 'object' && entry !== null && 'id' in entry
+      (entry): entry is AnyModel => typeof entry === 'object' && entry !== null && 'id' in entry
     )
-    .map((model) => ({ ...model, provider: providerId }));
+    .map((model) => ({ ...model, provider: providerId }) as AnyModel);
 }
 
 /**
@@ -74,12 +85,12 @@ function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
 async function fetchPiDevCatalog(
   providerId: string,
   options: {
-    store: ProviderModelsStore;
-    signal?: AbortSignal;
+    stored?: Readonly<ModelsStoreEntry>;
+    signal: AbortSignal;
     catalogBaseUrl?: string;
     fetchImpl?: typeof fetch;
   }
-): Promise<readonly Model<Api>[]> {
+): Promise<readonly AnyModel[]> {
   const catalogBaseUrl = options.catalogBaseUrl ?? DEFAULT_CATALOG_BASE_URL;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const url = new URL(`/api/models/providers/${encodeURIComponent(providerId)}`, catalogBaseUrl);
@@ -88,8 +99,7 @@ async function fetchPiDevCatalog(
     signal: options.signal,
   });
   if (response.status === 404 || response.status === 501) {
-    const stored = await options.store.read();
-    return stored?.models ?? [];
+    return options.stored?.models ?? [];
   }
   if (!response.ok) {
     throw new Error(`Model catalog request failed for ${providerId}: ${response.status}`);
@@ -110,18 +120,36 @@ export function withRemoteCatalog(
     stream: provider.stream as unknown as ProviderStreams['stream'],
     streamSimple: provider.streamSimple as unknown as ProviderStreams['streamSimple'],
   };
-  return createProvider({
+  const wrapped = createProvider({
     id: provider.id,
     name: provider.name,
     baseUrl: provider.baseUrl,
     headers: provider.headers,
     auth: provider.auth,
-    models: provider.getModels(),
+    // Baseline must include every type: provider.getModels() is chat-only in
+    // pi-ai 0.99, while Plexus also serves image models and (via the media
+    // dispatcher) decisions.
+    models: provider.getAllModels?.() ?? provider.getModels(),
     filterModels: provider.filterModels,
+    filterAllModels: provider.filterAllModels,
     fetchModels: (context) =>
-      fetchPiDevCatalog(provider.id, { ...options, store: context.store, signal: context.signal }),
+      fetchPiDevCatalog(provider.id, {
+        ...options,
+        stored: context.stored,
+        signal: context.signal,
+      }),
     api: streams,
   }) as Provider;
+  // createProvider takes images/classifiers as implementation maps, while the
+  // Provider instance exposes bound generateImages/classify methods. Forward
+  // the originals so the wrapper doesn't drop non-chat dispatch capability.
+  if (typeof provider.generateImages === 'function') {
+    (wrapped as Provider).generateImages = provider.generateImages.bind(provider);
+  }
+  if (typeof provider.classify === 'function') {
+    (wrapped as Provider).classify = provider.classify.bind(provider);
+  }
+  return wrapped;
 }
 
 // ─── Stores ─────────────────────────────────────────────────────────────────
@@ -273,6 +301,13 @@ export interface ModelCatalog {
   getModel(provider: string, id: string): Model<Api> | null;
   /** Sync read of the merged catalog, one provider or all. */
   getModels(provider?: string): readonly Model<Api>[];
+  /** Sync read of every model type (chat, image, classifier), one provider or all. */
+  getAllModels(provider?: string): readonly AnyModel[];
+  /** Sync read of one model type, one provider or all. */
+  getModelsOfType<TType extends ModelType>(
+    type: TType,
+    provider?: string
+  ): readonly ModelTypeMap[TType][];
 }
 
 export function createModelCatalog(deps: ModelCatalogDeps): ModelCatalog {
@@ -280,6 +315,40 @@ export function createModelCatalog(deps: ModelCatalogDeps): ModelCatalog {
   const now = deps.now ?? Date.now;
   let wrapped = false;
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  const refreshGenerations = new Map<string, number>();
+
+  async function refreshProvider(
+    provider: Provider,
+    options: {
+      allowNetwork: boolean;
+      force?: boolean;
+      signal: AbortSignal;
+      generation: number;
+    }
+  ): Promise<void> {
+    const stored = await store.read(provider.id, { signal: options.signal });
+    await provider.refreshModels?.({
+      stored: stored ? structuredClone(stored) : undefined,
+      allowNetwork: options.allowNetwork,
+      force: options.allowNetwork ? options.force : undefined,
+      signal: options.signal,
+      publish: async (publication: ModelsPublication): Promise<boolean> => {
+        if (options.signal.aborted || refreshGenerations.get(provider.id) !== options.generation) {
+          return false;
+        }
+        if (publication.persist === null) {
+          await store.delete(provider.id, { signal: options.signal });
+        } else if (publication.persist !== undefined) {
+          await store.write(provider.id, publication.persist, { signal: options.signal });
+        }
+        if (options.signal.aborted || refreshGenerations.get(provider.id) !== options.generation) {
+          return false;
+        }
+        publication.update?.();
+        return true;
+      },
+    });
+  }
 
   function wrapProviders(): void {
     if (wrapped) return;
@@ -301,6 +370,7 @@ export function createModelCatalog(deps: ModelCatalogDeps): ModelCatalog {
   ): Promise<CatalogRefreshResult> {
     wrapProviders();
     const allowNetwork = options.allowNetwork ?? true;
+    const signal = options.signal ?? new AbortController().signal;
     const errors: Record<string, string> = {};
     let refreshed = 0;
     await Promise.all(
@@ -309,30 +379,27 @@ export function createModelCatalog(deps: ModelCatalogDeps): ModelCatalog {
         // (own store, own cadence) — don't drive their refresh here.
         if (SELF_REFRESHING_PROVIDERS.has(provider.id)) return;
         if (typeof provider.refreshModels !== 'function') return;
-        const scoped: ProviderModelsStore = {
-          read: () => store.read(provider.id),
-          write: (entry) => store.write(provider.id, entry),
-          delete: () => store.delete(provider.id),
-        };
+        const generation = (refreshGenerations.get(provider.id) ?? 0) + 1;
+        refreshGenerations.set(provider.id, generation);
         try {
           // Always restore the persisted overlay first.
-          await provider.refreshModels({
-            store: scoped,
+          await refreshProvider(provider, {
             allowNetwork: false,
-            signal: options.signal,
+            signal,
+            generation,
           });
-          if (allowNetwork && !options.signal?.aborted) {
-            const stored = await store.read(provider.id);
+          if (allowNetwork && !signal.aborted) {
+            const stored = await store.read(provider.id, { signal });
             const stale =
               options.force === true ||
               stored?.checkedAt === undefined ||
               now() - stored.checkedAt >= REMOTE_CATALOG_REFRESH_INTERVAL_MS;
             if (stale) {
-              await provider.refreshModels({
-                store: scoped,
+              await refreshProvider(provider, {
                 allowNetwork: true,
                 force: options.force,
-                signal: options.signal,
+                signal,
+                generation,
               });
             }
           }
@@ -400,6 +467,23 @@ export function createModelCatalog(deps: ModelCatalogDeps): ModelCatalog {
         return [];
       }
     },
+    getAllModels(provider?: string): readonly AnyModel[] {
+      try {
+        return models.getAllModels(provider);
+      } catch {
+        return [];
+      }
+    },
+    getModelsOfType<TType extends ModelType>(
+      type: TType,
+      provider?: string
+    ): readonly ModelTypeMap[TType][] {
+      try {
+        return models.getModelsOfType(type, provider);
+      } catch {
+        return [];
+      }
+    },
   };
 }
 
@@ -433,6 +517,31 @@ export function getCatalogModel(provider: string, modelId: string): Model<Api> |
 /** Catalog-aware replacement for pi-ai's static getBuiltinModels. */
 export function getCatalogModels(provider?: string): readonly Model<Api>[] {
   return getModelCatalog().getModels(provider);
+}
+
+/** Catalog-aware read of every model type (chat, image, classifier). */
+export function getCatalogAllModels(provider?: string): readonly AnyModel[] {
+  return getModelCatalog().getAllModels(provider);
+}
+
+/** Catalog-aware read of one model type. */
+export function getCatalogModelsOfType<TType extends ModelType>(
+  type: TType,
+  provider?: string
+): readonly ModelTypeMap[TType][] {
+  return getModelCatalog().getModelsOfType(type, provider);
+}
+
+/** Convenience: image models only. */
+export function getCatalogImageModels(provider?: string): readonly ImageModel<ImageApi>[] {
+  return getCatalogModelsOfType('image', provider);
+}
+
+/** Convenience: classifier models only. */
+export function getCatalogClassifierModels(
+  provider?: string
+): readonly ClassifierModel<ClassifierApi>[] {
+  return getCatalogModelsOfType('classifier', provider);
 }
 
 /**

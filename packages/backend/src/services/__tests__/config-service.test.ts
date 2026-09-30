@@ -38,6 +38,7 @@ function createMockRepo() {
     getFailoverPolicy: vi.fn(() => Promise.resolve({ enabled: false })),
     getCooldownPolicy: vi.fn(() => Promise.resolve({ enabled: false })),
     getBackgroundExplorationConfig: vi.fn(() => Promise.resolve({ enabled: false })),
+    getMcpOAuthConfig: vi.fn(() => Promise.resolve(undefined)),
     getTimeoutConfig: vi.fn(() => Promise.resolve({ defaultSeconds: 300 })),
     getStallConfig: vi.fn(() =>
       Promise.resolve({
@@ -136,6 +137,7 @@ describe('ConfigService write coalescing', () => {
       api_key: 'synthetic-key',
       disable_cooldown: false,
       stall_cooldown: false,
+      allow_100_percent_utilization: false,
       estimateTokens: false,
       useClaudeMasking: false,
       quota_checker: {

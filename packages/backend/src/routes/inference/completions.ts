@@ -15,6 +15,8 @@ import { wireUpstreamTimeout, wireEarlyDisconnectDetection } from '../../utils/t
 import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
 import { sanitizeHeaders } from '../../utils/sanitize-headers';
 import { CLIENT_REQUEST_ID_HEADER, getClientRequestId } from '../../utils/client-request-id';
+import { getCacheRoutingHeaders } from '../../utils/cache-routing-headers';
+import { getReasoningLogValue } from '../../services/pi-ai/reasoning';
 
 export async function registerCompletionsRoute(
   fastify: FastifyInstance,
@@ -37,6 +39,7 @@ export async function registerCompletionsRoute(
       startTime,
       isStreamed: false,
       responseStatus: 'pending',
+      reasoningEffort: getReasoningLogValue(undefined, request.body) ?? null,
     };
 
     // Emit 'started' event immediately
@@ -57,11 +60,18 @@ export async function registerCompletionsRoute(
       });
 
       logger.silly('Incoming Completions Request', body);
+      // Start debug capture before parsing so malformed payloads are still traced.
+      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
       const transformer = new OpenAICompletionTransformer();
       let unifiedRequest = await transformer.parseRequest(body);
       unifiedRequest.incomingApiType = 'completions';
       unifiedRequest.originalBody = body;
       unifiedRequest.requestId = requestId;
+      unifiedRequest.cacheRoutingHeaders = getCacheRoutingHeaders(
+        request.headers,
+        body.prompt_cache_key
+      );
+      usageRecord.reasoningEffort = getReasoningLogValue(unifiedRequest, body) ?? null;
       unifiedRequest = attachKeyAccessPolicy(request, unifiedRequest);
 
       const xAppHeader = Array.isArray(request.headers['x-app'])
@@ -79,8 +89,6 @@ export async function registerCompletionsRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
-
       if (quotaEnforcer) {
         const quotaCheck = await checkQuotaMiddleware(request, reply, quotaEnforcer);
         if (!quotaCheck.ok) {
@@ -92,7 +100,7 @@ export async function registerCompletionsRoute(
 
       const abortController = new AbortController();
       const { signal: dispatchSignal, resolveTimeoutMs } = wireUpstreamTimeout(abortController);
-      earlyDisconnect = wireEarlyDisconnectDetection(request, abortController);
+      earlyDisconnect = wireEarlyDisconnectDetection(request, abortController, requestId);
       const stallDetectionResult = wireStallDetection(abortController, getGlobalStallConfig());
       const unifiedResponse = await dispatcher.dispatch(
         unifiedRequest,
@@ -106,6 +114,7 @@ export async function registerCompletionsRoute(
         provider: unifiedResponse.plexus?.provider,
         selectedModelName: unifiedResponse.plexus?.model,
         canonicalModelName: unifiedResponse.plexus?.canonicalModel,
+        reasoningEffort: usageRecord.reasoningEffort,
       });
 
       const shouldEstimateTokens = unifiedResponse.plexus?.config?.estimateTokens || false;

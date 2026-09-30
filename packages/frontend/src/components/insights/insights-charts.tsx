@@ -68,7 +68,10 @@ export const ChartPanel: React.FC<{ children: React.ReactNode }> = ({ children }
 
   return (
     <ChartPanelContext.Provider value={dimensions}>
-      <div ref={containerRef} style={{ height: CHART_CONTAINER_HEIGHT, width: '100%', marginTop: '12px' }}>
+      <div
+        ref={containerRef}
+        style={{ height: CHART_CONTAINER_HEIGHT, width: '100%', marginTop: '12px' }}
+      >
         {dimensions ? children : null}
       </div>
     </ChartPanelContext.Provider>
@@ -331,9 +334,7 @@ export const InsightsTimeSeriesCharts: React.FC<{
               tickLine={false}
             />
             <Tooltip
-              content={
-                <BucketTooltip formatters={{ totalCost: (v) => [formatCost(v), 'Cost'] }} />
-              }
+              content={<BucketTooltip formatters={{ totalCost: (v) => [formatCost(v), 'Cost'] }} />}
             />
             <Area
               type="monotone"

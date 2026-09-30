@@ -91,10 +91,16 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Validate published provider preset schema
+        run: bun run check:provider-presets-schema
+
+      - name: Generate server OpenAPI asset
+        run: bun run generate:openapi:asset
 
       - name: Build frontend
         run: bun run build:frontend
@@ -256,20 +262,29 @@ jobs:
 
       - name: Run release notes agent
         id: release_notes_agent
-        uses: mcowger/pi-action@main
+        # claude-code-action detects GitHub event type (PR/issue/comment) and
+        # rejects unsupported ones, including `push` — which is how this
+        # workflow is triggered. The base-action/ subdirectory of the same
+        # repo is the underlying Claude Code executor without the GitHub
+        # event/webhook layer, so it runs regardless of event. Referencing
+        # it here (rather than the separately-tagged anthropics/claude-code-
+        # base-action mirror, whose tags lag far behind and pin an ancient
+        # Claude Code CLI version) keeps it on the same current v1 release
+        # line as claude-code-action.
+        uses: anthropics/claude-code-action/base-action@v1.0.231
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          provider: openrouter
-          model: ${{ vars.LLM_MODEL_ID }}
-          token: ${{ env.LLM_API_KEY }}
-          base_url: ${{ secrets.LLM_API_HOST }}
-          trigger: generate-release-notes
-          load_builtin_extensions: true
-          suppress_final_comment: true
-          export_session_html: true
-          prompt_file: .github/prompts/release-notes.md
+          anthropic_api_key: ${{ env.LLM_API_KEY }}
+          claude_args: |
+            --model ${{ vars.LLM_MODEL_ID }}
+            --effort medium
+            --max-turns 10
+            --allowedTools "Read,Write"
+          prompt: |
+            Read `.github/prompts/release-notes.md` and follow its instructions exactly.
+            The release tag is `${{ needs.setup.outputs.tag }}`. Do not perform any other work.
         env:
           RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+          ANTHROPIC_BASE_URL: ${{ secrets.LLM_API_HOST }}
 
       - name: Read agent-generated notes
         id: read_notes
@@ -288,15 +303,14 @@ jobs:
             echo 'notes=' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload agent session
-        if: always()
+      - name: Upload Claude execution
+        if: always() && steps.release_notes_agent.outputs.execution_file != ''
         uses: actions/upload-artifact@v7
         with:
-          name: release-notes-session
-          path: ${{ steps.release_notes_agent.outputs.session_html_path }}
+          name: release-notes-execution
+          path: ${{ steps.release_notes_agent.outputs.execution_file }}
           retention-days: 7
           if-no-files-found: ignore
-          archive: false
 
   # ── Build Binaries ──────────────────────────────────────────────────────
   build-binaries:
@@ -312,10 +326,13 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Generate server OpenAPI asset
+        run: bun run generate:openapi:asset
 
       - name: Build frontend
         run: bun run build:frontend
@@ -326,6 +343,11 @@ jobs:
           bun run compile:linux-arm64
           bun run compile:macos
           bun run compile:windows
+          bun run compile:cli:linux-amd64
+          bun run compile:cli:linux-arm64
+          bun run compile:cli:macos-amd64
+          bun run compile:cli:macos-arm64
+          bun run compile:cli:windows
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
@@ -336,6 +358,11 @@ jobs:
             plexus-linux-arm64
             plexus-macos
             plexus.exe
+            plexuscli-linux-amd64
+            plexuscli-linux-arm64
+            plexuscli-macos-amd64
+            plexuscli-macos-arm64
+            plexuscli.exe
           retention-days: 1
 
   # ── Build Docker Image (per-arch, cache-isolated) ─────────────────────
@@ -460,13 +487,60 @@ jobs:
           docker rm plexus-smoke-test 2>/dev/null || true
           exit 1
 
+  # ── Publish CLI to npm ─────────────────────────────────────────────────
+  publish-cli:
+    name: Publish CLI to npm
+    needs: [setup, quality-gates]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Set up Node for npm trusted publishing
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test CLI package
+        run: |
+          bun run --cwd packages/cli test
+          bun run --cwd packages/cli typecheck
+
+      - name: Set next CLI patch version
+        run: |
+          package_name=$(node -p "require('./packages/cli/package.json').name")
+          latest_version=$(npm view "$package_name" version)
+          next_version=$(node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            if (![major, minor, patch].every(Number.isInteger)) process.exit(1);
+            console.log(`${major}.${minor}.${patch + 1}`);
+          ' "$latest_version")
+          npm pkg set "version=$next_version" --workspace="$package_name"
+          echo "Publishing $package_name@$next_version"
+
+      - name: Publish CLI
+        run: npm publish --workspace=@mcowger/plexus-cli --access public
+
   # ── Verify binary arch inside each platform image ─────────────────────
   # Catches the exact failure mode from issue #550: an arm64-labelled image
   # that actually contains an x86-64 binary.
   # ── Create Release ─────────────────────────────────────────────────────
   release:
     name: Create Release
-    needs: [setup, build-binaries, build-docker-manifest, generate-release-notes]
+    needs: [setup, build-binaries, build-docker-manifest, generate-release-notes, publish-cli]
     runs-on: ubuntu-latest
     steps:
       - name: Download binaries
@@ -485,5 +559,10 @@ jobs:
             release/plexus-linux-arm64
             release/plexus-macos
             release/plexus.exe
+            release/plexuscli-linux-amd64
+            release/plexuscli-linux-arm64
+            release/plexuscli-macos-amd64
+            release/plexuscli-macos-arm64
+            release/plexuscli.exe
           draft: false
           prerelease: false

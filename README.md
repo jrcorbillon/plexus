@@ -3,9 +3,11 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.com/channels/292942011261124608/1503831216095367239">Discord</a> ·
+  <a href="https://discord.com/invite/linuxchat">Discord invite</a> ·
+  <a href="https://discord.com/channels/292942011261124608/1503831216095367239">Plexus chat</a> ·
   <a href="docs/openapi/openapi.yaml">API reference</a> ·
   <a href="docs/CONFIGURATION.md">Configuration</a> ·
+  <a href="docs/CUSTOM_QUOTA_CHECKERS.md">Custom quota checkers</a> ·
   <a href="docs/INSTALLATION.md">Installation</a> ·
   <a href="docs/TESTING.md">Testing</a>
 </p>
@@ -15,7 +17,7 @@ Plexus sits in front of your LLM providers so clients can use one consistent API
 ## Why Plexus
 
 - **Keep client code stable.** Accept OpenAI Chat Completions and Responses, Anthropic Messages, Gemini native requests, embeddings, audio, images, streaming, and tool use.
-- **Route on your terms.** Map aliases to one or more targets with `random`, `in_order`, `cost`, `performance`, `latency`, or `e2e_performance` selection.
+- **Route on your terms.** Map aliases to one or more targets with `random`, `in_order`, `cost`, `performance`, `latency`, `usage`, `quota`, or `e2e_performance` selection.
 - **Operate with evidence.** Inspect request logs, tokens, cost, latency, live throughput, provider health, and per-key quotas from the dashboard.
 - **Stay resilient.** Apply exponential cooldowns, fail over failed providers, detect stalled streams, and use vision fallthrough for non-vision targets.
 
@@ -107,9 +109,18 @@ ENCRYPTION_KEY="<current-key>" NEW_ENCRYPTION_KEY="<new-key>" ./plexus rekey
 ## Development
 
 ```bash
-bun run setup:hooks
+bun install
+bun run dev
 bun run test
 ```
+
+The dev port is derived from the worktree directory name. Use
+`mise exec -- bun run dev` when mise is not activated in your shell. For a
+background stack, use `bun run dev:agent --detach` and stop it with
+`bun run dev:stop` (prefix both with `mise exec --` when needed). FRP exposure
+is optional: when `frpc`, `FRPC_SERVER_ADDR`, and `FRPC_AUTH_TOKEN` are
+available, the dev server creates a worktree-specific tunnel and tears it down
+with the server.
 
 `bun test` is intentionally blocked; use `bun run test`. See [Testing](docs/TESTING.md).
 

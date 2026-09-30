@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo } from 'react';
 import { Alias } from '../lib/api';
+import { getModelOptionKey } from '../lib/modelOptions';
 import { useModels } from '../hooks/useModels';
 import { AliasTableRow } from '../components/models/AliasTableRow';
 import { AliasMobileCard } from '../components/models/AliasMobileCard';
@@ -52,6 +53,7 @@ const MODEL_TYPE_GROUPS: ModelTypeGroup[] = [
   { type: 'transcriptions', label: 'Transcriptions', defaultOpen: false },
   { type: 'speech', label: 'Speech', defaultOpen: false },
   { type: 'image', label: 'Image', defaultOpen: false },
+  { type: 'decisions', label: 'Decisions', defaultOpen: false },
 ];
 
 export const Models = () => {
@@ -113,6 +115,13 @@ export const Models = () => {
   const providerOptions = useMemo(
     () => getModelListProviderOptions(allAliases, providers),
     [allAliases, providers]
+  );
+
+  // Aliases eligible as fallback targets: exclude the alias currently being
+  // edited to avoid an obvious self-reference.
+  const availableAliasSlugs = useMemo(
+    () => allAliases.map((a) => a.id).filter((id) => id !== originalId && id !== editingAlias.id),
+    [allAliases, originalId, editingAlias.id]
   );
 
   const visibleAliases = useMemo(
@@ -189,13 +198,16 @@ export const Models = () => {
     (targets: Array<{ provider: string; model: string }>) => {
       setEditingAlias((prev: Alias) => {
         const updatedTargets = [...(prev.target_groups[0]?.targets ?? [])];
+        const existingTargetKeys = new Set(
+          prev.target_groups.flatMap((group) =>
+            group.targets.map((target) => getModelOptionKey(target.provider, target.model))
+          )
+        );
         for (const t of targets) {
-          const alreadyExists = updatedTargets.some(
-            (x: { provider: string; model: string }) =>
-              x.provider === t.provider && x.model === t.model
-          );
-          if (!alreadyExists) {
+          const key = getModelOptionKey(t.provider, t.model);
+          if (!existingTargetKeys.has(key)) {
             updatedTargets.push({ ...t, enabled: true });
+            existingTargetKeys.add(key);
           }
         }
         const groups = [...prev.target_groups];
@@ -465,7 +477,8 @@ export const Models = () => {
                         | 'embeddings'
                         | 'transcriptions'
                         | 'speech'
-                        | 'image',
+                        | 'image'
+                        | 'decisions',
                     })
                   }
                 >
@@ -474,6 +487,7 @@ export const Models = () => {
                   <option value="transcriptions">Transcriptions</option>
                   <option value="speech">Speech</option>
                   <option value="image">Image</option>
+                  <option value="decisions">Decisions</option>
                 </select>
               </div>
 
@@ -604,6 +618,7 @@ export const Models = () => {
                 groups={editingAlias.target_groups}
                 providers={providers}
                 availableModels={availableModels}
+                availableAliases={availableAliasSlugs}
                 onChange={(groups) => setEditingAlias({ ...editingAlias, target_groups: groups })}
               />
             </div>

@@ -303,9 +303,7 @@ export class OllamaTransformer implements Transformer {
                   reasoning_tokens: unifiedChunk.usage.reasoning_tokens,
                 };
               }
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(hardErrorPayload)}\n\n`)
-              );
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(hardErrorPayload)}\n\n`));
               hasSentError = true;
               continue;
             }

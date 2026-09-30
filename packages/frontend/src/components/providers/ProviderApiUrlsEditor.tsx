@@ -1,6 +1,5 @@
 import { ChevronDown, ChevronRight, Plus, Trash2, AlertTriangle } from 'lucide-react';
 import { Button } from '../ui/Button';
-import { Input } from '../ui/Input';
 import { Badge } from '../ui/Badge';
 import type { Provider } from '../../lib/api';
 
@@ -12,7 +11,10 @@ const KNOWN_APIS = [
   'embeddings',
   'transcriptions',
   'speech',
-  'images',
+  'openai-images',
+  'openrouter-images',
+  'codex-images',
+  'systemone',
   'responses',
   'ollama',
 ];
@@ -58,7 +60,6 @@ export function ProviderApiUrlsEditor({
                 apiBaseUrl: 'oauth://',
                 apiKey: 'oauth',
                 oauthProvider: editingProvider.oauthProvider || OAUTH_PROVIDERS[0].value,
-                oauthAccount: editingProvider.oauthAccount || '',
                 type: ['oauth'],
               });
             } else {
@@ -67,7 +68,6 @@ export function ProviderApiUrlsEditor({
                 apiBaseUrl: {},
                 apiKey: '',
                 oauthProvider: '',
-                oauthAccount: '',
                 type: [],
               });
             }
@@ -97,6 +97,10 @@ export function ProviderApiUrlsEditor({
           <li>
             <span style={{ fontWeight: 600 }}>completions</span> — OpenAI text/code completion
             endpoints (e.g. <code className="text-primary">/v1/completions</code> or FIM models)
+          </li>
+          <li>
+            <span style={{ fontWeight: 600 }}>openrouter-images</span> — OpenRouter dedicated image
+            API; use the <code className="text-primary">/api/v1</code> base URL
           </li>
           <li>
             <span style={{ fontWeight: 600 }}>ollama</span> — Native Ollama API, use the root URL
@@ -133,14 +137,9 @@ export function ProviderApiUrlsEditor({
               ))}
             </select>
           </div>
-          <Input
-            label="OAuth Account"
-            value={editingProvider.oauthAccount || ''}
-            onChange={(e) =>
-              setEditingProvider({ ...editingProvider, oauthAccount: e.target.value })
-            }
-            placeholder="e.g. work, personal, team-a"
-          />
+          <div className="text-[11px] text-text-secondary" style={{ lineHeight: '1.5' }}>
+            Uses the provider ID as its OAuth account — one login per provider.
+          </div>
         </div>
       ) : (
         <div className="border border-border-glass rounded-md overflow-hidden">
@@ -165,7 +164,9 @@ export function ProviderApiUrlsEditor({
                 e.stopPropagation();
                 addApiBaseUrlEntry();
               }}
-              disabled={Object.keys(getApiBaseUrlMap()).length >= KNOWN_APIS.length}
+              disabled={KNOWN_APIS.every((t) =>
+                Object.prototype.hasOwnProperty.call(getApiBaseUrlMap(), t)
+              )}
             >
               <Plus size={14} />
             </Button>
@@ -219,6 +220,15 @@ export function ProviderApiUrlsEditor({
                             {t}
                           </option>
                         ))}
+                        {/* Stored configs can carry types no longer offered
+                            (e.g. pre-collapse Decisions names): show the
+                            current value so the select never misrepresents
+                            the config. */}
+                        {!KNOWN_APIS.includes(apiType) && (
+                          <option key={apiType} value={apiType} className="bg-bg-surface text-text">
+                            {apiType} (legacy)
+                          </option>
+                        )}
                       </select>
                       <input
                         className="w-full h-[27px] py-0 px-2 font-body text-[12px] leading-none text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"

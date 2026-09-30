@@ -14,8 +14,10 @@ export interface UsageRecord {
   selectedModelName: string | null;
   finalAttemptProvider: string | null;
   finalAttemptModel: string | null;
+  upstreamModel?: string | null;
   allAttemptedProviders: string | null;
   outgoingApiType: string | null;
+  reasoningEffort?: string | null;
   tokensInput: number | null;
   tokensOutput: number | null;
   tokensReasoning: number | null;

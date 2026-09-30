@@ -1,4 +1,5 @@
 // Unified Message Types
+import type { DecisionsAnswer, DecisionsQuestion } from './decisions';
 
 export interface TextContent {
   type: 'text';
@@ -60,6 +61,7 @@ export interface UnifiedToolFunction {
     $schema?: string;
   };
   parametersJsonSchema?: any; // Newer format supporting full JSON Schema (anyOf, oneOf, const)
+  strict?: boolean;
 }
 
 export interface UnifiedTool {
@@ -77,7 +79,7 @@ export interface UnifiedToolConfig {
   functionCallingPreference?: string;
 }
 
-export type ThinkLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ThinkLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface KeyAccessPolicy {
   allowedModels?: string[];
@@ -126,6 +128,7 @@ export interface UnifiedChatRequest {
     effort?: ThinkLevel;
     max_tokens?: number;
     enabled?: boolean;
+    adaptive?: boolean;
     summary?: string;
   };
   include?: string[];
@@ -164,6 +167,10 @@ export interface UnifiedChatRequest {
   user?: string;
   cacheRoutingHeaders?: CacheRoutingHeaders;
   anthropicBeta?: string;
+  /** Inbound `user-agent` header (captured by the inference routes). */
+  userAgent?: string;
+  /** Inbound `x-claude-code-session-id` header (Claude Code clients). */
+  claudeCodeSessionId?: string;
   incomingApiType?: string;
   originalBody?: any;
   metadata?: Record<string, any> & { plexus_metadata?: PlexusMetadata };
@@ -176,6 +183,7 @@ export interface CacheRoutingHeaders {
   'x-session-id'?: string;
   'x-prompt-cache-isolation-key'?: string;
   'x-multi-turn-session-id'?: string;
+  'x-opencode-session'?: string;
 }
 
 // Unified Response
@@ -198,6 +206,15 @@ export interface UnifiedUsage {
   reasoning_tokens: number;
   cached_tokens: number;
   cache_creation_tokens: number;
+  /**
+   * Image-token breakdowns reported by providers that bill images separately
+   * (OpenAI Responses `*_tokens_details.image_tokens`, emitted when the
+   * built-in `image_generation` tool runs). Left UNDEFINED when the provider
+   * reports no such detail so downstream payloads stay byte-identical —
+   * `undefined` means "not reported", which is distinct from a reported 0.
+   */
+  input_image_tokens?: number;
+  output_image_tokens?: number;
 }
 
 /**
@@ -226,6 +243,26 @@ export interface UnifiedImageGenerationCall {
   result: string;
 }
 
+/**
+ * A Responses-API built-in tool-call output item whose execution is deferred
+ * to the CLIENT (`execution: "client"`, e.g. `tool_search_call`) — the model
+ * expects the caller to run the call and continue the turn, mirroring how a
+ * `function_call` works. Carried through the unified layer typed and
+ * untouched (same pattern as UnifiedImageGenerationCall) rather than parsed
+ * into `tool_calls`, since these items are Responses-specific and have no
+ * Chat Completions/Anthropic Messages equivalent. Only populated/consumed by
+ * the Responses transformer (transformers/responses.ts): dropping one of
+ * these instead of re-emitting it natively leaves the client with no signal
+ * that a tool call is pending, so the response looks like a completed turn.
+ */
+export interface UnifiedClientToolCall {
+  type: string;
+  id: string;
+  call_id: string;
+  status?: string;
+  [key: string]: any;
+}
+
 export interface UnifiedChatResponse {
   id: string;
   model: string;
@@ -243,11 +280,12 @@ export interface UnifiedChatResponse {
     attemptCount?: number;
     finalAttemptProvider?: string;
     finalAttemptModel?: string;
+    /** Post-adapter model actually dispatched (providerPayload.model). */
+    upstreamModel?: string;
+    pricingModel?: string;
+    pricingFallback?: boolean;
     allAttemptedProviders?: string;
     retryHistory?: string;
-    // Energy estimation — resolved GPU and model params from dispatcher
-    gpuParams?: import('@plexus/shared').GpuParams;
-    modelParams?: import('@plexus/shared').ModelParams;
   };
   reasoning_content?: string | null;
   thinking?: {
@@ -274,6 +312,13 @@ export interface UnifiedChatResponse {
    * detection counts entries with a non-empty `result` as visible output.
    */
   image_generation_calls?: UnifiedImageGenerationCall[];
+  /**
+   * Client-executed built-in tool-call output items, typed (see
+   * UnifiedClientToolCall). Same pattern as `image_generation_calls`:
+   * responses-facing formatters re-emit them natively so the client sees the
+   * pending call and continues the turn.
+   */
+  client_tool_calls?: UnifiedClientToolCall[];
   annotations?: Annotation[];
   stream?: ReadableStream | any;
   bypassTransformation?: boolean;
@@ -360,6 +405,20 @@ export interface UnifiedChatStreamChunk {
    * skips the paired markdown content delta.
    */
   image_generation_calls?: UnifiedImageGenerationCall[];
+  /**
+   * Client-executed built-in tool-call output items carried typed (see
+   * UnifiedClientToolCall), CHUNK-level like `image_generation_calls` above.
+   * The responses-facing formatStream re-emits these as native output items;
+   * other formatters have no equivalent and simply ignore the field.
+   */
+  client_tool_calls?: UnifiedClientToolCall[];
+  /**
+   * Synthetic Claude Code `safeguard_results` attached to the terminal
+   * unified chunk when the alias opted into `synthetic_safeguard_approval`.
+   * Only the Anthropic stream formatter consumes this; all other formatters
+   * ignore it so cross-format streams stay byte-identical.
+   */
+  safeguard_results?: unknown;
 }
 
 // Unified Embeddings Request
@@ -499,16 +558,90 @@ export interface UnifiedSpeechResponse {
   isStreamed?: boolean;
 }
 
+// Unified Decisions Request
+//
+// Buffered Jev-style evaluations served by `systemone` targets (TypeSafe's
+// System One protocol). Local failover follows the alias target order.
+export interface UnifiedDecisionsRequest {
+  requestId?: string;
+  model: string;
+  state: string | Record<string, any> | any[];
+  questions: Record<string, DecisionsQuestion>;
+  // Internal tracking
+  incomingApiType?: string;
+  originalBody?: any;
+  metadata?: Record<string, any> & { plexus_metadata?: PlexusMetadata };
+}
+
+// Unified Decisions Response
+export interface UnifiedDecisionsResponse {
+  model: string;
+  answers: Record<string, DecisionsAnswer>;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cost?: number;
+  };
+  /** OpenRouter generation id, when the upstream reports one. */
+  id?: string;
+  /** Upstream provider name (e.g. `TypeSafe`), when reported. */
+  provider?: string;
+  plexus?: {
+    provider?: string;
+    model?: string;
+    apiType?: string;
+    targetApiType?: string;
+    pricing?: any;
+    providerDiscount?: number;
+    canonicalModel?: string;
+    config?: any;
+  };
+  rawResponse?: any;
+}
+
 // Unified Image Generation Request
+export type ImageResolution = '512' | '1K' | '2K' | '4K';
+
+export interface UnifiedImageReference {
+  type: 'image_url';
+  image_url: {
+    url: string;
+  };
+  media_type?: string;
+}
+
+export interface UnifiedImageProviderPreferences {
+  only?: string[];
+  ignore?: string[];
+  order?: string[];
+  sort?: string | Record<string, any>;
+  allow_fallbacks?: boolean;
+  options?: Record<string, any>;
+}
+
 export interface UnifiedImageGenerationRequest {
   requestId?: string;
   model: string;
   prompt: string;
   n?: number;
+  /** OpenRouter's normalized resolution tier. */
+  resolution?: ImageResolution;
+  /** Normalized ratio, for example `16:9` or `1:1`. */
+  aspect_ratio?: string;
+  /** Legacy pixel size or OpenRouter's tier-valued convenience size. */
   size?: string;
   response_format?: 'url' | 'b64_json';
   quality?: string;
   style?: string;
+  output_format?: 'png' | 'jpeg' | 'webp' | 'svg';
+  background?: 'auto' | 'transparent' | 'opaque';
+  output_compression?: number;
+  seed?: number;
+  stream?: boolean;
+  input_references?: UnifiedImageReference[];
+  /** Optional inpainting mask, kept distinct from an ordinary reference image. */
+  mask?: UnifiedImageReference;
+  provider?: UnifiedImageProviderPreferences;
   user?: string;
   // Internal tracking
   incomingApiType?: string;
@@ -522,17 +655,22 @@ export interface UnifiedImageGenerationResponse {
   data: Array<{
     url?: string;
     b64_json?: string;
+    media_type?: string;
     revised_prompt?: string;
   }>;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
     total_tokens?: number;
+    cost?: number;
   };
   plexus?: {
     provider?: string;
     model?: string;
     apiType?: string;
+    targetApiType?: string;
     pricing?: any;
     providerDiscount?: number;
     canonicalModel?: string;
@@ -541,7 +679,12 @@ export interface UnifiedImageGenerationResponse {
   rawResponse?: any;
 }
 
-// Unified Image Edit Request
+/**
+ * @deprecated Image edits now travel on `UnifiedImageGenerationRequest`, where
+ * the uploaded image is `input_references[0]` and the optional inpainting
+ * mask is `mask`. Only the deprecated `Dispatcher.dispatchImageEdits` facade
+ * still accepts this shape; convert with `editRequestToGenerationRequest`.
+ */
 export interface UnifiedImageEditRequest {
   requestId?: string;
   model: string;
@@ -563,23 +706,31 @@ export interface UnifiedImageEditRequest {
   metadata?: Record<string, any> & { plexus_metadata?: PlexusMetadata };
 }
 
-// Unified Image Edit Response
+/**
+ * @deprecated Structurally identical to `UnifiedImageGenerationResponse`, which
+ * every image dispatch now returns.
+ */
 export interface UnifiedImageEditResponse {
   created: number;
   data: Array<{
     url?: string;
     b64_json?: string;
+    media_type?: string;
     revised_prompt?: string;
   }>;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
     total_tokens?: number;
+    cost?: number;
   };
   plexus?: {
     provider?: string;
     model?: string;
     apiType?: string;
+    targetApiType?: string;
     pricing?: any;
     providerDiscount?: number;
     canonicalModel?: string;

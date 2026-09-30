@@ -18,14 +18,17 @@ function copyDirectory(sourceDir: string, targetDir: string) {
   }
 }
 
-const templateDbUrl = process.env.PLEXUS_TEST_DB_TEMPLATE_URL;
-const pgliteTemplateDir = process.env.PLEXUS_TEST_PGLITE_TEMPLATE_DIR;
-const tmpRoot = process.env.PLEXUS_TEST_DB_TMP_ROOT;
+const testDialect = process.env.PLEXUS_TEST_DIALECT;
+const sqliteTemplateDbUrl = process.env.PLEXUS_TEST_SQLITE_TEMPLATE_URL;
+const sqliteTmpRoot = process.env.PLEXUS_TEST_SQLITE_TMP_ROOT;
+const postgresTemplateDir = process.env.PLEXUS_TEST_POSTGRES_TEMPLATE_DIR;
+const postgresTmpRoot = process.env.PLEXUS_TEST_POSTGRES_TMP_ROOT;
 const workerId = process.env.VITEST_POOL_ID ?? process.env.VITEST_WORKER_ID ?? '0';
 
-if (templateDbUrl && tmpRoot) {
-  const templateDbPath = sqliteUrlToPath(templateDbUrl);
-  const workerDbPath = path.join(tmpRoot, `vitest-worker-${workerId}.sqlite`);
+if ((testDialect === 'sqlite' || testDialect === 'unit') && sqliteTemplateDbUrl && sqliteTmpRoot) {
+  const templateDbPath = sqliteUrlToPath(sqliteTemplateDbUrl);
+  const workerPrefix = testDialect === 'unit' ? 'vitest-unit-worker' : 'vitest-worker';
+  const workerDbPath = path.join(sqliteTmpRoot, `${workerPrefix}-${workerId}.sqlite`);
 
   if (templateDbPath && !fs.existsSync(workerDbPath)) {
     fs.copyFileSync(templateDbPath, workerDbPath);
@@ -34,15 +37,16 @@ if (templateDbUrl && tmpRoot) {
   const workerDbUrl = `sqlite://${workerDbPath}`;
   process.env.PLEXUS_TEST_DB_URL = workerDbUrl;
   process.env.DATABASE_URL = workerDbUrl;
-} else if (pgliteTemplateDir && tmpRoot) {
-  const workerDataDir = path.join(tmpRoot, `vitest-worker-${workerId}.pglite`);
+} else if (testDialect === 'postgres' && postgresTemplateDir && postgresTmpRoot) {
+  const workerDataDir = path.join(postgresTmpRoot, `vitest-worker-${workerId}.pglite`);
 
   if (!fs.existsSync(workerDataDir)) {
-    copyDirectory(pgliteTemplateDir, workerDataDir);
+    copyDirectory(postgresTemplateDir, workerDataDir);
   }
 
   const workerDbUrl =
-    process.env.PLEXUS_TEST_DB_URL || 'postgres://postgres:postgres@localhost:5432/plexus_test';
+    process.env.PLEXUS_TEST_POSTGRES_DB_URL ||
+    'postgres://postgres:postgres@localhost:5432/plexus_test';
   process.env.PLEXUS_POSTGRES_DRIVER = 'pglite';
   process.env.PLEXUS_PGLITE_DATA_DIR = workerDataDir;
   process.env.PLEXUS_TEST_DB_URL = workerDbUrl;
@@ -174,6 +178,27 @@ const mockGetModel = (provider: string, modelId: string) => {
     else if (modelId === 'gpt-5.4' || modelId.includes('responses')) api = 'openai-responses';
     else api = 'openai-completions';
   }
+  // GPT-5.6-style reasoning model with a gpt-5.6 thinkingLevelMap, mirroring
+  // the real pi-ai openai-responses catalog (minimal unsupported, off = none).
+  if (modelId.startsWith('gpt-5.6')) {
+    return {
+      id: modelId,
+      name: modelId,
+      contextWindow: 400000,
+      provider,
+      api: 'openai-responses',
+      reasoning: true,
+      thinkingLevelMap: {
+        off: 'none',
+        minimal: null,
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        xhigh: 'xhigh',
+        max: 'max',
+      },
+    };
+  }
   return {
     id: modelId,
     name: modelId,
@@ -189,7 +214,23 @@ const mockGetModel = (provider: string, modelId: string) => {
   };
 };
 
-const mockGetProviders = () => ['anthropic', 'openai-codex', 'openai', 'google'];
+// Mirrors pi-ai's builtin provider ids (subset). 'meta' is pi-ai 0.86's native
+// Muse subscription provider.
+const mockGetProviders = () => ['anthropic', 'openai-codex', 'openai', 'google', 'meta'];
+
+// Faithful port of pi-ai's getSupportedThinkingLevels: honours model.reasoning
+// and thinkingLevelMap ('null' = unsupported; xhigh/max require an explicit
+// entry) so reasoning-capability assertions track the model record under test.
+const EXTENDED_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const mockGetSupportedThinkingLevels = (model: any) => {
+  if (!model?.reasoning) return ['off'];
+  return EXTENDED_THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
+    return true;
+  });
+};
 
 // @earendil-works/pi-ai — single authoritative mock for the whole worker.
 //
@@ -216,11 +257,13 @@ vi.mock('@earendil-works/pi-ai', async (importOriginal) => {
     stream: mockModels.stream,
     calculateCost: vi.fn(() => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 })),
     clampThinkingLevel: (_m: any, l: string) => l,
-    getSupportedThinkingLevels: () => ['off', 'low', 'medium', 'high'],
+    getSupportedThinkingLevels: mockGetSupportedThinkingLevels,
     // The model catalog overlay delegates merge/restore/persist to pi-ai's
     // real createProvider — keep it real so catalog tests exercise genuine
     // library semantics.
     createProvider: actual.createProvider,
+    isModelType: actual.isModelType,
+    getModelType: actual.getModelType,
   };
 });
 
@@ -241,15 +284,41 @@ vi.mock('@earendil-works/pi-ai/compat', () => ({
 
 const MOCK_BUILTIN_PROVIDER_IDS = new Set(['anthropic', 'openai-codex', 'openai', 'google']);
 
+// Mirrors which real pi-ai builtin providers expose `auth.oauth` — kept in
+// sync with services/oauth/oauth-providers.ts's expectations so config
+// validation and OAuth provider listing behave the same under test as in
+// production. 'radius' is deliberately omitted (see that module's doc
+// comment); it must resolve as OAuth-less here too. 'meta' is pi-ai 0.86's
+// native Muse subscription provider.
+const MOCK_OAUTH_PROVIDER_IDS = new Set([
+  'anthropic',
+  'openai-codex',
+  'github-copilot',
+  'xai',
+  'kimi-coding',
+  'openrouter',
+  'meta',
+]);
+
 const mockModels = {
   complete: mockComplete,
   stream: mockStream,
   getModel: mockGetModel,
   getModels: mockGetModels,
-  getProviders: mockGetProviders,
+  // The real `Models.getProviders()` returns Provider objects; the shared
+  // string-id mock is kept for `getBuiltinProviders` (a string list upstream).
+  // Mapping to `{ id }` stubs here keeps OAuth provider listing faithful
+  // without disturbing the other consumers.
+  getProviders: () => mockGetProviders().map((id) => ({ id })),
   // Returns a truthy stub for known builtin provider ids, undefined otherwise.
   // Mirrors the real piAiModels.getProvider() (used internally by pi-ai routing).
-  getProvider: (id: string) => (MOCK_BUILTIN_PROVIDER_IDS.has(id) ? { id } : undefined),
+  getProvider: (id: string) =>
+    MOCK_BUILTIN_PROVIDER_IDS.has(id) || MOCK_OAUTH_PROVIDER_IDS.has(id)
+      ? {
+          id,
+          ...(MOCK_OAUTH_PROVIDER_IDS.has(id) ? { auth: { oauth: { name: id } } } : {}),
+        }
+      : undefined,
 };
 
 vi.mock('../src/utils/logger', () => ({

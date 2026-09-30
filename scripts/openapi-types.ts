@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+  '/.well-known/plexus/openapi.json': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the public OpenAPI document
+     * @description Returns the complete dereferenced OpenAPI 3.1 document. This endpoint is public and supports conditional requests with `If-None-Match`.
+     */
+    get: operations['getWellKnownPlexusOpenapi'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/health': {
     parameters: {
       query?: never;
@@ -281,6 +301,31 @@ export interface paths {
      *     supported on `tts-1`/`tts-1-hd`).
      */
     post: operations['postV1AudioSpeech'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/images': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * OpenRouter-compatible image generation
+     * @description Generates an image from a normalized OpenRouter-style request. Plexus
+     *     translates the request into the selected provider's native image API and
+     *     normalizes the response back to the image response contract.
+     *
+     *     Buffered generation is supported in this operation. Streaming image
+     *     events are not currently supported.
+     */
+    post: operations['postV1Images'];
     delete?: never;
     options?: never;
     head?: never;
@@ -764,12 +809,8 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * Configuration deployment status (admin only)
-     * @description Returns status flags about the current configuration state.
-     *
-     *     **Note:** Plexus no longer supports file-based configuration (YAML).
-     *     All configuration is stored in the database and managed via the Admin UI
-     *     or Management API.
+     * Get configuration resource counts (admin only)
+     * @description Returns counts for the database-backed configuration resources.
      *
      *     **Admin only** — limited principals receive 403.
      */
@@ -1491,7 +1532,7 @@ export interface paths {
     /**
      * Fetch `/v1/models` from an external URL (admin only)
      * @description Helper used by the admin UI when adding a new provider. Fetches the
-     *     target URL (with optional Bearer apiKey), normalizes OpenAI- and
+     *     target URL (with provider-appropriate optional apiKey authentication), normalizes OpenAI- and
      *     Ollama-style responses into `{ data: [...] }`, and returns it.
      *     Blocks localhost and cloud metadata addresses to mitigate SSRF.
      */
@@ -1585,6 +1626,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v0/management/pi/resolve-provider': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resolve the pi-ai provider for a new provider config (admin only)
+     * @description Resolves the pi-ai provider ID matching a prospective provider config, so
+     *     the management UI can pre-select `ProviderConfig.pi_ai_provider` and enable
+     *     `auto_compat` when creating a provider — and so the pi-ai dropdown's
+     *     `- auto -` entry can resolve to a concrete provider.
+     *
+     *     Resolution rules (shared with the UI's auto-detect):
+     *
+     *     - An `oauthProvider` that names a known pi-ai builtin provider wins outright:
+     *       an OAuth provider singularly identifies its compatible pi-ai provider.
+     *     - Otherwise `urls` (values from the provider's `api_base_url`) are matched
+     *       against pi-ai builtin base URLs — exact match first, then longest prefix —
+     *       so known API endpoints resolve even with extra path segments.
+     *     - Returns `{ "provider": null }` when nothing matches.
+     *
+     *     **Admin only** — limited principals receive 403.
+     */
+    post: operations['postV0ManagementPiResolveProvider'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v0/management/aliases': {
     parameters: {
       query?: never;
@@ -1599,7 +1674,6 @@ export interface paths {
      *     Each entry contains:
      *     - `target_groups` — Ordered array of target groups; each group has a name, selector, and targets
      *     - `type` — Model capability type (text, embeddings, transcriptions, speech, image)
-     *     - `model_architecture` — Used for energy estimation (kWh calculation)
      *     - `metadata` — Optional enriched data from external catalogs
      *     - `pricing` — Optional pricing configuration
      *
@@ -1635,12 +1709,6 @@ export interface paths {
      * Create or replace a model alias (admin only)
      * @description Creates a new alias or replaces an existing one.
      *
-     *     ## Energy recalculation
-     *
-     *     If you change `model_architecture`, the system recalculates estimated
-     *     energy usage (kWh) for all affected usage records. This happens
-     *     asynchronously after the alias is saved.
-     *
      *     ## Validation
      *
      *     The request body is validated against the `AliasConfig` schema.
@@ -1657,12 +1725,6 @@ export interface paths {
      * Merge updates into a model alias (admin only)
      * @description Merges the request body into the existing alias configuration,
      *     then validates the result.
-     *
-     *     ## Energy recalculation
-     *
-     *     If you change `model_architecture` (or add it if it was previously unset),
-     *     the system recalculates estimated energy usage (kWh) for all affected
-     *     usage records. This happens asynchronously after the update.
      *
      *     ## Merge behavior
      *
@@ -1723,57 +1785,6 @@ export interface paths {
      *     **Admin only** — limited principals receive 403.
      */
     delete: operations['deleteV0ManagementModelsByaliasId'];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v0/management/models/huggingface/{modelId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description HuggingFace repo ID, URL-encoded (e.g. `mistralai%2FMixtral-8x7B`). The `/` character must be encoded as `%2F`. */
-        modelId: string;
-      };
-      cookie?: never;
-    };
-    /**
-     * Fetch model architecture from HuggingFace (admin only)
-     * @description Fetches model architecture parameters from HuggingFace for use by the
-     *     energy-usage estimator.
-     *
-     *     ## Use case
-     *
-     *     The energy-usage estimator needs layer count, head count, and parameter
-     *     totals to calculate kWh consumed. This endpoint fetches that data from
-     *     HuggingFace's model card.
-     *
-     *     ## Rate limiting
-     *
-     *     - HuggingFace API has rate limits; repeated calls may be throttled
-     *     - Responses are cached in Plexus to reduce unnecessary calls
-     *
-     *     ## Response fields
-     *
-     *     - `success` — Whether the fetch succeeded
-     *     - `model_id` — The model ID queried
-     *     - `architecture` — Model architecture parameters:
-     *       - `total_params` — Total parameters in billions (estimated)
-     *       - `active_params` — Active (non-quantized) parameters
-     *       - `layers` — Number of transformer layers
-     *       - `heads` — Number of attention heads
-     *       - `kv_lora_rank` — KV quantization rank (if applicable)
-     *       - `qk_rope_head_dim` — QK RoPE head dimension (if applicable)
-     *       - `context_length` — Maximum context window
-     *       - `dtype` — Model data type (e.g. `float16`, `bfloat16`)
-     *
-     *     **Admin only** — limited principals receive 403.
-     */
-    get: operations['getV0ManagementModelsHuggingfaceBymodelId'];
-    put?: never;
-    post?: never;
-    delete?: never;
     options?: never;
     head?: never;
     patch?: never;
@@ -2209,6 +2220,58 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v0/management/mcp-servers/{serverName}/keys': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List MCP server keys (admin only) */
+    get: operations['getV0ManagementMcpServerKeys'];
+    put?: never;
+    /** Create an MCP server key (admin only) */
+    post: operations['postV0ManagementMcpServerKeys'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v0/management/mcp-servers/{serverName}/keys/{keyId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** Delete an MCP server key (admin only) */
+    delete: operations['deleteV0ManagementMcpServerKey'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v0/management/mcp-servers/{serverName}/keys/{keyId}/clear-cooldown': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Clear an MCP server key cooldown (admin only) */
+    post: operations['postV0ManagementMcpServerKeyClearCooldown'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v0/management/quota-checker-types': {
     parameters: {
       query?: never;
@@ -2217,8 +2280,9 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * Valid built-in quota-checker type strings (admin only)
-     * @description Returns the list of valid quota checker types.
+     * Registered quota-checker type strings (admin only)
+     * @description Returns the list of registered quota checker types, including enabled
+     *     admin-authored custom checkers.
      *
      *     ## Relationship to ProviderConfig
      *
@@ -2294,6 +2358,44 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v0/management/custom-checkers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List custom quota checkers (admin only) */
+    get: operations['getV0ManagementCustomCheckers'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v0/management/custom-checkers/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get a custom quota checker (admin only) */
+    get: operations['getV0ManagementCustomCheckersByid'];
+    /** Create or replace a custom quota checker (admin only) */
+    put: operations['putV0ManagementCustomCheckersByid'];
+    /** Test a custom quota checker without persisting a snapshot (admin only) */
+    post: operations['postV0ManagementCustomCheckersByid'];
+    /** Delete a custom quota checker (admin only) */
+    delete: operations['deleteV0ManagementCustomCheckersByid'];
+    options?: never;
+    head?: never;
+    /** Update a custom quota checker (admin only) */
+    patch: operations['patchV0ManagementCustomCheckersByid'];
+    trace?: never;
+  };
   '/v0/management/usage': {
     parameters: {
       query?: never;
@@ -2353,30 +2455,35 @@ export interface paths {
     };
     /**
      * Aggregated usage time-series and totals
-     * @description Returns bucketed series plus 7-day and since-midnight rollups.
+     * @description Returns range-scoped bucketed series and totals plus a since-midnight
+     *     rollup. Optional grouped breakdowns are computed server-side over the
+     *     complete requested range.
      *
      *     ## Scoping
      *
      *     Limited principals see only their own key's data; admins see global data.
      *
-     *     ## Bucket algorithm
+     *     ## Range and bucket algorithm
      *
      *     The endpoint uses adaptive bucketing to ensure meaningful visualizations:
-     *     - `hour` — returns hourly buckets for the last 24 hours
-     *     - `day` — returns daily buckets for the last 30 days
-     *     - `week` — returns weekly buckets for the last 12 weeks
-     *     - `month` — returns monthly buckets for the last 12 months
+     *     - `hour` — the last hour, in one-minute buckets
+     *     - `day` — the last 24 hours, in one-hour buckets
+     *     - `week` — the last 7 days, in one-day buckets
+     *     - `month` — the last 30 days, in one-day buckets
      *     - `custom` — requires `startDate` and `endDate`; buckets are auto-sized
-     *       based on the range duration
+     *       based on the range duration and the range may not exceed 12 months.
      *
      *     ## Response structure
      *
      *     - **series** — Time-bucketed data, where each bucket contains aggregated
      *       counts and token sums
-     *     - **stats** — Fixed 7-day rolling window (always the last 7 days, regardless
-     *       of `range`)
+     *     - **stats** — Aggregation over the requested range, including rich usage
+     *       and performance metrics
      *     - **today** — Aggregation since local midnight (not UTC), giving a
      *       "day-so-far" view
+     *     - **grouped** — Optional top-N grouped aggregates. Request dimensions with
+     *       the comma-separated `breakdowns` parameter. At most three dimensions are
+     *       allowed, and omitted groups are represented by an `Other` item.
      */
     get: operations['getV0ManagementUsageSummary'];
     put?: never;
@@ -2815,10 +2922,8 @@ export interface paths {
      *
      *     ## Admin-only
      *
-     *     This endpoint is available to both admin and limited principals,
-     *     but limited principals only see cooldowns for their own key's usage.
-     *
-     *     **Admin access:** full list. **Limited access:** scoped to own key.
+     *     This endpoint is available to both admin and limited principals. Cooldown
+     *     state is provider-level, so both receive the same active cooldown list.
      */
     get: operations['getV0ManagementCooldowns'];
     put?: never;
@@ -3460,6 +3565,13 @@ export interface paths {
      *
      *     - `ready: true` — Credentials exist and the provider can be used
      *     - `ready: false` — No credentials found; user needs to start OAuth flow
+     *     - `connectedAt` — When the credential was first stored (epoch ms)
+     *     - `refreshedAt` — When the credential was last saved, by login or token
+     *       refresh (epoch ms)
+     *     - `expiresAt` — When the current access token expires (epoch ms)
+     *
+     *     The timestamps are present only when `ready` is true and never include
+     *     token values.
      *
      *     ## Note
      *
@@ -3490,21 +3602,35 @@ export interface paths {
      *
      *     ## Data source
      *
-     *     This endpoint returns models from the pi-ai static catalog. It's used
-     *     to populate dropdowns in the UI when configuring provider targets.
+     *     For most providers this is the pi-ai static catalog. For `openai-codex` the
+     *     gateway asks the ChatGPT backend for the models the signed-in account may
+     *     actually use (the account-scoped list), then appends the Codex image models,
+     *     which the backend never lists. If that call fails — no credentials, upstream
+     *     error, timeout — the response degrades to the static catalog plus the image
+     *     models and carries a `warning`.
+     *
+     *     It's used to populate dropdowns in the UI when configuring provider targets.
      *
      *     ## Response fields
      *
-     *     - `id` — Model identifier (e.g. `gpt-5.4`)
-     *     - `name` — Human-readable model name
-     *     - `context_length` — Maximum context window in tokens
-     *     - `pricing` — Token pricing (if available)
+     *     - `data[].id` — Model identifier (e.g. `gpt-5.4`)
+     *     - `data[].name` — Human-readable model name
+     *     - `data[].context_length` — Maximum context window in tokens
+     *     - `data[].pricing` — Token pricing (if available)
+     *     - `data[].type` — `text` or `image` (image models cannot serve chat)
+     *     - `data[].access_via` — Target protocols the model can be reached through
+     *       (e.g. `codex-images`)
+     *     - `data[].visibility` — Upstream listing hint: `list` (advertised) or
+     *       `hide` (usable but not advertised)
+     *     - `source` — `codex-backend` when the list came from the live Codex backend,
+     *       `catalog` when it came from the pi-ai static catalog
+     *     - `warning` — Present only when live discovery was attempted and failed
      *
      *     ## Note
      *
-     *     This is a static catalog — it doesn't query the provider's live API.
-     *     Use `/v1/openrouter/models` or `/v1/models` to get the currently
-     *     configured model list.
+     *     Apart from `openai-codex`, this is a static catalog — it doesn't query the
+     *     provider's live API. Use `/v1/openrouter/models` or `/v1/models` to get the
+     *     currently configured model list.
      *
      *     **Admin only** — limited principals receive 403.
      */
@@ -4149,29 +4275,97 @@ export interface paths {
     /**
      * Live usage event stream
      * @description Server-Sent Events stream of request lifecycle events, used by the
-     *     admin dashboard for real-time monitoring.
+     *     admin dashboard for real-time monitoring. The server does not replay
+     *     historical events when a client connects; fetch `/v0/management/usage`
+     *     separately for historical records.
+     *
+     *     ## Wire format
+     *
+     *     The response is a UTF-8 `text/event-stream`. Each SSE message is a block
+     *     of lines terminated by a blank line (`\\n\\n`):
+     *
+     *     - `event` identifies the event type.
+     *     - `data` contains one line of JSON, except for `ping`, whose data is the
+     *       literal string `pong`.
+     *     - `id` is the event's server-generated epoch-millisecond timestamp encoded
+     *       as a string. It is informational; clients should not use it as a resume
+     *       cursor.
+     *
+     *     Clients should parse the `data` field according to the `event` value and
+     *     ignore event types they do not understand.
      *
      *     ## Event types
      *
-     *     - **started** — Request received, dispatched to provider.
-     *     - **updated** — Request metadata updated (e.g. token counts known).
-     *     - **completed** — Request finished (success or error). Contains the
-     *       full `UsageRecord`.
-     *     - **created** — Legacy/alias for `started`.
+     *     ### `started`
      *
-     *     Each event includes the `UsageRecord` payload (for `completed`) or
-     *     partial data (for `started`/`updated`).
+     *     Sent when a request is received. The `data` value is a partial
+     *     [`UsageRecord`](#/components/schemas/UsageRecord) with the fields
+     *     known at request start. It includes `responseStatus: "pending"`.
      *
-     *     ## Ping
+     *     ### `updated`
      *
-     *     A `ping` event is sent every 10 seconds to keep the connection alive.
+     *     Sent when additional request or routing metadata becomes available. The
+     *     `data` value is a sparse partial `UsageRecord`; it always includes
+     *     `requestId` and may contain only the fields that changed.
      *
-     *     ## Format
+     *     ### `progress`
+     *
+     *     Sent approximately once per second for each in-flight request being
+     *     monitored. The `data` value is a [`ProgressUpdate`](#/components/schemas/ProgressUpdate).
+     *     Progress events are transient and are not persisted as usage records.
+     *
+     *     ### `completed`
+     *
+     *     Sent when the request finishes, including success, error, cancellation,
+     *     timeout, or stall. The `data` value is the full `UsageRecord`, including
+     *     the final `responseStatus` and any available token, cost, and timing data.
+     *
+     *     ### `ping`
+     *
+     *     Sent every 10 seconds to keep the connection alive. Its `data` value is
+     *     the literal string `pong`; it has no JSON payload.
+     *
+     *     The backend may receive an internal legacy `created` notification when a
+     *     usage record is saved. That notification is normalized to the wire-level
+     *     `completed` event, so clients should not depend on an `event: created`
+     *     message.
+     *
+     *     ## Examples
+     *
+     *     A started request:
+     *
+     *     ```text
+     *     event: started
+     *     data: {"requestId":"550e8400-e29b-41d4-a716-446655440000","date":"2025-01-15T12:00:00.000Z","startTime":1736942400000,"responseStatus":"pending","isStreamed":true}
+     *     id: 1736942400000
      *
      *     ```
+     *
+     *     A progress update:
+     *
+     *     ```text
+     *     event: progress
+     *     data: {"requestId":"550e8400-e29b-41d4-a716-446655440000","apiKey":"team-a","isStreamed":true,"bytesReceived":4096,"bytesPerSec":2048,"semanticBytesReceived":3900,"semanticBytesPerSec":1950,"state":"MONITORING","elapsedMs":2000}
+     *     id: 1736942402000
+     *
+     *     ```
+     *
+     *     A completed request:
+     *
+     *     ```text
      *     event: completed
-     *     data: {"requestId":"...","date":"...","provider":"openai",...}
-     *     id: 1735689599000
+     *     data: {"requestId":"550e8400-e29b-41d4-a716-446655440000","date":"2025-01-15T12:00:00.000Z","provider":"openai","responseStatus":"success","tokensInput":120,"tokensOutput":42,"durationMs":2300}
+     *     id: 1736942402300
+     *
+     *     ```
+     *
+     *     A keepalive:
+     *
+     *     ```text
+     *     event: ping
+     *     data: pong
+     *     id: 1736942410000
+     *
      *     ```
      *
      *     ## Scoping
@@ -4256,6 +4450,7 @@ export interface paths {
      *     ## Query parameters
      *
      *     - `limit` — Maximum number of log entries to return (default 100, max 1000)
+     *     - `offset` — Number of newest entries to skip (default 0)
      *
      *     **Admin only** — limited principals receive 403.
      */
@@ -4406,27 +4601,16 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * OAuth 2.0 authorization server metadata (public)
-     * @description Returns OAuth 2.0 authorization server metadata for MCP client
-     *     compatibility.
+     * OAuth 2.0 authorization server metadata (public when enabled)
+     * @description Returns the shared Plexus OAuth authorization-server metadata used by MCP
+     *     clients for discovery. The issuer, authorization, token, and dynamic
+     *     registration endpoints, supported grant types, PKCE method, and scopes are
+     *     resolved from the active provider at request time.
      *
-     *     ## Use case
+     *     MCP OAuth is opt-in. When `mcpOAuth.enabled` is false, this endpoint
+     *     returns `404` with an `oauth_disabled` error.
      *
-     *     MCP clients use this endpoint to discover OAuth configuration. The
-     *     response indicates that bearer token authentication is supported.
-     *
-     *     ## Response
-     *
-     *     Static metadata describing the authorization server. The exact content
-     *     varies by configuration but typically includes:
-     *     - `issuer` — Authorization server identifier
-     *     - `token_endpoint` — Where to request tokens
-     *     - `grant_types` — Supported grant types
-     *
-     *     **Not functional OAuth** — This exists for MCP client compatibility;
-     *     the actual OAuth flow is handled differently in Plexus.
-     *
-     *     **No auth** — This endpoint is public.
+     *     **No auth** — This endpoint is public while OAuth is enabled.
      */
     get: operations['getWellknownOauthauthorizationserver'];
     put?: never;
@@ -4437,7 +4621,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/.well-known/oauth-protected-resource': {
+  '/.well-known/oauth-protected-resource/mcp/{name}': {
     parameters: {
       query?: never;
       header?: never;
@@ -4445,20 +4629,18 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * OAuth 2.0 protected resource metadata (public)
-     * @description Returns OAuth 2.0 protected resource metadata for MCP client
-     *     compatibility.
+     * OAuth 2.0 protected resource metadata (public when enabled)
+     * @description Returns RFC 9728 protected-resource metadata for one configured MCP
+     *     server. The resource identifier is `https://host/mcp/{name}`; the
+     *     authorization server, supported scopes, and bearer transport are resolved
+     *     from the active provider at request time.
      *
-     *     ## Use case
+     *     MCP OAuth is opt-in. When `mcpOAuth.enabled` is false, this endpoint
+     *     returns `404` with an `oauth_disabled` error.
      *
-     *     MCP clients use this endpoint to discover resource protection
-     *     configuration.
-     *
-     *     **Not functional OAuth** — This exists for MCP client compatibility.
-     *
-     *     **No auth** — This endpoint is public.
+     *     **No auth** — This endpoint is public while OAuth is enabled.
      */
-    get: operations['getWellknownOauthprotectedresource'];
+    get: operations['getWellknownOauthprotectedresourceMcpByname'];
     put?: never;
     post?: never;
     delete?: never;
@@ -4467,7 +4649,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/.well-known/openid-configuration': {
+  '/oauth/authorize': {
     parameters: {
       query?: never;
       header?: never;
@@ -4475,28 +4657,36 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * OpenID Connect discovery (public)
-     * @description Returns OpenID Connect discovery document for MCP client compatibility.
-     *
-     *     ## Use case
-     *
-     *     MCP clients use this endpoint to discover OIDC configuration, including
-     *     supported token types, issuer URL, and other OAuth/OIDC parameters.
-     *
-     *     **Not functional OIDC** — This exists for MCP client compatibility.
-     *
-     *     **No auth** — This endpoint is public.
+     * OAuth authorization request (public when enabled)
+     * @description Starts the OAuth 2.1 authorization-code flow for one MCP protected
+     *     resource. The request must use PKCE with S256 and an RFC 8707 resource
+     *     identifier such as `https://host/mcp/exa`. GET renders the Plexus consent
+     *     page; the submitted form is handled by the POST variant.
      */
-    get: operations['getWellknownOpenidconfiguration'];
+    get: operations['getOauthAuthorize'];
     put?: never;
-    post?: never;
+    /**
+     * Submit OAuth authorization request (public when enabled)
+     * @description Completes the consent step using the existing Plexus browser login. The
+     *     consent page reads the logged-in credential from the same-origin Plexus UI
+     *     and sends it in the `x-admin-key` header; the raw API-key secret is not
+     *     included in the OAuth form or authorization URL. An administrator must
+     *     explicitly choose the non-secret `key_name` of the API-key identity to
+     *     which the grant will be bound, even when only one active API key exists.
+     *     A limited API-key session is bound automatically to its own key and cannot
+     *     choose another. A successful regular OAuth request redirects to the client
+     *     callback with a one-time authorization code. Requests with
+     *     `Accept: application/json` receive the callback URL in `redirect_to`
+     *     instead, which lets the same-origin consent page complete the redirect.
+     */
+    post: operations['postOauthAuthorize'];
     delete?: never;
     options?: never;
     head?: never;
     patch?: never;
     trace?: never;
   };
-  '/register': {
+  '/oauth/token': {
     parameters: {
       query?: never;
       header?: never;
@@ -4506,32 +4696,36 @@ export interface paths {
     get?: never;
     put?: never;
     /**
-     * Dynamic MCP client registration (public, static response)
-     * @description Returns a static client registration record for MCP client compatibility.
-     *
-     *     ## Use case
-     *
-     *     MCP clients that support dynamic registration require this endpoint.
-     *     Plexus returns a static response indicating a pre-registered client.
-     *
-     *     ## Response
-     *
-     *     A static registration record:
-     *     - `client_id` — Fixed value: `plexus-mcp-static`
-     *     - `client_id_issued_at` — Unix timestamp
-     *     - `client_secret` — Empty (not used)
-     *     - `grant_types` — Supported grant types
-     *     - `token_endpoint_auth_method` — Authentication method for token endpoint
-     *
-     *     ## Note
-     *
-     *     This is a **static response** — it doesn't actually register new clients.
-     *     The endpoint exists solely for MCP client compatibility with clients
-     *     that expect this metadata before connecting.
-     *
-     *     **No auth** — This endpoint is public.
+     * OAuth token exchange (public when enabled)
+     * @description Exchanges an authorization code or refresh token for opaque bearer tokens.
+     *     Authorization-code exchanges require the original redirect URI, PKCE
+     *     verifier, client ID, and route-specific RFC 8707 resource identifier.
      */
-    post: operations['postRegister'];
+    post: operations['postOauthToken'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/oauth/register': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Dynamic MCP OAuth client registration (public when enabled)
+     * @description Registers a public OAuth client using RFC 7591-style dynamic client
+     *     registration. The request must include at least one absolute `redirect_uri`;
+     *     Plexus returns a generated client identifier and persists the requested
+     *     redirect URI set, grant types, response types, and scopes. Identical
+     *     registrations are deduplicated.
+     */
+    post: operations['postOauthRegister'];
     delete?: never;
     options?: never;
     head?: never;
@@ -4632,6 +4826,148 @@ export interface components {
       /** @description Maximum number of web searches allowed per request. Only honoured when `target` is `"anthropic"` (maps to `max_uses` on the `web_search_20250305` tool entry). Ignored for all other targets. */
       max_uses?: number;
     };
+    /** @description Aggregated usage statistics over time windows. */
+    UsageSummary: {
+      /** @description Requested time range. Both series and stats use this range. */
+      range?: string;
+      series?: {
+        /** @description Start of the time bucket (epoch ms). */
+        bucketStartMs?: number;
+        /** @description Number of requests in this bucket. */
+        requests?: number;
+        /** @description Number of non-success requests in this bucket. */
+        errors?: number;
+        /** @description Sum of input tokens across all requests. */
+        inputTokens?: number;
+        /** @description Sum of output tokens across all requests. */
+        outputTokens?: number;
+        /** @description Sum of reasoning tokens across all requests. */
+        reasoningTokens?: number;
+        /** @description Sum of cached tokens across all requests. */
+        cachedTokens?: number;
+        /** @description Sum of cache-write tokens across all requests. */
+        cacheWriteTokens?: number;
+        /** @description Total token count = inputTokens + outputTokens + reasoningTokens + cachedTokens + cacheWriteTokens. */
+        tokens?: number;
+        /** @description Sum of request costs in the bucket. */
+        totalCost?: number;
+        /** @description Average request duration in milliseconds. */
+        avgDurationMs?: number;
+        /** @description Average time to first token in milliseconds. */
+        avgTtftMs?: number;
+        /** @description Average reported tokens per second. */
+        avgTokensPerSec?: number;
+      }[];
+      /** @description Aggregation over the requested range. */
+      stats?: {
+        /** @description Total requests in the requested range. */
+        totalRequests?: number;
+        /** @description Total non-success requests in the requested range. */
+        totalErrors?: number;
+        /** @description Total tokens (input + output + reasoning + cached + cacheWrite) in the requested range. */
+        totalTokens?: number;
+        /** @description Total uncached input tokens. */
+        inputTokens?: number;
+        /** @description Total output tokens. */
+        outputTokens?: number;
+        /** @description Total reasoning tokens. */
+        reasoningTokens?: number;
+        /** @description Total cached input tokens. */
+        cachedTokens?: number;
+        /** @description Total cache-write tokens. */
+        cacheWriteTokens?: number;
+        /** @description Total request cost in the requested range. */
+        totalCost?: number;
+        /** @description Average request duration in milliseconds. */
+        avgDurationMs?: number;
+        /** @description Sum of all request durations in milliseconds. */
+        totalDurationMs?: number;
+        /** @description Average time to first token in milliseconds. */
+        avgTtftMs?: number;
+        /** @description Average reported tokens per second. */
+        avgTokensPerSec?: number;
+        /** @description Percentage of requests whose status is success. */
+        successRate?: number;
+      };
+      /** @description Optional top-N aggregates for requested dimensions. */
+      grouped?: {
+        provider?: components['schemas']['UsageSummaryBreakdown'];
+        modelAlias?: components['schemas']['UsageSummaryBreakdown'];
+        apiKey?: components['schemas']['UsageSummaryBreakdown'];
+        status?: components['schemas']['UsageSummaryBreakdown'];
+      };
+      /** @description Aggregation since local midnight (time-of-day based, not UTC). */
+      today?: {
+        /** @description Number of requests since midnight. */
+        requests?: number;
+        /** @description Input tokens since midnight. */
+        inputTokens?: number;
+        /** @description Output tokens since midnight. */
+        outputTokens?: number;
+        /** @description Reasoning tokens since midnight. */
+        reasoningTokens?: number;
+        /** @description Cached tokens since midnight. */
+        cachedTokens?: number;
+        /** @description Cache-write tokens since midnight. */
+        cacheWriteTokens?: number;
+        /** @description Total cost in dollars since midnight. */
+        totalCost?: number;
+      };
+    };
+    /** @description Optional top-N aggregates for one requested dimension. */
+    UsageSummaryBreakdown: {
+      items?: components['schemas']['UsageSummaryGroup'][];
+      /** @description Total distinct groups in the requested range. */
+      totalDimensions?: number;
+      /** @description Whether groups were omitted from the named items. */
+      truncated?: boolean;
+    };
+    /** @description Aggregate metrics for one usage dimension value. */
+    UsageSummaryGroup: {
+      /** @description Group label; API-key labels are display-safe prefixes. */
+      name?: string;
+      requests?: number;
+      errors?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      reasoningTokens?: number;
+      cachedTokens?: number;
+      cacheWriteTokens?: number;
+      totalTokens?: number;
+      totalCost?: number;
+      avgDurationMs?: number;
+      totalDurationMs?: number;
+      avgTtftMs?: number;
+      avgTokensPerSec?: number;
+      successRate?: number;
+    };
+    /** @description Transient throughput snapshot for an in-flight request. This payload is emitted by the management event stream approximately once per second and is not persisted as a usage record. */
+    ProgressUpdate: {
+      /**
+       * Format: uuid
+       * @description Request identifier shared with the related UsageRecord.
+       */
+      requestId: string;
+      /** @description API key associated with the request, if available. */
+      apiKey: string | null;
+      /** @description Whether the request is using a streamed response. */
+      isStreamed: boolean;
+      /** @description Total upstream response bytes received so far. */
+      bytesReceived: number;
+      /** @description Current total-byte throughput in bytes per second, or null until measurable. */
+      bytesPerSec: number | null;
+      /** @description Total semantic response bytes received so far, excluding protocol framing where applicable. */
+      semanticBytesReceived: number;
+      /** @description Current semantic-byte throughput in bytes per second, or null until measurable. */
+      semanticBytesPerSec: number | null;
+      /**
+       * @description Current stream stall-monitoring state.
+       * @enum {string}
+       */
+      state: 'DISPATCHED' | 'GRACE_PERIOD' | 'MONITORING' | 'THROUGHPUT_STALLED';
+      /** @description Milliseconds elapsed since monitoring started. */
+      elapsedMs: number;
+    };
     /** @description OpenAI Chat Completions request (pass-through; full OpenAI schema accepted). */
     ChatCompletionRequest: {
       model: string;
@@ -4649,7 +4985,9 @@ export interface components {
       stream: boolean;
       temperature?: number;
       top_p?: number;
+      /** @deprecated */
       max_tokens?: number;
+      max_completion_tokens?: number;
       tools?: {
         [key: string]: unknown;
       }[];
@@ -4941,53 +5279,141 @@ export interface components {
       stream_format: 'sse' | 'audio';
     };
     ImageGenerationRequest: {
-      /** @description Model identifier (e.g. `dall-e-3`, `dall-e-2`). */
+      /** @description Image generation model or Plexus model alias. */
       model: string;
       /** @description Text description of the desired image. */
       prompt: string;
       /**
-       * @description Number of images to generate (1-10).
+       * @description Upper bound on the number of images to generate.
        * @default 1
        */
       n: number;
       /**
-       * @description Output dimensions. Not all sizes are available on all models.
-       *     - `256x256`, `512x512`, `1024x1024` — available on DALL-E 2 and 3. - `1792x1024`, `1024x1792` — widescreen/portrait, DALL-E 3 only.
+       * @description Normalized resolution tier. Concrete dimensions depend on the target provider.
        * @enum {string}
        */
-      size?: '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
+      resolution?: '512' | '1K' | '2K' | '4K';
+      /** @description Normalized output aspect ratio, such as 1:1, 16:9, or 9:16. */
+      aspect_ratio?: string;
+      /** @description Convenience resolution tier or explicit dimensions such as 2048x2048. */
+      size?: string;
       /**
-       * @description How the image is returned.
-       *     - **url** — Temporary URL (expires after 1 hour). - **b64_json** — Base64-encoded image data.
-       * @default url
+       * @description Requested rendering quality where supported by the target provider.
        * @enum {string}
        */
-      response_format: 'url' | 'b64_json';
+      quality?: 'auto' | 'low' | 'medium' | 'high';
       /**
-       * @description Detail level. Values vary by provider.
-       *     - **standard** — Default quality. - **hd** — Higher detail (DALL-E 3). - **high**, **medium**, **low** — Provider-specific detail levels.
+       * @description Encoding of generated image bytes where supported by the target provider.
        * @enum {string}
        */
-      quality?: 'standard' | 'hd' | 'high' | 'medium' | 'low';
+      output_format?: 'png' | 'jpeg' | 'webp' | 'svg';
       /**
-       * @description Visual style.
-       *     - **vivid** — Generates more dramatic, stylized images. - **natural** — More realistic, natural-looking images.
+       * @description Background treatment where supported by the target provider.
        * @enum {string}
        */
-      style?: 'vivid' | 'natural';
+      background?: 'auto' | 'transparent' | 'opaque';
+      /** @description Compression level for formats with a compression control. */
+      output_compression?: number;
+      /** @description Optional deterministic generation seed where supported. */
+      seed?: number;
+      /**
+       * @description Image streaming is reserved for a future implementation.
+       * @default false
+       */
+      stream: boolean;
+      /** @description Reference images used for image-conditioned generation. */
+      input_references?: {
+        /** @enum {string} */
+        type: 'image_url';
+        image_url: {
+          /** @description HTTP(S) URL or base64 image data URL. */
+          url: string;
+        };
+        media_type?: string;
+      }[];
+      /** @description Plexus provider routing preferences. */
+      provider?: {
+        only?: string[];
+        ignore?: string[];
+        order?: string[];
+        allow_fallbacks?: boolean;
+        sort?: string | Record<string, never>;
+        options?: Record<string, never>;
+      };
+      /**
+       * @description Legacy OpenAI delivery format. OpenRouter-shaped responses use base64 image data.
+       * @enum {string}
+       */
+      response_format?: 'url' | 'b64_json';
+      /** @description Legacy OpenAI image style where supported. */
+      style?: string;
       /** @description User identifier for content policy tracking. */
       user?: string;
     };
     ImageResponse: {
+      /** @description Unix timestamp when the images were generated. */
       created: number;
       data: ({
         /** Format: uri */
         url?: string;
         b64_json?: string;
+        media_type?: string;
         revised_prompt?: string;
       } & {
         [key: string]: unknown;
       })[];
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        cost?: number;
+        /** @description Per-modality input token detail, forwarded as received when the upstream reports it (for example `image_tokens`). Omitted by the `/v1/images` response, which projects only the flat token counts. */
+        input_tokens_details?: {
+          image_tokens?: number;
+        } & {
+          [key: string]: unknown;
+        };
+        /** @description Per-modality output token detail, forwarded as received when the upstream reports it (for example `image_tokens`). Omitted by the `/v1/images` response, which projects only the flat token counts. */
+        output_tokens_details?: {
+          image_tokens?: number;
+        } & {
+          [key: string]: unknown;
+        };
+      };
+    };
+    LegacyImageGenerationRequest: {
+      /** @description Model identifier, such as dall-e-3. */
+      model: string;
+      /** @description Text description of the desired image. */
+      prompt: string;
+      /**
+       * @description Number of images to generate.
+       * @default 1
+       */
+      n: number;
+      /**
+       * @description Output dimensions where supported by the target provider.
+       * @enum {string}
+       */
+      size?: '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
+      /**
+       * @description How the image is returned.
+       * @default url
+       * @enum {string}
+       */
+      response_format: 'url' | 'b64_json';
+      /**
+       * @description Legacy OpenAI quality value.
+       * @enum {string}
+       */
+      quality?: 'standard' | 'hd' | 'high' | 'medium' | 'low';
+      /**
+       * @description Legacy OpenAI visual style.
+       * @enum {string}
+       */
+      style?: 'vivid' | 'natural';
+      /** @description User identifier for content policy tracking. */
+      user?: string;
     };
     /** @description Request body for image editing (multipart/form-data). */
     ImageEditRequest: {
@@ -5152,17 +5578,9 @@ export interface components {
           };
       /** @description API key for the provider. Can be a literal string or `$env:VARIABLE_NAME` to reference an environment variable. Required unless `api_base_url` is an `oauth://` URI. */
       api_key?: string;
-      /**
-       * @description OAuth provider identifier. Required when `api_base_url` uses an `oauth://` URI. Determines which OAuth flow is used to obtain credentials. Note: `google-gemini-cli` and `google-antigravity` are deprecated and no longer supported — they remain accepted for backward compatibility but are rejected at request routing.
-       * @enum {string}
-       */
-      oauth_provider?:
-        | 'anthropic'
-        | 'openai-codex'
-        | 'github-copilot'
-        | 'google-gemini-cli'
-        | 'google-antigravity';
-      /** @description OAuth account identifier. Required when `api_base_url` uses an `oauth://` URI. */
+      /** @description OAuth provider identifier. Required when `api_base_url` uses an `oauth://` URI. Determines which OAuth flow is used to obtain credentials. Any OAuth-capable provider bundled with Plexus's pi-ai dependency is accepted (e.g. `anthropic`, `openai-codex`, `github-copilot`, `xai`, `kimi-coding`, `openrouter`) except `radius`, which is not supported. See `GET /v0/management/oauth/providers` for the current list. `google-gemini-cli` and `google-antigravity` are deprecated and no longer supported — they are rejected on write. */
+      oauth_provider?: string;
+      /** @description OAuth account identifier. Derived from the provider ID (one login per provider) and never set by users; accepted on write only as a grandfathered fallback for restores/imports that predate slug keying. */
       oauth_account?: string;
       /**
        * @description When false, this provider is excluded from all routing decisions.
@@ -5194,6 +5612,11 @@ export interface components {
        * @default false
        */
       stall_cooldown: boolean;
+      /**
+       * @description When enabled, allows quota usage to reach 100% instead of placing the provider on cooldown at 99%. Note: this may result in repeat attempts or failed generations.
+       * @default false
+       */
+      allow_100_percent_utilization: boolean;
       /** @description Cost discount factor applied to usage records for this provider. `0` means no reduction, `1` means 100% discount (free). Used to reflect negotiated discounts in cost calculations. */
       discount?: number;
       /** @description Models available on this provider. Either a simple list of IDs or a map of model ID → configuration for per-model pricing/type overrides. */
@@ -5282,16 +5705,6 @@ export interface components {
         /** @default 60 */
         intervalMinutes: number;
       };
-      /** @description Named GPU profile (e.g. `H100`, `A100`, `custom`). A display hint used by the frontend; the backend uses the four numeric fields below as the source of truth. */
-      gpu_profile?: string;
-      /** @description GPU RAM in GB. Used for energy estimation when combined with model_architecture. */
-      gpu_ram_gb?: number;
-      /** @description GPU memory bandwidth in TB/s. Used for energy estimation. */
-      gpu_bandwidth_tb_s?: number;
-      /** @description GPU peak FLOPs in teraflops. Used for energy estimation. */
-      gpu_flops_tflop?: number;
-      /** @description GPU TDP in watts. Used for energy estimation. */
-      gpu_power_draw_watts?: number;
       /**
        * @description Adapter name(s) applied to every model under this provider. Adapters rewrite outbound request payloads (preDispatch) and inbound provider responses (postDispatch) to fix provider-specific field-name incompatibilities. Applied before model-level adapters.
        *     Adapters can be specified as bare strings (backward compatible) or as objects with `{ name, options }` for adapters that require configuration.
@@ -5434,6 +5847,7 @@ export interface components {
           | 'cost'
           | 'latency'
           | 'usage'
+          | 'quota'
           | 'performance'
           | 'e2e_performance';
         targets: {
@@ -5539,20 +5953,6 @@ export interface components {
             /** @description All metadata lives here for custom sources. `name` is required because there is no catalog fallback. */
             overrides: WithRequired<components['schemas']['MetadataOverrides'], 'name'>;
           };
-      /** @description Model architecture details used for inference energy estimation. When modified, triggers async recalculation of kWh for all affected historical usage records. */
-      model_architecture?: {
-        /** @description Total parameter count (billions). */
-        total_params?: number;
-        /** @description Active (non-MoE-gated) parameter count (billions). */
-        active_params?: number;
-        layers?: number;
-        heads?: number;
-        kv_lora_rank?: number;
-        qk_rope_head_dim?: number;
-        context_length?: number;
-        /** @enum {string} */
-        dtype?: 'fp16' | 'bf16' | 'fp8' | 'fp8_e4m3' | 'fp8_e5m2' | 'nvfp4' | 'int4' | 'int8';
-      };
       /** @description Shorthand simple pricing: input price per million tokens. Equivalent to setting `pricing` to `{ source: "simple", input: <value>, output: <output_price_per_million> }`. Only used when `pricing` is not set. */
       input_price_per_million?: number;
       /** @description Shorthand simple pricing: output price per million tokens. See `input_price_per_million`. */
@@ -5864,6 +6264,37 @@ export interface components {
       /** @description Optional utilisation percentage at which the checker gates the provider onto cooldown. */
       exhaustionThreshold?: number | null;
     };
+    CustomQuotaChecker: {
+      id: string;
+      type: string;
+      displayName: string;
+      /** @description JavaScript function body returning an array of quota meters. */
+      code: string;
+      enabled: boolean;
+      /** Format: date-time */
+      createdAt: string;
+      /** Format: date-time */
+      updatedAt: string;
+    };
+    CustomQuotaCheckerInput: {
+      displayName: string;
+      code: string;
+      /** @default true */
+      enabled: boolean;
+    };
+    CustomQuotaCheckerTestInput: {
+      provider: string;
+      options?: {
+        [key: string]: unknown;
+      };
+      /** @description Optional unsaved code to execute instead of the persisted code. */
+      code?: string;
+    };
+    CustomQuotaCheckerPatch: {
+      displayName?: string;
+      code?: string;
+      enabled?: boolean;
+    };
     /** @description Per-request usage record stored in `request_usage`. Populated after each inference request completes (or errors). Fields may be null on error paths. */
     UsageRecord: {
       /**
@@ -5907,18 +6338,22 @@ export interface components {
       retryHistory?: string | null;
       /** @description Model alias as specified in the request (before resolution). */
       incomingModelAlias?: string | null;
-      /** @description Resolved canonical model name. For aliases with `model_architecture`, this is the target; otherwise same as `incomingModelAlias`. */
+      /** @description Resolved canonical model name. */
       canonicalModelName?: string | null;
-      /** @description Final model name sent to the upstream provider. May differ from `canonicalModelName` due to provider-specific transformations. */
+      /** @description Route-selected model name. Stays at the routing choice even when a provider adapter rewrote the outbound model; see `upstreamModel`. */
       selectedModelName?: string | null;
       /** @description Provider used for the final (successful or last) attempt. */
       finalAttemptProvider?: string | null;
-      /** @description Model used for the final attempt. */
+      /** @description Route-selected model for the final attempt. Quota scope matching uses this value. */
       finalAttemptModel?: string | null;
+      /** @description Post-adapter model actually present in the dispatched provider payload. Equals `finalAttemptModel` when no rewrite occurred; null for historical rows or failures before a payload was dispatched. */
+      upstreamModel?: string | null;
       /** @description JSON array of all providers attempted during this request (each appears once, in order of attempt). Null if only one provider was used. */
       allAttemptedProviders?: string | null;
       /** @description API format sent to upstream provider. May differ from `incomingApiType` due to protocol transformation. */
       outgoingApiType?: string | null;
+      /** @description Reasoning setting requested by the client. Values are `on`, `off`, or a normalized effort level such as `low`, `high`, or `max`. */
+      reasoningEffort?: string | null;
       /** @description Number of input tokens consumed. Reported by provider when available; otherwise estimated based on character count. Null on error. */
       tokensInput?: number | null;
       /** @description Number of output tokens generated. Null on error. */
@@ -5962,7 +6397,7 @@ export interface components {
       ttftMs?: number | null;
       /** @description Output tokens per second (throughput). Calculated as `tokensOutput / (durationMs - ttftMs)` for streaming requests. Null for non-streaming or if calculation invalid. */
       tokensPerSec?: number | null;
-      /** @description Estimated energy consumption in kilowatt-hours. Calculated from `model_architecture` token estimates and provider-specific energy coefficients. Requires `model_architecture` to be set on the alias. */
+      /** @description Measured energy consumption in kilowatt-hours reported by the provider (if available). */
       kwhUsed?: number | null;
       /** @description Whether the response was streamed (SSE). */
       isStreamed?: boolean;
@@ -5993,61 +6428,6 @@ export interface components {
       hasDebug?: boolean;
       /** @description Whether error records exist for this request (mirrors presence in `inference_errors` table). */
       hasError?: boolean;
-    };
-    /** @description Aggregated usage statistics over time windows. */
-    UsageSummary: {
-      /** @description Time range for series data. Format depends on query param (e.g. "24h", "7d", custom start/end). Affects only the series field. */
-      range?: string;
-      series?: {
-        /** @description Start of the time bucket (epoch ms). */
-        bucketStartMs?: number;
-        /** @description Number of requests in this bucket. */
-        requests?: number;
-        /** @description Sum of input tokens across all requests. */
-        inputTokens?: number;
-        /** @description Sum of output tokens across all requests. */
-        outputTokens?: number;
-        /** @description Sum of cached tokens across all requests. */
-        cachedTokens?: number;
-        /** @description Sum of cache-write tokens across all requests. */
-        cacheWriteTokens?: number;
-        /** @description Sum of energy usage (kWh) across all requests. */
-        kwhUsed?: number;
-        /** @description Total token count = inputTokens + outputTokens + cachedTokens + cacheWriteTokens. */
-        tokens?: number;
-      }[];
-      /** @description Rolling 7-day aggregation window. */
-      stats?: {
-        /** @description Total requests in the 7-day window. */
-        totalRequests?: number;
-        /** @description Total tokens (input + output + cached + cacheWrite) in the window. */
-        totalTokens?: number;
-        /** @description Total energy usage in the window. */
-        totalKwhUsed?: number;
-        /** @description Average request duration in milliseconds. */
-        avgDurationMs?: number;
-        /** @description Sum of all request durations in milliseconds. */
-        totalDurationMs?: number;
-      };
-      /** @description Aggregation since local midnight (time-of-day based, not UTC). */
-      today?: {
-        /** @description Number of requests since midnight. */
-        requests?: number;
-        /** @description Input tokens since midnight. */
-        inputTokens?: number;
-        /** @description Output tokens since midnight. */
-        outputTokens?: number;
-        /** @description Reasoning tokens since midnight. */
-        reasoningTokens?: number;
-        /** @description Cached tokens since midnight. */
-        cachedTokens?: number;
-        /** @description Cache-write tokens since midnight. */
-        cacheWriteTokens?: number;
-        /** @description Energy usage since midnight. */
-        kwhUsed?: number;
-        /** @description Total cost in dollars since midnight. */
-        totalCost?: number;
-      };
     };
     /** @description Debug capture for an inference request. Can contain request/response snapshots at various transformation stages. Only populated if debug is enabled for the request (via header or key configuration). */
     DebugLog: {
@@ -6624,6 +7004,8 @@ export interface components {
   };
   parameters: {
     ResponseId: string;
+    /** @description Custom quota checker type identifier. */
+    CustomCheckerId: string;
   };
   requestBodies: never;
   headers: never;
@@ -6631,6 +7013,42 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+  getWellKnownPlexusOpenapi: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Dereferenced OpenAPI document. */
+      200: {
+        headers: {
+          ETag?: string;
+          'Cache-Control'?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': Record<string, never>;
+        };
+      };
+      /** @description The document has not changed. */
+      304: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid conditional request header. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
   getHealth: {
     parameters: {
       query?: never;
@@ -7009,7 +7427,7 @@ export interface operations {
       };
     };
   };
-  postV1ImagesGenerations: {
+  postV1Images: {
     parameters: {
       query?: never;
       header?: never;
@@ -7019,6 +7437,44 @@ export interface operations {
     requestBody: {
       content: {
         'application/json': components['schemas']['ImageGenerationRequest'];
+      };
+    };
+    responses: {
+      /** @description Generated images. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ImageResponse'];
+        };
+      };
+      /** @description Invalid image request or unsupported target option. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Authentication required or invalid credentials. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postV1ImagesGenerations: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['LegacyImageGenerationRequest'];
       };
     };
     responses: {
@@ -7869,13 +8325,19 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Status flags. */
+      /** @description Configuration resource counts. */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': Record<string, never>;
+          'application/json': {
+            providerCount: number;
+            modelAliasCount: number;
+            keyCount: number;
+            quotaCount: number;
+            mcpServerCount: number;
+          };
         };
       };
       /** @description Authentication required or invalid credentials. */
@@ -9156,6 +9618,13 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description Upstream provider rejected the request or returned an authorization error. */
+      502: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
       /** @description Upstream fetch timed out (10s). */
       504: {
         headers: {
@@ -9245,6 +9714,61 @@ export interface operations {
       };
       /** @description Authentication required or invalid credentials. */
       401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postV0ManagementPiResolveProvider: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        'application/json': {
+          /** @description Endpoint URL(s) from the provider's api_base_url. */
+          urls?: string[];
+          /** @description OAuth provider ID when the provider uses oauth://. */
+          oauthProvider?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Resolution result; provider is null when nothing matches. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data?: {
+              /** @description Matching pi-ai provider ID, or null. */
+              provider?: string | null;
+            };
+          };
+        };
+      };
+      /** @description Invalid request body. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Authentication required or invalid credentials. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Admin privileges required. */
+      403: {
         headers: {
           [name: string]: unknown;
         };
@@ -9432,50 +9956,6 @@ export interface operations {
       };
       /** @description Authentication required or invalid credentials. */
       401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-    };
-  };
-  getV0ManagementModelsHuggingfaceBymodelId: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description HuggingFace repo ID, URL-encoded (e.g. `mistralai%2FMixtral-8x7B`). The `/` character must be encoded as `%2F`. */
-        modelId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Architecture params. */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            /** @constant */
-            success?: true;
-            model_id?: string;
-            architecture?: {
-              total_params?: number;
-              active_params?: number;
-              layers?: number;
-              heads?: number;
-              kv_lora_rank?: number | null;
-              qk_rope_head_dim?: number | null;
-              context_length?: number;
-              dtype?: string;
-            };
-          };
-        };
-      };
-      /** @description Model not found on HuggingFace. */
-      404: {
         headers: {
           [name: string]: unknown;
         };
@@ -10245,6 +10725,151 @@ export interface operations {
       };
     };
   };
+  getV0ManagementMcpServerKeys: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        serverName: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description MCP server keys. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            keys?: {
+              id?: number;
+              key?: string;
+              is_active?: boolean;
+              /** Format: date-time */
+              cooldown_until?: string | null;
+            }[];
+          };
+        };
+      };
+      /** @description MCP server not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postV0ManagementMcpServerKeys: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        serverName: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          key: string;
+          /** @default true */
+          is_active?: boolean;
+        };
+      };
+    };
+    responses: {
+      /** @description Created MCP server key. */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id?: number;
+            key?: string;
+            is_active?: boolean;
+            /** Format: date-time */
+            cooldown_until?: string | null;
+          };
+        };
+      };
+      /** @description Invalid key payload. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP server not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  deleteV0ManagementMcpServerKey: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        serverName: string;
+        keyId: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: components['responses']['SuccessTrue'];
+      /** @description Invalid key ID. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP key not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postV0ManagementMcpServerKeyClearCooldown: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        serverName: string;
+        keyId: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: components['responses']['SuccessTrue'];
+      /** @description Invalid key ID. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP key not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
   getV0ManagementQuotacheckertypes: {
     parameters: {
       query?: never;
@@ -10338,6 +10963,203 @@ export interface operations {
       };
     };
   };
+  getV0ManagementCustomCheckers: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Custom quota checkers. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CustomQuotaChecker'][];
+        };
+      };
+      /** @description Authentication required or invalid credentials. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  getV0ManagementCustomCheckersByid: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Custom quota checker type identifier. */
+        id: components['parameters']['CustomCheckerId'];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Custom quota checker. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CustomQuotaChecker'];
+        };
+      };
+      /** @description Custom checker not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  putV0ManagementCustomCheckersByid: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Custom quota checker type identifier. */
+        id: components['parameters']['CustomCheckerId'];
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CustomQuotaCheckerInput'];
+      };
+    };
+    responses: {
+      /** @description Saved custom quota checker. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CustomQuotaChecker'];
+        };
+      };
+      /** @description Validation failed. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Checker type collides with a built-in checker. */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postV0ManagementCustomCheckersByid: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Custom quota checker type identifier. */
+        id: components['parameters']['CustomCheckerId'];
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CustomQuotaCheckerTestInput'];
+      };
+    };
+    responses: {
+      /** @description Test result. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Checker execution failed. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Custom checker not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  deleteV0ManagementCustomCheckersByid: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Custom quota checker type identifier. */
+        id: components['parameters']['CustomCheckerId'];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Custom checker deleted. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Custom checker not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  patchV0ManagementCustomCheckersByid: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Custom quota checker type identifier. */
+        id: components['parameters']['CustomCheckerId'];
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['CustomQuotaCheckerPatch'];
+      };
+    };
+    responses: {
+      /** @description Updated custom quota checker. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Custom checker not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
   getV0ManagementUsage: {
     parameters: {
       query?: {
@@ -10375,6 +11197,8 @@ export interface operations {
           'application/json': {
             data: components['schemas']['UsageRecord'][];
             total: number;
+            limit: number;
+            offset: number;
           };
         };
       };
@@ -10417,6 +11241,12 @@ export interface operations {
         startDate?: string;
         /** @description Required with `range=custom`. */
         endDate?: string;
+        /** @description Optional comma-separated dimensions: provider, modelAlias, apiKey, or status. At most three dimensions are allowed. */
+        breakdowns?: string;
+        /** @description Maximum number of named groups returned per dimension. */
+        breakdownLimit?: number;
+        /** @description Optional comma-separated dimension-specific exclusions. `directModels` excludes model aliases beginning with `direct/`; `probe` excludes the internal probe API key from API-key breakdowns. */
+        exclude?: string;
       };
       header?: never;
       path?: never;
@@ -10427,6 +11257,8 @@ export interface operations {
       /** @description Aggregates. */
       200: {
         headers: {
+          /** @description Whether the response was served from the in-memory summary cache. */
+          'X-Usage-Summary-Cache'?: 'HIT' | 'MISS';
           [name: string]: unknown;
         };
         content: {
@@ -10435,6 +11267,13 @@ export interface operations {
       };
       /** @description Invalid `range` or custom-range parameters. */
       400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Requested aggregate response exceeds the response-size limit. */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -10620,18 +11459,23 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Log index. */
+      /** @description Paginated log index. */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           'application/json': {
-            /** Format: uuid */
-            requestId?: string;
-            /** @description Epoch ms. */
-            createdAt?: number;
-          }[];
+            data: {
+              /** Format: uuid */
+              requestId?: string;
+              /** @description Epoch ms. */
+              createdAt?: number;
+            }[];
+            total: number;
+            limit: number;
+            offset: number;
+          };
         };
       };
       /** @description Authentication required or invalid credentials. */
@@ -10735,15 +11579,20 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Array of error records. */
+      /** @description Paginated error records. */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           'application/json': {
-            [key: string]: unknown;
-          }[];
+            data: {
+              [key: string]: unknown;
+            }[];
+            total: number;
+            limit: number;
+            offset: number;
+          };
         };
       };
       /** @description Authentication required or invalid credentials. */
@@ -10821,8 +11670,10 @@ export interface operations {
         };
         content: {
           'application/json': {
-            data?: components['schemas']['McpUsageRecord'][];
-            total?: number;
+            data: components['schemas']['McpUsageRecord'][];
+            total: number;
+            limit: number;
+            offset: number;
           };
         };
       };
@@ -11563,6 +12414,12 @@ export interface operations {
           'application/json': {
             data?: {
               ready?: boolean;
+              /** @description First stored (epoch ms). */
+              connectedAt?: number;
+              /** @description Last saved by login or refresh (epoch ms). */
+              refreshedAt?: number;
+              /** @description Current access token expiry (epoch ms). */
+              expiresAt?: number;
             };
           };
         };
@@ -11581,6 +12438,12 @@ export interface operations {
       query: {
         /** @description Provider ID to list models for. */
         providerId: string;
+        /**
+         * @description OAuth account whose entitlement should be used. Only honoured for
+         *     `openai-codex` live discovery; omit to use the provider's default
+         *     account.
+         */
+        accountId?: string;
       };
       header?: never;
       path?: never;
@@ -11588,7 +12451,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Model list (pi-ai static catalog). */
+      /** @description Model list (live Codex list or pi-ai static catalog). */
       200: {
         headers: {
           [name: string]: unknown;
@@ -11599,11 +12462,27 @@ export interface operations {
               id?: string;
               name?: string;
               context_length?: number;
+              description?: string;
+              /** @enum {string} */
+              type?: 'text' | 'image';
+              access_via?: string[];
+              /** @enum {string} */
+              visibility?: 'list' | 'hide';
               pricing?: {
                 prompt?: string;
                 completion?: string;
               };
             }[];
+            /**
+             * @description Where the list came from.
+             * @enum {string}
+             */
+            source?: 'codex-backend' | 'catalog';
+            /**
+             * @description Why live discovery was skipped or failed. Present only when
+             *     the response fell back to the static catalog.
+             */
+            warning?: string;
           };
         };
       };
@@ -12392,9 +13271,15 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description SSE stream. */
+      /** @description Long-lived SSE stream of usage lifecycle and progress events. */
       200: {
         headers: {
+          /** @description Disables intermediary caching for the live stream. */
+          'Cache-Control'?: string;
+          /** @description Keeps the HTTP connection open while the stream is active. */
+          Connection?: string;
+          /** @description CORS origin allowed for the stream. */
+          'Access-Control-Allow-Origin'?: string;
           [name: string]: unknown;
         };
         content: {
@@ -12442,6 +13327,8 @@ export interface operations {
       query?: {
         /** @description Maximum number of recent log entries to return. */
         limit?: number;
+        /** @description Number of newest entries to skip. */
+        offset?: number;
       };
       header?: never;
       path?: never;
@@ -12460,6 +13347,8 @@ export interface operations {
               [key: string]: unknown;
             }[];
             total: number;
+            limit: number;
+            offset: number;
           };
         };
       };
@@ -12774,13 +13663,23 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description MCP OAuth is disabled (`oauth_disabled`). */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
     };
   };
-  getWellknownOauthprotectedresource: {
+  getWellknownOauthprotectedresourceMcpByname: {
     parameters: {
       query?: never;
       header?: never;
-      path?: never;
+      path: {
+        /** @description Enabled MCP server name. */
+        name: string;
+      };
       cookie?: never;
     };
     requestBody?: never;
@@ -12803,18 +13702,219 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description MCP OAuth is disabled or the MCP server is not found. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
     };
   };
-  getWellknownOpenidconfiguration: {
+  getOauthAuthorize: {
     parameters: {
-      query?: never;
+      query: {
+        response_type: 'code';
+        client_id: string;
+        redirect_uri: string;
+        state?: string;
+        scope?: string;
+        code_challenge: string;
+        code_challenge_method: 'S256';
+        resource: string;
+      };
       header?: never;
       path?: never;
       cookie?: never;
     };
     requestBody?: never;
     responses: {
-      /** @description OIDC discovery document. */
+      /** @description HTML consent page. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'text/html': string;
+        };
+      };
+      /** @description Redirect to the registered client callback after consent. */
+      302: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid authorization request. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP OAuth is disabled (`oauth_disabled`). */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postOauthAuthorize: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Existing Plexus admin key or configured API-key secret used by the browser session. */
+        'x-admin-key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/x-www-form-urlencoded': {
+          /** @enum {string} */
+          response_type: 'code';
+          client_id: string;
+          /** Format: uri */
+          redirect_uri: string;
+          state?: string;
+          scope?: string;
+          code_challenge: string;
+          /** @enum {string} */
+          code_challenge_method: 'S256';
+          /** Format: uri */
+          resource: string;
+          /** @description Non-secret configured API-key name. Required for administrator sessions; limited sessions cannot choose another key. */
+          key_name?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description JSON callback URL when the request accepts `application/json`. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uri */
+            redirect_to: string;
+          };
+        };
+      };
+      /** @description Redirect containing the authorization code and state. */
+      302: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid authorization request or an administrator must choose an API-key identity. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Missing or invalid browser-session credential. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP OAuth is disabled (`oauth_disabled`). */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postOauthToken: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/x-www-form-urlencoded': {
+          /** @enum {string} */
+          grant_type: 'authorization_code' | 'refresh_token';
+          code?: string;
+          /** Format: uri */
+          redirect_uri?: string;
+          client_id: string;
+          code_verifier?: string;
+          refresh_token?: string;
+          /** Format: uri */
+          resource: string;
+          scope?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description OAuth token response. */
+      200: {
+        headers: {
+          'Cache-Control'?: string;
+          Pragma?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            access_token: string;
+            /** @enum {string} */
+            token_type: 'Bearer';
+            expires_in: number;
+            refresh_token: string;
+            scope?: string;
+          };
+        };
+      };
+      /** @description Invalid request, grant, target, or scope. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP OAuth is disabled (`oauth_disabled`). */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  postOauthRegister: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          redirect_uris: string[];
+          client_name?: string;
+          grant_types?: string[];
+          response_types?: string[];
+          scope?: string;
+          /** @enum {string} */
+          token_endpoint_auth_method?: 'none';
+        };
+      };
+    };
+    responses: {
+      /** @description Existing identical dynamic client registration. */
       200: {
         headers: {
           [name: string]: unknown;
@@ -12825,42 +13925,33 @@ export interface operations {
           };
         };
       };
-      /** @description Bad request. */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-    };
-  };
-  postRegister: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Static registration record pointing callers to Bearer auth. */
+      /** @description New dynamic client registration. */
       201: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           'application/json': {
-            /** @constant */
-            client_id?: 'plexus-mcp-static';
+            client_id?: string;
             client_id_issued_at?: number;
-            client_secret?: string;
+            client_name?: string;
+            redirect_uris?: string[];
             grant_types?: string[];
+            response_types?: string[];
+            scope?: string;
             token_endpoint_auth_method?: string;
           };
         };
       };
-      /** @description Bad request. */
+      /** @description Invalid client metadata. */
       400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description MCP OAuth is disabled (`oauth_disabled`). */
+      404: {
         headers: {
           [name: string]: unknown;
         };

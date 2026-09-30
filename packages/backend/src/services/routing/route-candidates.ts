@@ -17,17 +17,19 @@ export async function resolveRouteCandidates(
   request: UnifiedChatRequest,
   retryHistory: RetryAttemptRecord[],
   sessionKey: string | null,
-  appendSkippedAttempt: AppendSkippedAttempt
+  appendSkippedAttempt: AppendSkippedAttempt,
+  options?: { cooldownBypassKeys?: ReadonlySet<string> }
 ): Promise<RouteResult[]> {
   let candidates = await Router.resolveCandidates(
     request.model,
     request.incomingApiType,
-    sessionKey
+    sessionKey,
+    options
   );
 
   // Fallback for direct/provider/model syntax and legacy single-route behavior.
   if (candidates.length === 0) {
-    candidates = [await Router.resolve(request.model, request.incomingApiType)];
+    candidates = [await Router.resolve(request.model, request.incomingApiType, options)];
   }
 
   if (candidates.length === 0) {

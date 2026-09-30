@@ -1,5 +1,32 @@
 import { ThinkLevel } from '../types/unified';
 
+export function projectReasoningForResponses(
+  reasoning:
+    | {
+        // Accept the legacy 'off' level in addition to the Responses-native
+        // 'none' — clients/model aliases still send 'off' (see
+        // normalizeEffort / splitReasoningSuffix in services/pi-ai/reasoning.ts).
+        effort?: ThinkLevel | 'off';
+        enabled?: boolean;
+        summary?: string;
+      }
+    | undefined
+): { effort?: ThinkLevel; summary?: string } | undefined {
+  if (!reasoning) return undefined;
+  // 'off' is not a valid Responses effort level — normalize it to 'none'
+  // rather than forwarding an invalid payload.
+  if (reasoning.enabled === false || reasoning.effort === 'off' || reasoning.effort === 'none') {
+    return { effort: 'none' };
+  }
+
+  const projected = {
+    ...(reasoning.effort !== undefined ? { effort: reasoning.effort } : {}),
+    ...(reasoning.summary !== undefined ? { summary: reasoning.summary } : {}),
+  };
+
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
 /**
  * A more accurate token counter that accounts for common sub-word patterns.
  * No external dependencies.

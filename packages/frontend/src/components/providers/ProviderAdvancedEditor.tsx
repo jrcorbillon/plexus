@@ -1,45 +1,31 @@
 import { useState, useEffect } from 'react';
+import {
+  isOAuthPlaceholderUrl,
+  getDefaultCacheKeyInjection,
+  PROVIDER_CACHE_KEY_INJECTION_OPTIONS,
+  type ProviderCacheKeyInjection,
+} from '@plexus/shared';
 import { ChevronDown, ChevronRight, Info, Plus, Trash2 } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { DebouncedInput } from '../ui/DebouncedInput';
 import { Switch } from '../ui/Switch';
 import { Badge } from '../ui/Badge';
 import { Tooltip } from '../ui/Tooltip';
-import { GPU_PROFILE_OPTIONS, resolveGpuParams } from '@plexus/shared';
 import type { Provider, CompactionSettings } from '../../lib/api';
 import { api } from '../../lib/api';
+import {
+  collectProviderEndpointUrls,
+  isOAuthProviderDraft,
+  PI_AI_AUTO_VALUE,
+} from '../../lib/piAiProvider';
+import { ReasoningRewriteRulesEditor } from './ReasoningRewriteRulesEditor';
+import {
+  getAdapterName,
+  KNOWN_ADAPTERS,
+  normalizeAdapterEntries,
+} from './model-editor/adapter-utils';
 
-export const KNOWN_ADAPTERS: { value: string; label: string; description: string }[] = [
-  {
-    value: 'reasoning_content',
-    label: 'Reasoning Content',
-    description:
-      'Maps reasoning ↔ reasoning_content on messages and responses (e.g. Fireworks DeepSeek-R1).',
-  },
-  {
-    value: 'suppress_developer_role',
-    label: 'Suppress Developer Role',
-    description: 'Rewrites the "developer" role to "system" for providers that do not support it.',
-  },
-  {
-    value: 'model_override',
-    label: 'Model Override',
-    description:
-      'Conditionally rewrites the model name based on request fields (e.g. switching to a -fast variant when reasoning is disabled).',
-  },
-  {
-    value: 'reasoning_rewrite',
-    label: 'Reasoning Rewrite',
-    description:
-      'Rewrites reasoning/thinking fields to provider-specific formats (e.g. enable_thinking, budget_tokens, thinking.type).',
-  },
-  {
-    value: 'web_search_coercion',
-    label: 'Web Search Coercion',
-    description:
-      'Coerces server-side web search tool entries to the format expected by this provider (Anthropic, OpenAI, or OpenRouter).',
-  },
-];
+export { KNOWN_ADAPTERS } from './model-editor/adapter-utils';
 
 const ANTHROPIC_TOOL_ID_ADAPTER = 'normalize_anthropic_tool_ids';
 
@@ -75,6 +61,7 @@ export function ProviderAdvancedEditor({
   // pi-ai provider dropdown
   const [piProviders, setPiProviders] = useState<string[]>([]);
   const [piProviderCustom, setPiProviderCustom] = useState(false);
+  const [piProviderResolving, setPiProviderResolving] = useState(false);
 
   useEffect(() => {
     api
@@ -92,6 +79,33 @@ export function ProviderAdvancedEditor({
       setPiProviderCustom(true);
     }
   }, [editingProvider.pi_ai_provider, piProviders]);
+
+  // Resolve `- auto -` to the concrete pi-ai provider matching the current
+  // endpoint URLs / OAuth provider (same lookup as new-provider auto-detect).
+  // `- auto -` is never a stored selection: it immediately becomes the
+  // resolved entry (or stays unchanged when nothing matches).
+  const resolvePiAiAuto = async () => {
+    const urls = collectProviderEndpointUrls(editingProvider.apiBaseUrl);
+    const oauthProvider = isOAuthProviderDraft(editingProvider.apiBaseUrl)
+      ? editingProvider.oauthProvider?.trim() || undefined
+      : undefined;
+    setPiProviderResolving(true);
+    try {
+      const resolved = await api.resolvePiAiProvider({ urls, oauthProvider });
+      if (resolved) {
+        setEditingProvider((prev) => ({
+          ...prev,
+          pi_ai_provider: resolved,
+          pi_ai_quirks: undefined,
+          auto_compat: true,
+        }));
+      }
+    } catch {
+      // non-fatal — leave the previous selection in place
+    } finally {
+      setPiProviderResolving(false);
+    }
+  };
 
   return (
     <div className="border border-border-glass rounded-sm overflow-hidden">
@@ -176,9 +190,9 @@ export function ProviderAdvancedEditor({
               >
                 Provider Adapters
               </label>
-              {(editingProvider.adapter ?? []).length > 0 && (
+              {normalizeAdapterEntries(editingProvider.adapter).length > 0 && (
                 <Badge status="neutral" style={{ fontSize: '10px', padding: '2px 8px' }}>
-                  {(editingProvider.adapter ?? []).length}
+                  {normalizeAdapterEntries(editingProvider.adapter).length}
                 </Badge>
               )}
             </div>
@@ -200,15 +214,10 @@ export function ProviderAdvancedEditor({
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px' }}>
                   {KNOWN_ADAPTERS.filter(
-                    (a) =>
-                      a.value !== 'model_override' &&
-                      a.value !== 'reasoning_rewrite' &&
-                      a.value !== 'web_search_coercion'
+                    (a) => a.value !== 'model_override' && a.value !== 'web_search_coercion'
                   ).map((a) => {
-                    const adapterEntries: any[] = editingProvider.adapter ?? [];
-                    const active = adapterEntries.some(
-                      (e: any) => (typeof e === 'string' ? e : e.name) === a.value
-                    );
+                    const adapterEntries = normalizeAdapterEntries(editingProvider.adapter);
+                    const active = adapterEntries.some((e: any) => getAdapterName(e) === a.value);
                     return (
                       <label
                         key={a.value}
@@ -228,11 +237,9 @@ export function ProviderAdvancedEditor({
                           checked={active}
                           style={{ marginTop: '2px', flexShrink: 0 }}
                           onChange={() => {
-                            const current: any[] = editingProvider.adapter ?? [];
+                            const current = normalizeAdapterEntries(editingProvider.adapter);
                             const next = active
-                              ? current.filter(
-                                  (e: any) => (typeof e === 'string' ? e : e.name) !== a.value
-                                )
+                              ? current.filter((e: any) => getAdapterName(e) !== a.value)
                               : [...current, { name: a.value, options: {} }];
                             setEditingProvider({ ...editingProvider, adapter: next });
                           }}
@@ -253,23 +260,32 @@ export function ProviderAdvancedEditor({
                   })}
                 </div>
 
+                {/* Reasoning Rewrite rules editor (shared with per-model UI) */}
+                <ReasoningRewriteRulesEditor
+                  adapters={normalizeAdapterEntries(editingProvider.adapter)}
+                  onChange={(next: any[]) =>
+                    setEditingProvider({ ...editingProvider, adapter: next })
+                  }
+                />
+
                 {/* Web Search Coercion — inline options editor */}
                 {(() => {
-                  const adapterEntries: any[] = editingProvider.adapter ?? [];
+                  const adapterEntries = normalizeAdapterEntries(editingProvider.adapter);
                   const entry = adapterEntries.find(
-                    (e: any) => (typeof e === 'string' ? e : e.name) === 'web_search_coercion'
+                    (e: any) => getAdapterName(e) === 'web_search_coercion'
                   );
                   const active = !!entry;
-                  const currentTarget: string = entry?.options?.target ?? '';
+                  const currentTarget: string =
+                    typeof entry === 'string' ? '' : (entry?.options?.target ?? '');
                   const currentMaxUses: string =
-                    entry?.options?.max_uses != null ? String(entry.options.max_uses) : '';
+                    typeof entry === 'string' || entry?.options?.max_uses == null
+                      ? ''
+                      : String(entry.options.max_uses);
 
                   const toggleActive = () => {
-                    const current: any[] = editingProvider.adapter ?? [];
+                    const current = normalizeAdapterEntries(editingProvider.adapter);
                     const next = active
-                      ? current.filter(
-                          (e: any) => (typeof e === 'string' ? e : e.name) !== 'web_search_coercion'
-                        )
+                      ? current.filter((e: any) => getAdapterName(e) !== 'web_search_coercion')
                       : [
                           ...current,
                           {
@@ -281,9 +297,9 @@ export function ProviderAdvancedEditor({
                   };
 
                   const updateOptions = (patch: Record<string, any>) => {
-                    const current: any[] = editingProvider.adapter ?? [];
+                    const current = normalizeAdapterEntries(editingProvider.adapter);
                     const next = current.map((e: any) => {
-                      const name = typeof e === 'string' ? e : e.name;
+                      const name = getAdapterName(e);
                       if (name !== 'web_search_coercion') return e;
                       return { name: 'web_search_coercion', options: { ...e.options, ...patch } };
                     });
@@ -381,9 +397,11 @@ export function ProviderAdvancedEditor({
                                   const raw = e.target.value;
                                   if (raw === '') {
                                     // Remove max_uses from options
-                                    const current: any[] = editingProvider.adapter ?? [];
+                                    const current = normalizeAdapterEntries(
+                                      editingProvider.adapter
+                                    );
                                     const next = current.map((e2: any) => {
-                                      const name = typeof e2 === 'string' ? e2 : e2.name;
+                                      const name = getAdapterName(e2);
                                       if (name !== 'web_search_coercion') return e2;
                                       const { max_uses: _removed, ...rest } = e2.options ?? {};
                                       return { name: 'web_search_coercion', options: rest };
@@ -407,13 +425,13 @@ export function ProviderAdvancedEditor({
 
                 {/* Anthropic Tool-ID Normalization — Auto | Enabled | Disabled */}
                 {(() => {
-                  const entries: any[] = editingProvider.adapter ?? [];
+                  const entries = normalizeAdapterEntries(editingProvider.adapter);
                   // The backend replays adapter entries in order, so a LATER
                   // entry overrides an earlier one — read the last match, not
                   // the first (resolveAdapters, adapter-resolver.ts).
                   let entry: any;
                   for (const candidate of entries) {
-                    const name = typeof candidate === 'string' ? candidate : candidate?.name;
+                    const name = getAdapterName(candidate);
                     if (name === ANTHROPIC_TOOL_ID_ADAPTER) entry = candidate;
                   }
                   const mode: 'auto' | 'on' | 'off' = !entry
@@ -424,8 +442,7 @@ export function ProviderAdvancedEditor({
 
                   const setMode = (value: 'auto' | 'on' | 'off') => {
                     const withoutEntry = entries.filter(
-                      (e: any) =>
-                        (typeof e === 'string' ? e : e?.name) !== ANTHROPIC_TOOL_ID_ADAPTER
+                      (e: any) => getAdapterName(e) !== ANTHROPIC_TOOL_ID_ADAPTER
                     );
                     const next =
                       value === 'auto'
@@ -448,10 +465,10 @@ export function ProviderAdvancedEditor({
                   // base URL containing anthropic.com IS a Messages provider by
                   // inference (getProviderTypes), so it counts as-is.
                   const isAnthropicUrl = (url: string) => {
-                    const lowered = url.toLowerCase();
+                    const lowered = url.trim().toLowerCase();
                     return (
                       lowered.includes('anthropic.com') ||
-                      (lowered.startsWith('oauth://') &&
+                      (isOAuthPlaceholderUrl(url) &&
                         (editingProvider.oauthProvider || editingProvider.id) === 'anthropic')
                     );
                   };
@@ -1214,6 +1231,27 @@ export function ProviderAdvancedEditor({
                 </label>
                 <label className="flex items-start gap-2 py-1 cursor-pointer">
                   <Switch
+                    checked={editingProvider.allow100PercentUtilization || false}
+                    onChange={(checked) =>
+                      setEditingProvider({
+                        ...editingProvider,
+                        allow100PercentUtilization: checked,
+                      })
+                    }
+                  />
+                  <div>
+                    <div className="font-body text-[12px] text-text">Allow 100% Utilization</div>
+                    <div
+                      className="font-body text-[11px] text-text-muted"
+                      style={{ lineHeight: 1.35 }}
+                    >
+                      Allow quota usage to reach 100% instead of cooling down at 99%. May result in
+                      repeat attempts or failed generations.
+                    </div>
+                  </div>
+                </label>
+                <label className="flex items-start gap-2 py-1 cursor-pointer">
+                  <Switch
                     checked={editingProvider.useClaudeMasking || false}
                     onChange={(checked) =>
                       setEditingProvider({ ...editingProvider, useClaudeMasking: checked })
@@ -1232,6 +1270,11 @@ export function ProviderAdvancedEditor({
                 <label className="flex items-start gap-2 py-1 cursor-pointer">
                   <Switch
                     checked={editingProvider.auto_compat || false}
+                    disabled={
+                      !editingProvider.pi_ai_provider &&
+                      !editingProvider.pi_ai_quirks &&
+                      !editingProvider.auto_compat
+                    }
                     onChange={(checked) =>
                       setEditingProvider({ ...editingProvider, auto_compat: checked })
                     }
@@ -1242,10 +1285,43 @@ export function ProviderAdvancedEditor({
                       className="font-body text-[11px] text-text-muted"
                       style={{ lineHeight: 1.35 }}
                     >
-                      Use pi-ai registry reasoning and generation compatibility.
+                      Translates reasoning and generation options using a mapped pi-ai model or
+                      declared inline quirks. A pi-ai provider also needs per-model pi-ai Model IDs;
+                      inline quirks do not.
                     </div>
                   </div>
                 </label>
+                <div className="flex flex-col gap-1 py-1">
+                  <label className="font-body text-[12px] text-text">Cache Key Injection</label>
+                  <select
+                    className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
+                    value={
+                      editingProvider.cacheKeyInjection ??
+                      getDefaultCacheKeyInjection(editingProvider.oauthProvider) ??
+                      'off'
+                    }
+                    onChange={(e) =>
+                      setEditingProvider({
+                        ...editingProvider,
+                        cacheKeyInjection: e.target.value as ProviderCacheKeyInjection,
+                      })
+                    }
+                  >
+                    {PROVIDER_CACHE_KEY_INJECTION_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <div
+                    className="font-body text-[11px] text-text-muted"
+                    style={{ lineHeight: 1.35 }}
+                  >
+                    Inject Plexus's derived per-run cache/session key into this field so upstream
+                    prompt-cache routing doesn't depend on the client. Meta OAuth defaults to
+                    prompt_cache_key.
+                  </div>
+                </div>
               </div>
 
               {/* Right: inputs */}
@@ -1257,62 +1333,6 @@ export function ProviderAdvancedEditor({
                   justifyContent: 'center',
                 }}
               >
-                {/* GPU Profile */}
-                <div className="flex flex-col gap-0.5">
-                  <label className="font-body text-[11px] font-medium text-text-secondary">
-                    GPU Profile
-                  </label>
-                  <select
-                    className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
-                    value={editingProvider.gpu_profile || ''}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      if (!value) {
-                        const resolved = resolveGpuParams('B200');
-                        setEditingProvider({
-                          ...editingProvider,
-                          gpu_profile: undefined,
-                          gpu_ram_gb: resolved.ram_gb,
-                          gpu_bandwidth_tb_s: resolved.bandwidth_tb_s,
-                          gpu_flops_tflop: resolved.flops_tflop,
-                          gpu_power_draw_watts: resolved.power_draw_watts,
-                        });
-                      } else if (value === 'custom') {
-                        const resolved = resolveGpuParams('custom', {
-                          ram_gb: editingProvider.gpu_ram_gb,
-                          bandwidth_tb_s: editingProvider.gpu_bandwidth_tb_s,
-                          flops_tflop: editingProvider.gpu_flops_tflop,
-                          power_draw_watts: editingProvider.gpu_power_draw_watts,
-                        });
-                        setEditingProvider({
-                          ...editingProvider,
-                          gpu_profile: 'custom',
-                          gpu_ram_gb: resolved.ram_gb,
-                          gpu_bandwidth_tb_s: resolved.bandwidth_tb_s,
-                          gpu_flops_tflop: resolved.flops_tflop,
-                          gpu_power_draw_watts: resolved.power_draw_watts,
-                        });
-                      } else {
-                        const resolved = resolveGpuParams(value);
-                        setEditingProvider({
-                          ...editingProvider,
-                          gpu_profile: value,
-                          gpu_ram_gb: resolved.ram_gb,
-                          gpu_bandwidth_tb_s: resolved.bandwidth_tb_s,
-                          gpu_flops_tflop: resolved.flops_tflop,
-                          gpu_power_draw_watts: resolved.power_draw_watts,
-                        });
-                      }
-                    }}
-                  >
-                    <option value="">Default (B200)</option>
-                    {GPU_PROFILE_OPTIONS.map((p) => (
-                      <option key={p.value} value={p.value}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
                 {/* Discount */}
                 <div className="flex flex-col gap-0.5">
                   <label className="font-body text-[11px] font-medium text-text-secondary">
@@ -1413,24 +1433,45 @@ export function ProviderAdvancedEditor({
                 <div className="flex flex-col gap-0.5">
                   <label className="font-body text-[11px] font-medium text-text-secondary">
                     pi-ai Provider
+                    {editingProvider.pi_ai_quirks && (
+                      <span className="font-normal text-[10px] text-text-muted ml-1">
+                        inline quirks active
+                      </span>
+                    )}
                   </label>
                   {!piProviderCustom ? (
                     <select
                       className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
                       value={editingProvider.pi_ai_provider ?? ''}
+                      disabled={piProviderResolving}
+                      title={
+                        piProviderResolving
+                          ? 'Resolving pi-ai provider…'
+                          : 'Pick - auto - to detect from the endpoint URLs or OAuth provider'
+                      }
                       onChange={(e) => {
                         const raw = e.target.value;
                         if (raw === '__custom__') {
                           setPiProviderCustom(true);
                           return;
                         }
+                        if (raw === PI_AI_AUTO_VALUE) {
+                          void resolvePiAiAuto();
+                          return;
+                        }
                         setEditingProvider({
                           ...editingProvider,
                           pi_ai_provider: raw || undefined,
+                          pi_ai_quirks: raw ? undefined : editingProvider.pi_ai_quirks,
+                          auto_compat:
+                            raw || editingProvider.pi_ai_quirks
+                              ? editingProvider.auto_compat
+                              : false,
                         });
                       }}
                     >
                       <option value="">— none —</option>
+                      <option value={PI_AI_AUTO_VALUE}>- auto -</option>
                       {piProviders.map((p) => (
                         <option key={p} value={p}>
                           {p}
@@ -1450,6 +1491,11 @@ export function ProviderAdvancedEditor({
                           setEditingProvider({
                             ...editingProvider,
                             pi_ai_provider: raw || undefined,
+                            pi_ai_quirks: raw ? undefined : editingProvider.pi_ai_quirks,
+                            auto_compat:
+                              raw || editingProvider.pi_ai_quirks
+                                ? editingProvider.auto_compat
+                                : false,
                           });
                         }}
                         autoFocus
@@ -1468,91 +1514,6 @@ export function ProviderAdvancedEditor({
               </div>
             </div>
           </div>
-
-          {/* Custom GPU fields — only when gpu_profile === 'custom' */}
-          {editingProvider.gpu_profile === 'custom' && (
-            <div
-              className="border border-border-glass rounded-md p-2 bg-bg-subtle"
-              style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}
-            >
-              <div className="flex flex-col gap-0.5">
-                <label className="font-body text-[11px] font-medium text-text-secondary">
-                  RAM (GB)
-                </label>
-                <input
-                  className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
-                  type="number"
-                  step="1"
-                  min="1"
-                  placeholder="e.g. 80"
-                  value={editingProvider.gpu_ram_gb || ''}
-                  onChange={(e) =>
-                    setEditingProvider({
-                      ...editingProvider,
-                      gpu_ram_gb: parseFloat(e.target.value) || undefined,
-                    })
-                  }
-                />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <label className="font-body text-[11px] font-medium text-text-secondary">
-                  Bandwidth (TB/s)
-                </label>
-                <input
-                  className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
-                  type="number"
-                  step="0.1"
-                  min="0.1"
-                  placeholder="e.g. 3.35"
-                  value={editingProvider.gpu_bandwidth_tb_s || ''}
-                  onChange={(e) =>
-                    setEditingProvider({
-                      ...editingProvider,
-                      gpu_bandwidth_tb_s: parseFloat(e.target.value) || undefined,
-                    })
-                  }
-                />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <label className="font-body text-[11px] font-medium text-text-secondary">
-                  FLOPS (TFLOPs)
-                </label>
-                <input
-                  className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
-                  type="number"
-                  step="100"
-                  min="1"
-                  placeholder="e.g. 4000"
-                  value={editingProvider.gpu_flops_tflop || ''}
-                  onChange={(e) =>
-                    setEditingProvider({
-                      ...editingProvider,
-                      gpu_flops_tflop: parseFloat(e.target.value) || undefined,
-                    })
-                  }
-                />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <label className="font-body text-[11px] font-medium text-text-secondary">
-                  Power (Watts)
-                </label>
-                <input
-                  className="w-full py-1 pl-2 pr-2 font-body text-[12px] text-text bg-bg-glass border border-border-glass rounded-sm outline-none focus:border-primary"
-                  type="number"
-                  step="10"
-                  min="1"
-                  placeholder="e.g. 700"
-                  value={editingProvider.gpu_power_draw_watts || ''}
-                  onChange={(e) =>
-                    setEditingProvider({
-                      ...editingProvider,
-                      gpu_power_draw_watts: parseInt(e.target.value, 10) || undefined,
-                    })
-                  }
-                />
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

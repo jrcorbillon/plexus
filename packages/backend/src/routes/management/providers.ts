@@ -5,13 +5,38 @@ import {
   fetchModelsFromUrl,
   validateUrlSafety,
 } from '../../services/providers/provider-model-discovery';
+import { loadProviderPresets } from '../../services/provider-presets';
 
 const fetchModelsSchema = z.object({
   url: z.string().url(),
   apiKey: z.string().optional(),
 });
 
+const PROVIDER_AUTH_FAILURE_STATUS_CODES = new Set([401, 403]);
+const PROVIDER_GATEWAY_ERROR_STATUS = 502;
+
 export async function registerProviderRoutes(fastify: FastifyInstance) {
+  /**
+   * GET /v0/management/provider-presets
+   * Returns the pre-configured provider preset catalog served from
+   * `packages/backend/data/provider-presets.json` (see services/provider-presets.ts).
+   */
+  fastify.get('/v0/management/provider-presets', async (_request, reply) => {
+    try {
+      const { presets, source } = await loadProviderPresets();
+      return reply.send({ data: presets, source });
+    } catch (error) {
+      logger.error(`Provider presets failed to load: ${error}`);
+      return reply.code(500).send({
+        error: {
+          message: error instanceof Error ? error.message : 'Failed to load provider presets',
+          type: 'internal_error',
+          code: 500,
+        },
+      });
+    }
+  });
+
   fastify.post('/v0/management/providers/fetch-models', async (request, reply) => {
     const parsed = fetchModelsSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -56,12 +81,15 @@ export async function registerProviderRoutes(fastify: FastifyInstance) {
           });
         }
         logger.error(`Fetch error: ${error.message}`);
-        const statusCode = (error as any).statusCode ?? 500;
-        return reply.code(statusCode).send({
+        const providerStatusCode = (error as any).statusCode ?? 500;
+        const responseStatusCode = PROVIDER_AUTH_FAILURE_STATUS_CODES.has(providerStatusCode)
+          ? PROVIDER_GATEWAY_ERROR_STATUS
+          : providerStatusCode;
+        return reply.code(responseStatusCode).send({
           error: {
             message: error.message,
-            type: statusCode === 500 ? 'fetch_error' : 'provider_error',
-            code: statusCode,
+            type: providerStatusCode === 500 ? 'fetch_error' : 'provider_error',
+            code: providerStatusCode,
             details: (error as any).details,
           },
         });

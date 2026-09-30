@@ -2,12 +2,23 @@ import React from 'react';
 import { Tooltip } from './Tooltip';
 
 interface CostToolTipProps {
-  source: string;
+  source?: string;
   costMetadata?: string;
+  costBreakdown?: {
+    input: string;
+    output: string;
+    cached: string;
+    cacheWrite: string;
+  };
   children: React.ReactNode;
 }
 
-export const CostToolTip: React.FC<CostToolTipProps> = ({ source, costMetadata, children }) => {
+export const CostToolTip: React.FC<CostToolTipProps> = ({
+  source,
+  costMetadata,
+  costBreakdown,
+  children,
+}) => {
   let content: React.ReactNode = 'No details';
 
   const containerStyle: React.CSSProperties = {
@@ -54,9 +65,50 @@ export const CostToolTip: React.FC<CostToolTipProps> = ({ source, costMetadata, 
     return num.toFixed(10).replace(/\.?0+$/, '');
   };
 
+  let attribution: React.ReactNode = null;
   try {
     const parsed = costMetadata ? JSON.parse(costMetadata) : {};
     const data = parsed || {};
+    const upstreamModel = data.upstream_model ?? data.upstreamModel;
+    const pricingModel = data.pricing_model ?? data.pricingModel;
+    const pricingFallback = data.pricing_fallback ?? data.pricingFallback;
+    const isProviderReported = (source || '').toLowerCase() === 'provider_reported';
+    if (upstreamModel || pricingModel || (pricingFallback && !isProviderReported)) {
+      attribution = (
+        <div
+          style={{
+            borderTop: '1px solid #4a4a4a',
+            paddingTop: '4px',
+            marginTop: '4px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '2px',
+          }}
+        >
+          {pricingModel ? (
+            <span style={{ color: '#9ca3af', fontSize: '11px' }}>
+              Pricing model:{' '}
+              <span style={{ fontFamily: 'monospace', color: '#e0e0e0' }}>
+                {String(pricingModel)}
+              </span>
+            </span>
+          ) : null}
+          {upstreamModel && upstreamModel !== pricingModel ? (
+            <span style={{ color: '#9ca3af', fontSize: '11px' }}>
+              Upstream:{' '}
+              <span style={{ fontFamily: 'monospace', color: '#e0e0e0' }}>
+                {String(upstreamModel)}
+              </span>
+            </span>
+          ) : null}
+          {pricingFallback && !isProviderReported ? (
+            <span style={{ color: '#fbbf24', fontSize: '11px', fontWeight: 600 }}>
+              Route pricing used — upstream price unavailable
+            </span>
+          ) : null}
+        </div>
+      );
+    }
 
     // Normalize source comparison
     const s = (source || '').toLowerCase();
@@ -189,5 +241,36 @@ export const CostToolTip: React.FC<CostToolTipProps> = ({ source, costMetadata, 
     content = <span style={{ color: '#f87171' }}>Error parsing metadata</span>;
   }
 
-  return <Tooltip content={content}>{children}</Tooltip>;
+  const tooltipContent = costBreakdown ? (
+    <div style={{ ...containerStyle, minWidth: '200px' }}>
+      <div style={headerStyle}>Cost breakdown</div>
+      <div style={gridStyle}>
+        <span style={labelStyle}>Input:</span>
+        <span style={valueStyle}>{costBreakdown.input}</span>
+
+        <span style={labelStyle}>Output:</span>
+        <span style={valueStyle}>{costBreakdown.output}</span>
+
+        <span style={labelStyle}>Cached:</span>
+        <span style={valueStyle}>{costBreakdown.cached}</span>
+
+        <span style={labelStyle}>Cache write:</span>
+        <span style={valueStyle}>{costBreakdown.cacheWrite}</span>
+      </div>
+      {source && (
+        <div style={{ borderTop: '1px solid #4a4a4a', paddingTop: '4px', marginTop: '4px' }}>
+          {content}
+          {attribution}
+        </div>
+      )}
+      {!source && attribution ? attribution : null}
+    </div>
+  ) : (
+    <>
+      {content}
+      {attribution}
+    </>
+  );
+
+  return <Tooltip content={tooltipContent}>{children}</Tooltip>;
 };

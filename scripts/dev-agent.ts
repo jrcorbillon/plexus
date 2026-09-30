@@ -24,6 +24,7 @@ import { tmpdir } from 'os';
 import { openSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn } from 'child_process';
 import { deriveDevPort } from './dev-port-allocator';
+import { buildFrpcEndpoint, getRepositoryName, isFrpcAvailable, type FrpcEndpoint } from './frpc';
 import {
   isPaseoScriptAvailable,
   startPaseoScript,
@@ -47,12 +48,16 @@ function sanitizeTarget(name?: string): string {
 
 const targetName = isStop ? sanitizeTarget(rawArgs[1]) : sanitizeTarget(rawArgs[0]);
 
-function derivePort(target: string): string {
+// One dev server per worktree: derive the same port regardless of which
+// target (dev / dev:full / dev:pglite) is used to start it, matching
+// dev.ts and dev-config.ts. Paseo-managed runs still get their own port via
+// $PASEO_PORT (see paseo.json), which takes precedence through process.env.PORT.
+function derivePort(): string {
   if (process.env.PORT) return process.env.PORT;
-  return deriveDevPort(process.cwd(), target);
+  return deriveDevPort(process.cwd(), 'dev');
 }
 
-const PORT = derivePort(targetName);
+const PORT = derivePort();
 const ADMIN_KEY = process.env.ADMIN_KEY ?? 'password';
 const CONSECUTIVE_OK = 3;
 const READY_TIMEOUT_MS = 180_000;
@@ -63,6 +68,17 @@ function getPidFile(target: string): string {
 
 function getLogFile(target: string): string {
   return join(tmpdir(), `plexus-dev-${target.replace(/[:/]/g, '_')}-${dirName}.log`);
+}
+
+function getFrpcEndpoint(): FrpcEndpoint | undefined {
+  if (!process.env.FRPC_SERVER_ADDR || !process.env.FRPC_AUTH_TOKEN || !isFrpcAvailable()) {
+    return undefined;
+  }
+  return buildFrpcEndpoint(
+    getRepositoryName(process.cwd()),
+    dirName,
+    process.env.FRPC_SUBDOMAIN_HOST
+  );
 }
 
 // Standard fallback PID file from previous dev-agent versions
@@ -91,7 +107,12 @@ async function waitForHealthy(port = PORT, timeoutMs = READY_TIMEOUT_MS): Promis
   return false;
 }
 
-function printReady(target: string, port: string | number, proxyUrl?: string, prefix = 'Ready.') {
+function printReady(
+  target: string,
+  port: string | number,
+  frpcEndpoint?: FrpcEndpoint,
+  prefix = 'Ready.'
+) {
   const baseUrl = `http://localhost:${port}`;
   const loginUrl = `${baseUrl}/ui/login?token=${encodeURIComponent(ADMIN_KEY)}`;
   console.log(`\n${prefix}`);
@@ -99,8 +120,11 @@ function printReady(target: string, port: string | number, proxyUrl?: string, pr
   console.log(`PORT=${port}`);
   console.log(`ADMIN_KEY=${ADMIN_KEY}`);
   console.log(`URL=${loginUrl}`);
-  if (proxyUrl) {
-    console.log(`PROXY_URL=${proxyUrl}`);
+  if (frpcEndpoint) {
+    console.log(`FRPC_SUBDOMAIN=${frpcEndpoint.subdomain}`);
+    if (frpcEndpoint.url) {
+      console.log(`PROXY_URL=${frpcEndpoint.url}`);
+    }
   }
 }
 
@@ -162,7 +186,7 @@ if (isPaseoScriptAvailable(targetName)) {
         printReady(
           targetName,
           servicePort,
-          scriptPayload.proxyUrl,
+          getFrpcEndpoint(),
           `Target "${targetName}" ready (Paseo managed).`
         );
       } else {
@@ -203,7 +227,7 @@ if (await isHealthy(fallbackPort)) {
   printReady(
     targetName,
     fallbackPort,
-    undefined,
+    getFrpcEndpoint(),
     `Dev stack already running on port ${fallbackPort} — reusing it.`
   );
   if (detach) {
@@ -236,7 +260,7 @@ if (targetConfig) {
   });
 } else {
   console.log(`Starting target "${targetName}" via default fallback launcher...`);
-  childProcess = spawn('bun', ['run', 'scripts/dev.ts', '--full', '--no-open'], {
+  childProcess = spawn('bun', ['run', 'dev', '--full', '--no-open'], {
     cwd: process.cwd(),
     env: { ...process.env, PORT: fallbackPort, ADMIN_KEY },
     detached: true,
@@ -250,7 +274,7 @@ childProcess.unref();
 console.log(`Started "${targetName}" in background (logs: ${logFile})...`);
 
 if (await waitForHealthy(fallbackPort)) {
-  printReady(targetName, fallbackPort, undefined, `Target "${targetName}" ready.`);
+  printReady(targetName, fallbackPort, getFrpcEndpoint(), `Target "${targetName}" ready.`);
   if (detach) {
     process.exit(0);
   }

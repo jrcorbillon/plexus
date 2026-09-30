@@ -45,6 +45,7 @@ import { CooldownManager } from './services/runtime/cooldown-manager';
 import { DebugManager } from './services/observability/debug-manager';
 import { ModelMetadataManager } from './services/models/model-metadata-manager';
 import { CodexVersionService } from './services/oauth/codex-version-service';
+import { ClaudeCodeVersionService } from './services/oauth/claude-code-version-service';
 import { SelectorFactory } from './services/routing/selectors/factory';
 import { QuotaScheduler } from './services/quota/quota-scheduler';
 import { ResponsesStorageService } from './services/responses/responses-storage';
@@ -54,6 +55,7 @@ import { registerManagementRoutes } from './routes/management';
 import { registerInferenceRoutes } from './routes/inference';
 import { registerRawPassthroughRoutes } from './routes/raw-passthrough';
 import { registerMcpRoutes } from './routes/mcp';
+import { registerOpenApiRoute } from './routes/openapi';
 import { McpUsageStorageService } from './services/mcp-proxy/mcp-usage-storage';
 import { QuotaEnforcer } from './services/quota/quota-enforcer';
 import { initModelCatalog } from './services/pi-ai/catalog';
@@ -143,6 +145,7 @@ const quotaScheduler = QuotaScheduler.getInstance();
 dispatcher.setUsageStorage(usageStorage);
 DebugManager.getInstance().setStorage(usageStorage);
 SelectorFactory.setUsageStorage(usageStorage);
+SelectorFactory.setQuotaScheduler(quotaScheduler);
 
 // ProbeService is shared between the management test endpoint and the
 // background explorer. BackgroundExplorer is created here so router
@@ -205,6 +208,12 @@ try {
   // One-time migration: rewrite legacy model_type 'chat'/'responses' → 'text'.
   await configService.migrateModelTypes();
 
+  // One-time repair: null out model_alias_targets.target_alias_slug rows
+  // corrupted by the alias-as-fallback-target table-recreation migration
+  // (the literal column-name string was written under SQLite DQS). Idempotent;
+  // no-op on clean/corrected databases.
+  await configService.repairCorruptedAliasFallbackSlugs();
+
   // One-time cleanup: drop any persisted Gemini CLI / Antigravity OAuth
   // providers + credentials (those providers were removed).
   await configService.dropRetiredOAuthProviders();
@@ -218,11 +227,16 @@ try {
   modelMetadataManager.refreshAll(undefined, 'startup').catch((e) => {
     logger.error('Failed to load model metadata', e);
   });
-  CodexVersionService.getInstance()
-    .fetchVersion()
-    .catch((e) => {
-      logger.error('Failed to fetch codex version', e);
-    });
+  const codexVersionService = CodexVersionService.getInstance();
+  codexVersionService.startAutoRefresh(60);
+  codexVersionService.fetchVersion().catch((e) => {
+    logger.error('Failed to fetch codex version', e);
+  });
+  const claudeCodeVersionService = ClaudeCodeVersionService.getInstance();
+  claudeCodeVersionService.startAutoRefresh(60);
+  claudeCodeVersionService.fetchVersion().catch((e) => {
+    logger.error('Failed to fetch claude-code version', e);
+  });
 } catch (e) {
   logger.error('Failed to load config', e);
   process.exit(1);
@@ -308,10 +322,19 @@ await registerRawPassthroughRoutes(fastify, usageStorage, quotaEnforcer);
 // --- Routes: MCP Proxy ---
 await registerMcpRoutes(fastify, mcpUsageStorage);
 
+// Public discovery document for API clients.
+await registerOpenApiRoute(fastify);
+
 // --- Response Storage Cleanup ---
 // Start cleanup job (runs every hour, deletes responses older than 7 days)
 const responsesStorage = new ResponsesStorageService();
 responsesStorage.startCleanupJob(1, 7);
+
+// --- Observability Retention ---
+// Prune request usage, debug, error, and MCP logs older than
+// PLEXUS_USAGE_RETENTION_DAYS (default 365 days) once a day.
+usageStorage.startCleanupJob();
+mcpUsageStorage.startCleanupJob();
 
 // --- Management API (v0) ---
 await registerManagementRoutes(
@@ -324,9 +347,14 @@ await registerManagementRoutes(
   quotaEnforcer
 );
 
-// Health check endpoint for container orchestration
+// Health check endpoint for container orchestration.
+// `version` lets the frontend detect a new deploy and reload itself
+// instead of sitting on a stale bundle. APP_VERSION is baked in at
+// Docker build time (release tag, dev sha, or staging timestamp).
 fastify.get('/health', (request, reply) => reply.send('OK'));
-fastify.get('/healthz', (request, reply) => reply.send({ ok: true }));
+fastify.get('/healthz', (request, reply) =>
+  reply.send({ ok: true, version: process.env.APP_VERSION || 'dev' })
+);
 
 // --- Static File Serving ---
 // `indexHtmlPath` is a string path — the filesystem path in dev, or a $bunfs/ path in a
@@ -442,6 +470,9 @@ const start = async () => {
     const shutdown = async (signal: string) => {
       logger.info(`Received ${signal}, shutting down gracefully...`);
       quotaScheduler.stop();
+      usageStorage.stopCleanupJob();
+      mcpUsageStorage.stopCleanupJob();
+      responsesStorage.stopCleanupJob();
       await mcpProcessManager.stopAll();
       await fastify.close();
       const { closeDatabase } = await import('./db/client');

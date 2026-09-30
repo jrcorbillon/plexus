@@ -6,6 +6,7 @@ node_modules
 dist
 packages/backend/node_modules
 packages/frontend/node_modules
+packages/shared/node_modules
 packages/frontend/dist
 *.log
 .DS_Store
@@ -13,6 +14,5 @@ plexus-linux
 plexus-macos
 plexus.exe
 testcommands
-docs
 AGENTS.md
 CONFIGURATION.md

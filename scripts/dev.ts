@@ -1,13 +1,41 @@
 import { join, basename } from 'path';
 import { tmpdir } from 'os';
 import { createServer } from 'net';
-import { existsSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, writeFileSync, unlinkSync, statSync, readFileSync } from 'fs';
 import { spawn as nodeSpawn, type ChildProcess } from 'child_process';
 import { deriveDevPort } from './dev-port-allocator';
+import {
+  buildFrpcArgs,
+  buildFrpcEndpoint,
+  DEFAULT_FRPC_SERVER_PORT,
+  getRepositoryName,
+  isFrpcAvailable,
+  removeFrpcUrlFile,
+  writeFrpcUrlFile,
+} from './frpc';
 
 // --- Dev defaults (only applied when not already set in environment) ---
 
 const dirName = basename(process.cwd());
+
+// Tracks the mtime of the saved backup we last restored, so `--full` can
+// detect a fresher backup (e.g. after `bun run prep-dev:save`) and re-restore
+// it even when the dev DB already exists.
+const DEV_DATA_PATH = process.env.PLEXUS_DEV_DATA_PATH ?? '.dev-data';
+const SAVED_BACKUP_FILE = join(process.cwd(), DEV_DATA_PATH, 'backup.tar.gz');
+const RESTORE_MARKER_FILE = join(tmpdir(), `plexus-${dirName}.restored-backup`);
+
+function savedBackupIsNewerThanLastRestore(): boolean {
+  if (!existsSync(SAVED_BACKUP_FILE) || !existsSync(RESTORE_MARKER_FILE)) return false;
+  const backupMtime = statSync(SAVED_BACKUP_FILE).mtimeMs;
+  const lastRestoredMtime = Number(readFileSync(RESTORE_MARKER_FILE, 'utf8').trim());
+  return Number.isFinite(lastRestoredMtime) && backupMtime > lastRestoredMtime;
+}
+
+function writeRestoreMarker() {
+  if (!existsSync(SAVED_BACKUP_FILE)) return;
+  writeFileSync(RESTORE_MARKER_FILE, String(statSync(SAVED_BACKUP_FILE).mtimeMs));
+}
 
 function readOptionValue(args: string[], index: number, option: string) {
   const value = args[index + 1];
@@ -30,14 +58,17 @@ function sqlitePathFromDatabaseUrl(databaseUrl: string): string | null {
 function shouldLoadFullData(): boolean {
   if (!fullMode) return false;
 
+  let dbMissing: boolean;
   if (process.env.PLEXUS_POSTGRES_DRIVER === 'pglite') {
-    return process.env.PLEXUS_PGLITE_DATA_DIR
+    dbMissing = process.env.PLEXUS_PGLITE_DATA_DIR
       ? !existsSync(process.env.PLEXUS_PGLITE_DATA_DIR)
       : true;
+  } else {
+    const dbPath = sqlitePathFromDatabaseUrl(process.env.DATABASE_URL!);
+    dbMissing = dbPath ? !existsSync(dbPath) : false;
   }
 
-  const dbPath = sqlitePathFromDatabaseUrl(process.env.DATABASE_URL!);
-  return dbPath ? !existsSync(dbPath) : false;
+  return dbMissing || savedBackupIsNewerThanLastRestore();
 }
 
 for (let i = 2; i < process.argv.length; i++) {
@@ -86,7 +117,7 @@ for (let i = 2; i < process.argv.length; i++) {
 // Two worktrees running simultaneously will land on different ports automatically.
 // Override with: PORT=4000 bun run dev
 if (!process.env.PORT) {
-  process.env.PORT = deriveDevPort();
+  process.env.PORT = deriveDevPort(process.cwd(), 'dev');
 }
 
 // Per-worktree database — persists across restarts, isolated per branch.
@@ -135,11 +166,130 @@ await new Promise<void>((resolve, reject) => {
 
 const PID_FILE = join(tmpdir(), `plexus-${dirName}.pid`);
 writeFileSync(PID_FILE, String(process.pid));
+removeFrpcUrlFile(dirName);
 
 // --- Startup ---
 
 const BACKEND_DIR = join(process.cwd(), 'packages/backend');
 const FRONTEND_DIR = join(process.cwd(), 'packages/frontend');
+
+const WIN = process.platform === 'win32';
+
+const childPgids: number[] = [];
+let isShuttingDown = false;
+let frpcProcess: ChildProcess | undefined;
+
+function spawnManaged(
+  command: string,
+  args: string[],
+  cwd: string,
+  options: { detached?: boolean } = {}
+): ChildProcess {
+  const detached = options.detached ?? true;
+  const proc = nodeSpawn(command, args, {
+    cwd,
+    env: { ...process.env },
+    stdio: 'inherit',
+    detached,
+    ...(WIN ? { shell: true } : {}),
+  });
+  proc.on('error', (error) => {
+    console.error(`[${command}] ${error.message}`);
+  });
+  if (proc.pid && detached) childPgids.push(proc.pid);
+  return proc;
+}
+
+function killAll() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  removeFrpcUrlFile(dirName);
+
+  if (frpcProcess?.pid) {
+    try {
+      process.kill(frpcProcess.pid, WIN ? undefined : 'SIGTERM');
+    } catch {
+      // already dead
+    }
+  }
+
+  for (const pgid of childPgids) {
+    try {
+      if (WIN) {
+        process.kill(pgid);
+      } else {
+        process.kill(-pgid, 'SIGKILL');
+      }
+    } catch {
+      // already dead
+    }
+  }
+
+  try {
+    unlinkSync(PID_FILE);
+  } catch {}
+}
+
+process.on('exit', killAll);
+
+function startFrpc() {
+  if (!isFrpcAvailable()) {
+    console.log('[frpc] Tunnel disabled: frpc is not available on PATH.');
+    return;
+  }
+
+  const serverAddr = process.env.FRPC_SERVER_ADDR;
+  const token = process.env.FRPC_AUTH_TOKEN;
+  if (!serverAddr && !token) {
+    console.log('[frpc] Tunnel disabled: FRPC_SERVER_ADDR and FRPC_AUTH_TOKEN are not set.');
+    return;
+  }
+  if (!serverAddr || !token) {
+    console.warn('[frpc] Tunnel disabled: set both FRPC_SERVER_ADDR and FRPC_AUTH_TOKEN.');
+    return;
+  }
+
+  const serverPort = Number(process.env.FRPC_SERVER_PORT ?? DEFAULT_FRPC_SERVER_PORT);
+  if (!Number.isInteger(serverPort) || serverPort < 1 || serverPort > 65535) {
+    console.error(
+      `[frpc] Tunnel disabled: invalid FRPC_SERVER_PORT "${process.env.FRPC_SERVER_PORT}".`
+    );
+    return;
+  }
+
+  const repositoryName = getRepositoryName(process.cwd());
+  const worktreeName = basename(process.cwd());
+  const { subdomain, url: publicUrl } = buildFrpcEndpoint(
+    repositoryName,
+    worktreeName,
+    process.env.FRPC_SUBDOMAIN_HOST
+  );
+  const args = buildFrpcArgs({
+    serverAddr,
+    serverPort,
+    token,
+    proxyName: subdomain,
+    localPort: Number(process.env.PORT),
+    subdomain,
+  });
+
+  if (publicUrl) {
+    writeFrpcUrlFile(publicUrl, dirName);
+  }
+
+  console.log(`[frpc] Starting tunnel for subdomain: ${subdomain}`);
+  const proc = spawnManaged('frpc', args, process.cwd(), { detached: false });
+  frpcProcess = proc;
+  proc.on('error', () => removeFrpcUrlFile(dirName));
+  proc.on('exit', (code, signal) => {
+    if (frpcProcess === proc) frpcProcess = undefined;
+    removeFrpcUrlFile(dirName);
+    if (!isShuttingDown && code !== 0) {
+      console.error(`[frpc] Tunnel exited with ${signal ? `signal ${signal}` : `code ${code}`}.`);
+    }
+  });
+  console.log(`[frpc] ${publicUrl ? `URL=${publicUrl}` : `Subdomain=${subdomain}`}`);
+}
 
 console.log('Starting Plexus Dev Stack...');
 console.log(`  PORT:         ${process.env.PORT}`);
@@ -190,68 +340,14 @@ if (profileMode) {
   process.exit(0);
 }
 
-// --- Process management ---
-//
-// Bun's --watch processes trap SIGINT and *restart* instead of exiting.
-// So on shutdown we must SIGKILL them to force-terminate. Otherwise they
-// become orphaned and accumulate, eventually exhausting memory.
-//
-// Each child is spawned in its own process group (detached: true / setsid)
-// so that process.kill(-pgid) kills the entire subtree including
-// grandchildren spawned by --watch restarts.
-//
-// Note: terminal close (SIGHUP) is not reliably delivered to this process
-// because Bun may not propagate it. If you close your terminal without
-// Ctrl+C, run: pkill -f "bun run" to clean up.
-
-const WIN = process.platform === 'win32';
-
-const childPgids: number[] = [];
-let isShuttingDown = false;
-
-function spawnManaged(args: string[], cwd: string): ChildProcess {
-  const proc = nodeSpawn('bun', args, {
-    cwd,
-    env: { ...process.env },
-    stdio: 'inherit',
-    detached: true, // own process group → can kill -pgid
-    ...(WIN ? { shell: true } : {}),
-  });
-  // Don't unref() — we need the child handles to keep the event loop alive.
-  // Without them, Bun sees no pending work and exits immediately.
-  childPgids.push(proc.pid!);
-  return proc;
-}
-
-function killAll() {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  for (const pgid of childPgids) {
-    try {
-      if (WIN) {
-        process.kill(pgid);
-      } else {
-        process.kill(-pgid, 'SIGKILL');
-      }
-    } catch {
-      // already dead
-    }
-  }
-
-  try {
-    unlinkSync(PID_FILE);
-  } catch {}
-}
-
 function spawnBackend(): ChildProcess {
-  return spawnManaged(['run', '--watch', '--no-clear-screen', 'src/index.ts'], BACKEND_DIR);
+  return spawnManaged('bun', ['run', '--watch', '--no-clear-screen', 'src/index.ts'], BACKEND_DIR);
 }
 
 let backend = spawnBackend();
 
 console.log('[Frontend] Starting builder (watch mode)...');
-const frontend = spawnManaged(['run', 'dev'], FRONTEND_DIR);
+const frontend = spawnManaged('bun', ['run', 'dev'], FRONTEND_DIR);
 
 console.log(`Backend: http://localhost:${process.env.PORT}`);
 console.log('Watching for changes...');
@@ -313,11 +409,25 @@ async function waitForServer(timeout = 30000): Promise<void> {
   throw new Error(`Server did not become ready within ${timeout / 1000}s`);
 }
 
+(async () => {
+  try {
+    await waitForServer();
+    startFrpc();
+  } catch (error) {
+    console.warn(
+      `[frpc] Tunnel disabled: server did not become ready (${error instanceof Error ? error.message : 'unknown error'}).`
+    );
+  }
+})();
+
 if (fullMode) {
   (async () => {
     if (!shouldLoadFullDevData) {
       console.log('[full] Existing dev database found. Skipping prep-dev restore.');
       return;
+    }
+    if (savedBackupIsNewerThanLastRestore()) {
+      console.log('[full] Saved backup is newer than last restore. Reloading dev data...');
     }
 
     console.log(`\n[full] Waiting for server at http://localhost:${process.env.PORT}...`);
@@ -331,14 +441,24 @@ if (fullMode) {
     await new Promise<void>((resolve, reject) => {
       const proc = nodeSpawn('bun', ['run', 'prep-dev'], {
         cwd: process.cwd(),
-        env: { ...process.env },
+        // Force prep-dev to target *this* server: override PLEXUS_PORT/PLEXUS_ADMIN_KEY
+        // rather than letting prep-dev re-derive them (Bun reloads .env fresh per
+        // process, so a stale PLEXUS_ADMIN_KEY in .env would otherwise take priority
+        // over the port/key this server actually started with).
+        env: {
+          ...process.env,
+          PLEXUS_PORT: process.env.PORT,
+          PLEXUS_ADMIN_KEY: process.env.ADMIN_KEY,
+        },
         stdio: 'inherit',
       });
       proc.on('close', (code) =>
         code === 0 ? resolve() : reject(new Error(`prep-dev exited with code ${code}`))
       );
       proc.on('error', reject);
-    }).catch((err) => console.error(`[full] ${err instanceof Error ? err.message : err}`));
+    })
+      .then(writeRestoreMarker)
+      .catch((err) => console.error(`[full] ${err instanceof Error ? err.message : err}`));
 
     // prep-dev triggers a server restart after restore, so wait for it to come back up
     console.log('[full] Waiting for server to restart after restore...');
@@ -397,6 +517,3 @@ process.on('SIGUSR1', () => {
   backend = spawnBackend();
   console.log('[dev] Backend restarted.');
 });
-
-// Synchronous fallback — runs even if the signal handler doesn't complete.
-process.on('exit', killAll);

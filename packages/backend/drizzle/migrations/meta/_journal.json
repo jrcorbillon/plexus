@@ -425,8 +425,71 @@
     {
       "idx": 60,
       "version": "6",
-      "when": 1785331545970,
-      "tag": "0060_add_alias_retry_rounds",
+      "when": 1785963110749,
+      "tag": "0060_add_mcp_oauth_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "6",
+      "when": 1786930336000,
+      "tag": "0061_add_alias_as_fallback_target",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "6",
+      "when": 1786932512557,
+      "tag": "0062_add_allow_100_percent_utilization",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "6",
+      "when": 1787432170507,
+      "tag": "0063_add_custom_quota_checkers",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "6",
+      "when": 1788056024543,
+      "tag": "0064_add_reasoning_effort_to_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "6",
+      "when": 1790018432899,
+      "tag": "0065_add_usage_upstream_model",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "6",
+      "when": 1790031350788,
+      "tag": "0066_add_synthetic_safeguard_approval",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1790364479014,
+      "tag": "0067_add_provider_pi_ai_quirks",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "6",
+      "when": 1790695603222,
+      "tag": "0068_add_provider_cache_key_injection",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "6",
+      "when": 1790732653443,
+      "tag": "0069_add_alias_retry_rounds",
       "breakpoints": true
     }
   ]

@@ -607,6 +607,32 @@ describe('Dispatcher Failover', () => {
     expect(paramStripWarn).toContain("'safety_identifier'");
   });
 
+  test('same-target retry: strips a named unknown parameter and retries instead of failing over', async () => {
+    setConfigForTesting(makeConfig({ targetCount: 1 }));
+    fetchMock
+      .mockImplementationOnce(async () =>
+        errorResponse(400, "Unknown parameter: 'reasoning.enabled'")
+      )
+      .mockImplementationOnce(async () => successChatResponse('model-1'));
+
+    const dispatcher = new Dispatcher();
+    const response = await dispatcher.dispatch({
+      ...makeChatRequest(),
+      reasoning: { effort: 'high', enabled: false },
+      originalBody: {
+        model: 'test-alias',
+        messages: [{ role: 'user', content: 'hello' }],
+        reasoning: { effort: 'high', enabled: false },
+      },
+    });
+
+    expect((response as any).plexus?.finalAttemptProvider).toBe('p1');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const retriedBody = JSON.parse((fetchMock.mock.calls[1] as any[])[1].body as string);
+    expect(retriedBody.reasoning).toEqual({ effort: 'high' });
+  });
+
   test('same-target retry: gives up after the retry bound and fails normally when the upstream keeps naming a NEW unsupported param', async () => {
     setConfigForTesting(makeConfig({ targetCount: 1 }));
     fetchMock
@@ -852,6 +878,35 @@ describe('Dispatcher Failover', () => {
     expect(meta?.attemptCount).toBe(2);
     expect(meta?.finalAttemptProvider).toBe('p2');
     expect(response.data?.[0]?.embedding).toEqual([0.1, 0.2]);
+  });
+
+  test('embeddings retries an exhausted alias round without clearing shared cooldowns', async () => {
+    const config = makeConfig({ targetCount: 1, maxAttempts: 2 });
+    config.providers.p1.type = 'embeddings';
+    config.models['test-alias'].type = 'embeddings';
+    setConfigForTesting(config);
+    fetchMock
+      .mockImplementationOnce(async () => errorResponse(503, 'round one failed'))
+      .mockImplementationOnce(
+        async () =>
+          new Response(
+            JSON.stringify({
+              object: 'list',
+              data: [{ object: 'embedding', embedding: [0.1, 0.2], index: 0 }],
+              model: 'model-1',
+              usage: { prompt_tokens: 2, total_tokens: 2 },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+    const response = await new Dispatcher().dispatchEmbeddings({
+      model: 'test-alias',
+      input: 'hello',
+      originalBody: { input: 'hello' },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(response.data[0].embedding).toEqual([0.1, 0.2]);
+    expect(JSON.parse(response.plexus.retryHistory).at(-1).round).toBe(2);
   });
 
   test('non-retryable 413 (Payload Too Large) does NOT failover', async () => {

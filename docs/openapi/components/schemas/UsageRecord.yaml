@@ -79,16 +79,14 @@ properties:
     type:
       - string
       - 'null'
-    description: >
-      Resolved canonical model name. For aliases with `model_architecture`,
-      this is the target; otherwise same as `incomingModelAlias`.
+    description: Resolved canonical model name.
   selectedModelName:
     type:
       - string
       - 'null'
     description: >
-      Final model name sent to the upstream provider. May differ from
-      `canonicalModelName` due to provider-specific transformations.
+      Route-selected model name. Stays at the routing choice even when a
+      provider adapter rewrote the outbound model; see `upstreamModel`.
   finalAttemptProvider:
     type:
       - string
@@ -98,7 +96,15 @@ properties:
     type:
       - string
       - 'null'
-    description: Model used for the final attempt.
+    description: Route-selected model for the final attempt. Quota scope matching uses this value.
+  upstreamModel:
+    type:
+      - string
+      - 'null'
+    description: >
+      Post-adapter model actually present in the dispatched provider payload.
+      Equals `finalAttemptModel` when no rewrite occurred; null for historical
+      rows or failures before a payload was dispatched.
   allAttemptedProviders:
     type:
       - string
@@ -113,6 +119,13 @@ properties:
     description: >
       API format sent to upstream provider. May differ from `incomingApiType`
       due to protocol transformation.
+  reasoningEffort:
+    type:
+      - string
+      - 'null'
+    description: >
+      Reasoning setting requested by the client. Values are `on`, `off`, or a
+      normalized effort level such as `low`, `high`, or `max`.
   tokensInput:
     type:
       - integer
@@ -235,10 +248,7 @@ properties:
     type:
       - number
       - 'null'
-    description: >
-      Estimated energy consumption in kilowatt-hours. Calculated from
-      `model_architecture` token estimates and provider-specific energy
-      coefficients. Requires `model_architecture` to be set on the alias.
+    description: Measured energy consumption in kilowatt-hours reported by the provider (if available).
   isStreamed:
     type: boolean
     description: Whether the response was streamed (SSE).

@@ -45,4 +45,111 @@ describe('setupProviderHeaders', () => {
 
     expect(headers).not.toHaveProperty('anthropic-beta');
   });
+
+  test('uses the Plexus session id for OpenCode Go auto-compat requests', () => {
+    const headers = setupProviderHeaders(
+      {
+        provider: 'opencode-go-provider',
+        config: {
+          api_key: 'provider-key',
+          pi_ai_provider: 'opencode-go',
+          auto_compat: true,
+        },
+      } as any,
+      'chat',
+      {
+        stream: true,
+        cacheRoutingHeaders: { session_id: 'conversation-1' },
+      } as any
+    );
+
+    expect(headers['x-opencode-session']).toBe('conversation-1');
+  });
+
+  test('does not add the OpenCode Go session header without auto-compat', () => {
+    const headers = setupProviderHeaders(
+      {
+        provider: 'opencode-go-provider',
+        config: { api_key: 'provider-key', pi_ai_provider: 'opencode-go' },
+      } as any,
+      'chat',
+      {
+        stream: true,
+        cacheRoutingHeaders: { session_id: 'conversation-1' },
+      } as any
+    );
+
+    expect(headers).not.toHaveProperty('x-opencode-session');
+  });
+
+  test('sends a dedicated OpenCode session without a generic session-id', () => {
+    const headers = setupProviderHeaders(
+      {
+        provider: 'opencode-go-provider',
+        config: { api_key: 'provider-key', pi_ai_provider: 'opencode-go', auto_compat: true },
+      } as any,
+      'chat',
+      {
+        stream: true,
+        cacheRoutingHeaders: { 'x-opencode-session': 'zen-session-1' },
+      } as any
+    );
+
+    expect(headers['x-opencode-session']).toBe('zen-session-1');
+    expect(headers).not.toHaveProperty('session-id');
+  });
+
+  test('prefers the dedicated OpenCode session over the generic session id', () => {
+    const headers = setupProviderHeaders(
+      {
+        provider: 'opencode-go-provider',
+        config: { api_key: 'provider-key', pi_ai_provider: 'opencode-go', auto_compat: true },
+      } as any,
+      'chat',
+      {
+        stream: true,
+        cacheRoutingHeaders: {
+          session_id: 'conversation-1',
+          'x-opencode-session': 'zen-session-1',
+        },
+      } as any
+    );
+
+    expect(headers['x-opencode-session']).toBe('zen-session-1');
+    expect(headers['session-id']).toBe('conversation-1');
+  });
+
+  test('does not forward a dedicated OpenCode session to other providers', () => {
+    const headers = setupProviderHeaders(
+      {
+        provider: 'openai',
+        config: { api_key: 'provider-key', auto_compat: true },
+      } as any,
+      'chat',
+      {
+        stream: true,
+        cacheRoutingHeaders: { 'x-opencode-session': 'zen-session-1' },
+      } as any
+    );
+
+    expect(headers).not.toHaveProperty('x-opencode-session');
+    expect(headers).not.toHaveProperty('session-id');
+  });
+
+  test('supports model-level auto-compat for OpenCode Go', () => {
+    const headers = setupProviderHeaders(
+      {
+        provider: 'opencode-go-provider',
+        config: { api_key: 'provider-key', pi_ai_provider: 'opencode-go' },
+        modelConfig: { auto_compat: true },
+      } as any,
+      'chat',
+      {
+        stream: true,
+        cacheRoutingHeaders: { session_id: 'conversation-1' },
+      } as any
+    );
+
+    expect(headers['x-opencode-session']).toBe('conversation-1');
+  });
 });

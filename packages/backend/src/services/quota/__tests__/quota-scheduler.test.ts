@@ -13,20 +13,32 @@ import { CooldownManager } from '../../runtime/cooldown-manager';
 import type { MeterCheckResult, Meter } from '../../../types/meter';
 import type { QuotaConfig } from '../../../config';
 import { registerSpy } from '../../../../test/test-utils';
+import claudeChecker from '../checkers/claude-code-checker';
+import '../checkers/opencode-go-checker';
 
 const CHECKER_ID = 'quota-persistence-checker';
 
 const makeConfig = (
-  overrides: Partial<{ maxUtilizationPercent: number }> & { id?: string; provider?: string } = {}
+  overrides: Partial<{
+    maxUtilizationPercent: number;
+    allow100PercentUtilization: boolean;
+    intervalMinutes: number;
+  }> & {
+    id?: string;
+    provider?: string;
+  } = {}
 ): QuotaConfig => ({
   id: overrides.id ?? CHECKER_ID,
   provider: overrides.provider ?? 'test-provider',
   type: 'synthetic',
   enabled: true,
-  intervalMinutes: 60,
+  intervalMinutes: overrides.intervalMinutes ?? 60,
   options: {
     ...(overrides.maxUtilizationPercent !== undefined
       ? { maxUtilizationPercent: overrides.maxUtilizationPercent }
+      : {}),
+    ...(overrides.allow100PercentUtilization !== undefined
+      ? { allow100PercentUtilization: overrides.allow100PercentUtilization }
       : {}),
   },
 });
@@ -43,7 +55,7 @@ const makeMeter = (
   used: Math.round((utilizationPercent / 100) * 1000),
   remaining: Math.round(((100 - utilizationPercent) / 100) * 1000),
   utilizationPercent,
-  status: utilizationPercent >= 99 ? 'exhausted' : utilizationPercent >= 90 ? 'critical' : 'ok',
+  status: utilizationPercent >= 100 ? 'exhausted' : utilizationPercent >= 90 ? 'critical' : 'ok',
   periodValue: 5,
   periodUnit: 'hour',
   periodCycle: 'rolling',
@@ -95,6 +107,10 @@ describe('QuotaScheduler persistence', () => {
     process.env.DATABASE_URL = process.env.PLEXUS_TEST_DB_URL ?? process.env.DATABASE_URL;
     initializeDatabase(process.env.DATABASE_URL);
     await runMigrations();
+
+    const scheduler = QuotaScheduler.getInstance() as any;
+    scheduler.db = null;
+    scheduler.schema = null;
 
     const db = getDatabase() as any;
     const schema = getSchema() as any;
@@ -155,6 +171,134 @@ describe('QuotaScheduler persistence', () => {
     expect(rows[0]?.utilizationPercent).toBeCloseTo(15);
   });
 
+  it('keeps the last successful quota visible after a failed check', async () => {
+    const scheduler = QuotaScheduler.getInstance() as any;
+    const successfulResult = makeMeterResult(42);
+    successfulResult.checkedAt = new Date(Date.now() - 60_000).toISOString();
+    await scheduler.persistResult(successfulResult);
+
+    await scheduler.persistResult({
+      checkerId: CHECKER_ID,
+      checkerType: 'synthetic',
+      provider: 'test-provider',
+      checkedAt: new Date().toISOString(),
+      success: false,
+      error: 'Upstream timed out',
+      meters: [],
+    });
+
+    const latest = await scheduler.getLatestQuota(CHECKER_ID);
+    expect(latest).toMatchObject({
+      success: true,
+      stale: true,
+      error: 'Upstream timed out',
+      meters: [{ utilizationPercent: 42 }],
+    });
+    expect(latest?.checkedAt).toBe(successfulResult.checkedAt);
+  });
+
+  it('returns OpenCode Go meters in its declared order: 5h, weekly, monthly', async () => {
+    const scheduler = QuotaScheduler.getInstance() as any;
+    await scheduler.persistResult({
+      checkerId: 'opencode-go-order-checker',
+      checkerType: 'opencode-go',
+      provider: 'opencode-go-provider',
+      checkedAt: new Date().toISOString(),
+      success: true,
+      meters: (['rolling_5h', 'weekly', 'monthly'] as const).map((key) => ({
+        ...makeMeter(10),
+        key,
+      })),
+    });
+
+    const latest = await scheduler.getLatestQuota('opencode-go-order-checker');
+    expect(latest?.meters.map((m: Meter) => m.key)).toEqual(['rolling_5h', 'weekly', 'monthly']);
+  });
+
+  it('does not restore older meters past a successful empty snapshot', async () => {
+    const scheduler = QuotaScheduler.getInstance() as any;
+    const olderResult = makeMeterResult(42);
+    olderResult.checkedAt = new Date(Date.now() - 120_000).toISOString();
+    await scheduler.persistResult(olderResult);
+
+    const emptyResult: MeterCheckResult = {
+      checkerId: CHECKER_ID,
+      checkerType: 'synthetic',
+      provider: 'test-provider',
+      checkedAt: new Date(Date.now() - 60_000).toISOString(),
+      success: true,
+      meters: [],
+    };
+    await scheduler.persistResult(emptyResult);
+
+    await scheduler.persistResult({
+      checkerId: CHECKER_ID,
+      checkerType: 'synthetic',
+      provider: 'test-provider',
+      checkedAt: new Date().toISOString(),
+      success: false,
+      error: 'Upstream timed out',
+      meters: [],
+    });
+
+    const latest = await scheduler.getLatestQuota(CHECKER_ID);
+    expect(latest).toMatchObject({
+      success: true,
+      stale: true,
+      error: 'Upstream timed out',
+      meters: [],
+      checkedAt: emptyResult.checkedAt,
+    });
+  });
+
+  it('times out while loading the last successful snapshot', async () => {
+    const scheduler = QuotaScheduler.getInstance() as any;
+    vi.useFakeTimers();
+
+    try {
+      let resolveFallbackStarted!: () => void;
+      const fallbackStarted = new Promise<void>((resolve) => {
+        resolveFallbackStarted = resolve;
+      });
+      let selectCount = 0;
+      scheduler.db = {
+        select: () => {
+          const queryNumber = ++selectCount;
+          const query: any = {
+            from: () => query,
+            where: () => query,
+            orderBy: () => query,
+            limit: () => {
+              if (queryNumber === 1) {
+                return Promise.resolve([
+                  {
+                    checkedAt: new Date(),
+                    checkerType: 'synthetic',
+                    provider: 'test-provider',
+                    success: false,
+                    errorMessage: 'Upstream timed out',
+                  },
+                ]);
+              }
+              resolveFallbackStarted();
+              return new Promise(() => {});
+            },
+          };
+          return query;
+        },
+      };
+      scheduler.schema = getSchema();
+
+      const latestPromise = scheduler.getLatestQuota(CHECKER_ID);
+      const timeoutAssertion = expect(latestPromise).rejects.toThrow('Database query timeout');
+      await fallbackStarted;
+      await vi.advanceTimersByTimeAsync(15_000);
+      await timeoutAssertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('marks scheduler initialized when initialize receives no quota configs', async () => {
     const scheduler = QuotaScheduler.getInstance();
 
@@ -162,6 +306,29 @@ describe('QuotaScheduler persistence', () => {
 
     expect(scheduler.isInitialized()).toBe(true);
     expect(scheduler.getCheckerIds()).toEqual([]);
+  });
+
+  it('does not expose quota snapshots after two polling intervals', async () => {
+    const scheduler = QuotaScheduler.getInstance();
+    const configs = Reflect.get(scheduler, 'configs') as Map<string, QuotaConfig>;
+    configs.set(CHECKER_ID, makeConfig({ intervalMinutes: 30 }));
+    const getLatestQuota = registerSpy(scheduler, 'getLatestQuota');
+
+    getLatestQuota.mockResolvedValue({
+      ...makeMeterResult(10),
+      checkedAt: new Date(Date.now() - 61 * 60 * 1000).toISOString(),
+    });
+    expect(await scheduler.getLatestQuotaForProvider('test-provider')).toBeNull();
+
+    getLatestQuota.mockResolvedValue(makeMeterResult(10));
+    expect(await scheduler.getLatestQuotaForProvider('test-provider')).not.toBeNull();
+
+    getLatestQuota.mockResolvedValue({
+      ...makeMeterResult(10),
+      stale: true,
+      error: 'Upstream timed out',
+    });
+    expect(await scheduler.getLatestQuotaForProvider('test-provider')).toBeNull();
   });
 
   it('updates existing checker options and reschedules interval changes on reload', async () => {
@@ -204,6 +371,40 @@ describe('QuotaScheduler persistence', () => {
       await vi.advanceTimersByTimeAsync(60_000);
 
       expect(runCheckNow).toHaveBeenCalledWith('synthetic-reload-checker');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('serializes and spaces Claude checks that share the Anthropic usage endpoint', async () => {
+    vi.useFakeTimers();
+
+    try {
+      const scheduler = QuotaScheduler.getInstance() as any;
+      const check = registerSpy(claudeChecker, 'check').mockResolvedValue([]);
+      scheduler.configs.set('claude-checker-1', {
+        ...makeConfig({ id: 'claude-checker-1', provider: 'anthropic-claude-1' }),
+        type: 'claude-code',
+      });
+      scheduler.configs.set('claude-checker-2', {
+        ...makeConfig({ id: 'claude-checker-2', provider: 'anthropic-claude-2' }),
+        type: 'claude-code',
+      });
+
+      const first = scheduler.runCheckNow('claude-checker-1');
+      const second = scheduler.runCheckNow('claude-checker-2');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(check).toHaveBeenCalledTimes(1);
+      const firstResult = await first;
+
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(check).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const secondResult = await second;
+      expect(check).toHaveBeenCalledTimes(2);
+      expect(Date.parse(secondResult!.checkedAt) - Date.parse(firstResult!.checkedAt)).toBe(15_000);
     } finally {
       vi.useRealTimers();
     }
@@ -333,6 +534,76 @@ describe('QuotaScheduler maxUtilizationPercent', () => {
     expect(isHealthy).toBe(false);
   });
 
+  describe('allow100PercentUtilization option', () => {
+    it('allows usage to reach 99% without triggering cooldown when allow100PercentUtilization is true', async () => {
+      const scheduler = QuotaScheduler.getInstance() as any;
+      const config = makeConfig({ provider: PROVIDER, allow100PercentUtilization: true });
+      scheduler.configs.set('threshold-checker', config);
+
+      await scheduler.applyCooldownsFromResult(
+        makeMeterResult(99, 'threshold-checker', PROVIDER),
+        config
+      );
+
+      const isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+      expect(isHealthy).toBe(true); // 99% < 100% threshold — stays healthy
+    });
+
+    it('triggers cooldown at 100% when allow100PercentUtilization is true', async () => {
+      const scheduler = QuotaScheduler.getInstance() as any;
+      const config = makeConfig({ provider: PROVIDER, allow100PercentUtilization: true });
+      scheduler.configs.set('threshold-checker', config);
+
+      await scheduler.applyCooldownsFromResult(
+        makeMeterResult(100, 'threshold-checker', PROVIDER),
+        config
+      );
+
+      const isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+      expect(isHealthy).toBe(false); // 100% >= 100% — should cooldown
+    });
+
+    it('clears cooldown when utilization drops below 100%', async () => {
+      const scheduler = QuotaScheduler.getInstance() as any;
+      const config = makeConfig({ provider: PROVIDER, allow100PercentUtilization: true });
+      scheduler.configs.set('threshold-checker', config);
+
+      // Trigger at 100%
+      await scheduler.applyCooldownsFromResult(
+        makeMeterResult(100, 'threshold-checker', PROVIDER),
+        config
+      );
+      let isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+      expect(isHealthy).toBe(false);
+
+      // Drops to 99% — should clear cooldown
+      await scheduler.applyCooldownsFromResult(
+        makeMeterResult(99, 'threshold-checker', PROVIDER),
+        config
+      );
+      isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+      expect(isHealthy).toBe(true);
+    });
+
+    it('prefers explicit maxUtilizationPercent over allow100PercentUtilization', async () => {
+      const scheduler = QuotaScheduler.getInstance() as any;
+      const config = makeConfig({
+        provider: PROVIDER,
+        allow100PercentUtilization: true,
+        maxUtilizationPercent: 30,
+      });
+      scheduler.configs.set('threshold-checker', config);
+
+      await scheduler.applyCooldownsFromResult(
+        makeMeterResult(30, 'threshold-checker', PROVIDER),
+        config
+      );
+
+      const isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+      expect(isHealthy).toBe(false); // Explicit 30% takes precedence
+    });
+  });
+
   describe('Routing.run cooldown regression', () => {
     const makeRoutingRunConfig = () =>
       makeConfig({ id: ROUTING_RUN_CHECKER_ID, provider: ROUTING_RUN_PROVIDER });
@@ -440,6 +711,94 @@ describe('QuotaScheduler maxUtilizationPercent', () => {
       lenientConfig
     );
     isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+    expect(isHealthy).toBe(false);
+  });
+
+  it('triggers provider indefinite cooldown when a balance meter without resetsAt is exhausted', async () => {
+    const scheduler = QuotaScheduler.getInstance() as any;
+    const config = makeConfig({ provider: PROVIDER, intervalMinutes: 10 });
+    scheduler.configs.set('balance-checker', config);
+
+    const balanceResult: MeterCheckResult = {
+      checkerId: 'balance-checker',
+      checkerType: 'kilo',
+      provider: PROVIDER,
+      checkedAt: new Date().toISOString(),
+      success: true,
+      meters: [
+        {
+          key: 'balance',
+          label: 'Account balance',
+          kind: 'balance',
+          unit: 'usd',
+          remaining: -0.168363,
+          utilizationPercent: 100,
+          status: 'exhausted',
+        },
+      ],
+    };
+
+    await scheduler.applyCooldownsFromResult(balanceResult, config);
+
+    const isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
+    expect(isHealthy).toBe(false);
+
+    // Verify cooldown is indefinite (remaining time is > 30 days)
+    const cooldowns = CooldownManager.getInstance().getCooldowns();
+    const kiloCooldown = cooldowns.find((c) => c.provider === PROVIDER);
+    expect(kiloCooldown).toBeDefined();
+    expect(kiloCooldown!.timeRemainingMs).toBeGreaterThan(30 * 24 * 60 * 60 * 1000);
+
+    // When balance recovers to positive, applying a healthy result clears cooldown
+    const recoveredResult: MeterCheckResult = {
+      ...balanceResult,
+      meters: [
+        {
+          key: 'balance',
+          label: 'Account balance',
+          kind: 'balance',
+          unit: 'usd',
+          remaining: 10.0,
+          utilizationPercent: 'not_applicable',
+          status: 'ok',
+        },
+      ],
+    };
+
+    await scheduler.applyCooldownsFromResult(recoveredResult, config);
+    const isHealthyAfterRecovery = await CooldownManager.getInstance().isProviderHealthy(
+      PROVIDER,
+      ''
+    );
+    expect(isHealthyAfterRecovery).toBe(true);
+  });
+
+  it('triggers provider cooldown when allowance meter without resetsAt is exhausted', async () => {
+    const scheduler = QuotaScheduler.getInstance() as any;
+    const config = makeConfig({ provider: PROVIDER, intervalMinutes: 5 });
+    scheduler.configs.set('allowance-checker', config);
+
+    const result: MeterCheckResult = {
+      checkerId: 'allowance-checker',
+      checkerType: 'synthetic',
+      provider: PROVIDER,
+      checkedAt: new Date().toISOString(),
+      success: true,
+      meters: [
+        {
+          key: 'quota',
+          label: 'Usage quota',
+          kind: 'allowance',
+          unit: 'requests',
+          utilizationPercent: 100,
+          status: 'exhausted',
+        },
+      ],
+    };
+
+    await scheduler.applyCooldownsFromResult(result, config);
+
+    const isHealthy = await CooldownManager.getInstance().isProviderHealthy(PROVIDER, '');
     expect(isHealthy).toBe(false);
   });
 });

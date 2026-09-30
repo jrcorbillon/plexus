@@ -15,6 +15,7 @@ export const selectorStrategyEnum = pgEnum('selector_strategy', [
   'cost',
   'latency',
   'usage',
+  'quota',
   'performance',
 ]);
 
@@ -38,8 +39,9 @@ export const modelAliases = pgTable('model_aliases', {
   metadataSource: metadataSourceEnum('metadata_source'),
   metadataSourcePath: text('metadata_source_path'),
   useImageFallthrough: boolean('use_image_fallthrough').notNull().default(false),
-  // Model architecture override for inference energy calculation
-  modelArchitecture: jsonb('model_architecture'), // override for total_params, active_params, layers, heads, kv_lora_rank, qk_rope_head_dim, context_length, dtype
+  // Deprecated / Unused: Legacy model architecture parameters for removed synthetic energy estimation.
+  // Retained in schema for database backwards compatibility without requiring migrations.
+  modelArchitecture: jsonb('model_architecture'), // Deprecated / Unused: override for total_params, active_params, layers, heads, kv_lora_rank, qk_rope_head_dim, context_length, dtype
   enforceLimits: boolean('enforce_limits').notNull().default(false),
   stickySession: boolean('sticky_session').notNull().default(false),
   maxAttempts: integer('max_attempts').notNull().default(1),
@@ -49,6 +51,7 @@ export const modelAliases = pgTable('model_aliases', {
   targetGroups: jsonb('target_groups'), // {name, selector}[]
   extraBody: jsonb('extra_body'), // Record<string, any>
   generation: jsonb('generation'), // { reasoning?, maxTokens?, verbosity?, serviceTier? }
+  syntheticSafeguardApproval: boolean('synthetic_safeguard_approval').notNull().default(false),
   compaction: jsonb('compaction'), // compaction config
   createdAt: bigint('created_at', { mode: 'number' }).notNull(),
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),

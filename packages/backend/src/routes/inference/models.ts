@@ -1,6 +1,9 @@
 import { FastifyInstance } from 'fastify';
 import crypto from 'crypto';
+import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
+import type { Api, Model as PiAiModel } from '@earendil-works/pi-ai';
 import { getConfig } from '../../config';
+import type { ModelConfig, ProviderConfig } from '../../config';
 import { PricingManager } from '../../services/observability/pricing-manager';
 import {
   ModelMetadataManager,
@@ -9,6 +12,8 @@ import {
   resolvePreferredApi,
 } from '../../services/models/model-metadata-manager';
 import { getCatalogModel } from '../../services/pi-ai/catalog';
+import { resolveInlineQuirks } from '../../services/dispatch/dispatcher-auto-compat';
+import { renderModelsUiPage } from './models-ui';
 
 let v1ModelsLastHash: string | null = null;
 let v1ModelsLastModified: string | null = null;
@@ -16,6 +21,45 @@ let openrouterModelsLastHash: string | null = null;
 let openrouterModelsLastModified: string | null = null;
 
 const MODEL_CREATED_AT = Math.floor(Date.now() / 1000);
+
+const MUSE_CODE_STATIC_METADATA = {
+  family: 'avocado',
+  release_date: '2026-09-02',
+  is_hidden: false,
+  options: {
+    reasoningEffort: 'high',
+    forceReasoning: true,
+    include: ['reasoning.encrypted_content'],
+    temperature: 0.9,
+    top_p: 0.9,
+  },
+  variants: {
+    minimal: { reasoningEffort: 'minimal' },
+    low: { reasoningEffort: 'low' },
+    medium: { reasoningEffort: 'medium' },
+    high: { reasoningEffort: 'high' },
+    xhigh: { reasoningEffort: 'xhigh' },
+    max: { reasoningEffort: 'max' },
+  },
+};
+
+function inlineTraitsForAlias(
+  modelConfig: ModelConfig,
+  providers: Record<string, ProviderConfig>,
+  preferredApi: string[] | undefined
+) {
+  const targets = (modelConfig.target_groups ?? [])
+    .flatMap((group) => group.targets)
+    .filter((target) => target.enabled !== false && target.provider && target.model);
+  const unique = new Map(targets.map((target) => [`${target.provider}\0${target.model}`, target]));
+  if (unique.size !== 1) return undefined;
+  const target = [...unique.values()][0]!;
+  const quirks = providers[target.provider!]?.pi_ai_quirks;
+  if (!quirks) return undefined;
+  if (preferredApi?.length !== 1) return undefined;
+  const apiType = preferredApi[0] === 'chat_completions' ? 'chat' : preferredApi[0]!;
+  return resolveInlineQuirks(quirks, apiType, target.model!);
+}
 
 export async function registerModelsRoute(fastify: FastifyInstance) {
   /**
@@ -32,6 +76,12 @@ export async function registerModelsRoute(fastify: FastifyInstance) {
   fastify.get('/v1/models', async (request, reply) => {
     const config = getConfig();
     const metadataManager = ModelMetadataManager.getInstance();
+    // Presence of the `ui` query key (e.g. /v1/models?ui) selects the
+    // standalone HTML viewer instead of the normal JSON payload.
+    const wantsUi =
+      request.query !== null &&
+      typeof request.query === 'object' &&
+      'ui' in (request.query as Record<string, unknown>);
 
     const created = MODEL_CREATED_AT;
     const hasVisionFallthrough = !!config.vision_fallthrough;
@@ -44,10 +94,24 @@ export async function registerModelsRoute(fastify: FastifyInstance) {
       );
       let piModelConfig = modelConfig?.pi_model;
       const preferredApi = resolvePreferredApi(aliasId, modelConfig, config.providers);
+      const inlineSource =
+        !modelConfig?.pi_model &&
+        (modelConfig.target_groups ?? []).some((group) =>
+          group.targets.some(
+            (target) =>
+              target.enabled !== false &&
+              target.provider &&
+              config.providers[target.provider]?.pi_ai_quirks
+          )
+        );
+      const inlineTraits = inlineSource
+        ? inlineTraitsForAlias(modelConfig, config.providers, preferredApi)
+        : undefined;
 
       // Look up pi compat options if a pi model reference is configured.
       let piOptions: Record<string, unknown> | undefined;
-      if (!piModelConfig && automaticIdentity.provider) {
+      let piModel: PiAiModel<Api> | null = null;
+      if (!inlineSource && !piModelConfig && automaticIdentity.provider) {
         const inferred = getCatalogModel(automaticIdentity.provider, automaticIdentity.model);
         if (inferred) {
           piModelConfig = {
@@ -57,21 +121,43 @@ export async function registerModelsRoute(fastify: FastifyInstance) {
         }
       }
       if (piModelConfig) {
-        const piModel = getCatalogModel(piModelConfig.provider, piModelConfig.model_id);
+        piModel = getCatalogModel(piModelConfig.provider, piModelConfig.model_id);
         if (piModel?.compat && Object.keys(piModel.compat).length > 0) {
           piOptions = piModel.compat as Record<string, unknown>;
         }
       }
+
+      // Canonical reasoning effort levels from the pi-ai model record
+      // (thinkingLevelMap). Exposed so clients can offer a real effort picker
+      // (e.g. OpenCode) instead of relying on fallback behavior. Values use
+      // pi's canonical vocabulary ('off' | 'minimal' | 'low' | 'medium' |
+      // 'high' | 'xhigh' | 'max'); clients map them to provider-native values.
+      const inlineLevels =
+        inlineTraits?.reasoning === true && inlineTraits.thinkingLevelMap
+          ? Object.entries(inlineTraits.thinkingLevelMap)
+              .filter(([, value]) => value !== null)
+              .map(([level]) => level)
+          : [];
+      const reasoningOptions = piModel?.reasoning
+        ? [{ type: 'effort' as const, values: [...getSupportedThinkingLevels(piModel)] }]
+        : inlineLevels.length > 0
+          ? [{ type: 'effort' as const, values: inlineLevels }]
+          : undefined;
 
       const base = {
         id: aliasId,
         object: 'model' as const,
         created,
         owned_by: 'plexus',
+        type: modelConfig.type ?? 'text',
         ...(preferredApi !== undefined && { preferred_api: preferredApi }),
         ...(piModelConfig && { pi_provider: piModelConfig.provider }),
         ...(piModelConfig && { pi_model: piModelConfig.model_id }),
         ...(piOptions !== undefined && { pi_options: piOptions }),
+        ...(inlineTraits?.compat &&
+          Object.keys(inlineTraits.compat).length > 0 &&
+          !piOptions && { pi_options: inlineTraits.compat }),
+        ...(reasoningOptions !== undefined && { reasoning_options: reasoningOptions }),
       };
 
       const enriched = resolveModelMetadata(
@@ -131,6 +217,14 @@ export async function registerModelsRoute(fastify: FastifyInstance) {
       data: models,
     };
     const payloadString = JSON.stringify(payload);
+
+    if (wantsUi) {
+      // The viewer is intentionally unauthenticated like /v1/models itself:
+      // a self-contained page reusing only Plexus theme tokens (no admin UI).
+      return reply
+        .type('text/html; charset=utf-8')
+        .send(renderModelsUiPage(payloadString, models.length));
+    }
 
     // Computing the hash on the fly of the fully serialized JSON is explicitly
     // accepted here as benchmarks show it is extremely fast (<0.01ms for 12KB)
@@ -317,5 +411,81 @@ export async function registerModelsRoute(fastify: FastifyInstance) {
     }
 
     return reply.type('application/json').send(payloadString);
+  });
+}
+
+/**
+ * GET /v1/muse-code/models
+ * Returns configured aliases in the catalog format expected by the Muse CLI.
+ * This route is registered in the authenticated inference scope.
+ */
+export async function registerMuseCodeModelsRoute(fastify: FastifyInstance) {
+  fastify.get('/v1/muse-code/models', async (_request, reply) => {
+    const config = getConfig();
+    const metadataManager = ModelMetadataManager.getInstance();
+
+    const data = Object.entries(config.models).flatMap(([id, modelConfig]) => {
+      const metadata = resolveModelMetadata(
+        id,
+        modelConfig,
+        config.providers,
+        metadataManager
+      )?.metadata;
+      const pricing = metadata?.pricing;
+      const contextLimit = metadata?.context_length ?? metadata?.top_provider?.context_length;
+      const outputLimit = metadata?.top_provider?.max_completion_tokens;
+      if (!metadata || !contextLimit || !outputLimit || !pricing?.prompt || !pricing.completion) {
+        return [];
+      }
+
+      const capabilities = new Set(metadata.supported_parameters);
+      const automaticIdentity = resolveAutomaticModelIdentity(id, modelConfig, config.providers);
+      const piModelConfig =
+        modelConfig.pi_model ??
+        (automaticIdentity.provider
+          ? {
+              provider: automaticIdentity.provider,
+              model_id: automaticIdentity.model,
+            }
+          : undefined);
+      const piModel = piModelConfig
+        ? getCatalogModel(piModelConfig.provider, piModelConfig.model_id)
+        : null;
+
+      return [
+        {
+          id,
+          object: 'model' as const,
+          created: MODEL_CREATED_AT,
+          owned_by: 'meta',
+          metadata: {
+            'muse-code': {
+              name: id,
+              ...MUSE_CODE_STATIC_METADATA,
+              attachment: metadata.architecture?.input_modalities?.includes('image') ?? false,
+              reasoning: piModel?.reasoning ?? capabilities.has('reasoning'),
+              temperature: capabilities.has('temperature'),
+              tool_call: capabilities.has('tools') || capabilities.has('tool_choice'),
+              modalities: {
+                input: metadata.architecture?.input_modalities ?? [],
+                output: metadata.architecture?.output_modalities ?? [],
+              },
+              limit: {
+                context: contextLimit,
+                output: outputLimit,
+              },
+              cost: {
+                currency: 'USD',
+                input: pricing.prompt,
+                output: pricing.completion,
+                cached: pricing.input_cache_read ?? pricing.prompt,
+              },
+            },
+          },
+        },
+      ];
+    });
+
+    return reply.type('application/json').send({ object: 'list', data });
   });
 }

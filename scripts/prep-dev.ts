@@ -22,7 +22,7 @@
  *   PLEXUS_DEV_DATA_PATH        Path for saved data (default: .dev-data/)
  *   PLEXUS_URL                  Base URL for local instance (default: http://localhost)
  *   PLEXUS_PORT                 Port for local instance (auto-derived from cwd)
- *   PLEXUS_ADMIN_KEY            Admin key for local instance (default: password)
+ *   PLEXUS_ADMIN_KEY            Admin key for local instance (default: $ADMIN_KEY, else password)
  *   PLEXUS_EXCLUDE_OAUTH        Exclude OAuth providers (default: true)
  */
 
@@ -32,7 +32,6 @@ import { tmpdir } from 'os';
 import { basename, join } from 'path';
 import { pipeline } from 'stream/promises';
 import readline from 'readline';
-import { gzipSync, gunzipSync } from 'node:zlib';
 import { deriveDevPort } from './dev-port-allocator';
 
 // ---------------------------------------------------------------------------
@@ -69,7 +68,7 @@ Environment variables:
   PLEXUS_DEV_DATA_PATH        Path for saved data (default: .dev-data/)
   PLEXUS_URL                  Base URL for local instance
   PLEXUS_PORT                 Port for local instance (auto-derived from cwd)
-  PLEXUS_ADMIN_KEY            Admin key for local (default: password)
+  PLEXUS_ADMIN_KEY            Admin key for local (default: $ADMIN_KEY, else password)
   PLEXUS_EXCLUDE_OAUTH        Exclude OAuth providers (default: true)
 `);
   process.exit(0);
@@ -94,9 +93,17 @@ const LOCAL_PORT =
   process.env.PLEXUS_PORT ??
   process.env.PASEO_SERVICE_DEV_PORT ??
   process.env.PASEO_PORT ??
-  deriveDevPort();
+  deriveDevPort(process.cwd(), 'dev');
 const LOCAL_URL = `${LOCAL_BASE_URL}:${LOCAL_PORT}`;
-const LOCAL_KEY = process.env.PLEXUS_ADMIN_KEY ?? 'password';
+// PLEXUS_ADMIN_KEY is the explicit override; ADMIN_KEY is what dev.ts/dev-agent.ts
+// actually set (and pass through) for the running local instance, so honor it
+// before falling back to the shared 'password' default.
+const LOCAL_KEY = process.env.PLEXUS_ADMIN_KEY ?? process.env.ADMIN_KEY ?? 'password';
+const LOCAL_KEY_SOURCE = process.env.PLEXUS_ADMIN_KEY
+  ? 'PLEXUS_ADMIN_KEY'
+  : process.env.ADMIN_KEY
+    ? 'ADMIN_KEY'
+    : 'default (password)';
 const EXCLUDE_OAUTH = (process.env.PLEXUS_EXCLUDE_OAUTH ?? 'true').toLowerCase() !== 'false';
 
 // ---------------------------------------------------------------------------
@@ -130,77 +137,6 @@ function requireEnv(name: string, value: string | undefined): string {
     process.exit(1);
   }
   return value;
-}
-
-// ─── Minimal tar helpers (mirror BackupService format) ──────────────
-
-function buildTar(files: Map<string, Buffer>): Buffer {
-  const chunks: Buffer[] = [];
-  for (const [name, content] of files) {
-    const header = Buffer.alloc(512, 0);
-    const nameBytes = Buffer.from(name, 'utf8');
-    nameBytes.copy(header, 0, 0, Math.min(nameBytes.length, 100));
-    header.write('0000644\0', 100, 8, 'ascii');
-    header.write('0001750\0', 108, 8, 'ascii');
-    header.write('0001750\0', 116, 8, 'ascii');
-    const sizeStr = content.length.toString(8).padStart(11, '0') + '\0';
-    header.write(sizeStr, 124, 12, 'ascii');
-    header.write(
-      Math.floor(Date.now() / 1000)
-        .toString(8)
-        .padStart(11, '0') + '\0',
-      136,
-      12,
-      'ascii'
-    );
-    header.write('        ', 148, 8, 'ascii');
-    header.write('0', 156, 1, 'ascii');
-    header.write('ustar\0', 257, 6, 'ascii');
-    header.write('00', 263, 2, 'ascii');
-    let checksum = 0;
-    for (let i = 0; i < 512; i++) checksum += header[i]!;
-    header.write(checksum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
-    chunks.push(header);
-    chunks.push(content);
-    const remainder = content.length % 512;
-    if (remainder > 0) chunks.push(Buffer.alloc(512 - remainder, 0));
-  }
-  chunks.push(Buffer.alloc(1024, 0));
-  return Buffer.concat(chunks);
-}
-
-function parseTar(data: Buffer): Map<string, Buffer> {
-  const files = new Map<string, Buffer>();
-  let offset = 0;
-  while (offset + 512 <= data.length) {
-    let allZero = true;
-    for (let i = 0; i < 512; i++) {
-      if (data[offset + i] !== 0) {
-        allZero = false;
-        break;
-      }
-    }
-    if (allZero) break;
-    const name = data
-      .subarray(offset, offset + 100)
-      .toString('utf8')
-      .replace(/\0+$/, '');
-    const sizeStr = data
-      .subarray(offset + 124, offset + 136)
-      .toString('ascii')
-      .replace(/\0+$/, '')
-      .trim();
-    const size = parseInt(sizeStr, 8) || 0;
-    offset += 512;
-    if (size >= 0) {
-      const content = size > 0 ? data.subarray(offset, offset + size) : Buffer.alloc(0);
-      files.set(name, Buffer.from(content));
-    }
-    offset += size;
-    const remainder = size % 512;
-    if (remainder > 0) offset += 512 - remainder;
-  }
-  return files;
 }
 
 function stripOAuthProviders(config: any): { config: any; removed: string[] } {
@@ -323,15 +259,19 @@ async function downloadFromStaging(): Promise<Buffer> {
 
   if (EXCLUDE_OAUTH) {
     console.log('Excluding OAuth providers from restore...');
-    const tarData = gunzipSync(restoreBody);
-    const files = parseTar(tarData);
-    const configBuf = files.get('config.json');
+    const archiveFiles = await new Bun.Archive(restoreBody).files();
+    const files: Record<string, Buffer> = {};
+    for (const [name, file] of archiveFiles) {
+      files[name] = Buffer.from(await file.arrayBuffer());
+    }
+    const configBuf = files['config.json'];
     if (configBuf) {
       const config = JSON.parse(configBuf.toString('utf8'));
       const { config: stripped, removed } = stripOAuthProviders(config);
       removedOAuthProviders = removed;
-      files.set('config.json', Buffer.from(JSON.stringify(stripped, null, 2), 'utf8'));
-      restoreBody = gzipSync(buildTar(files));
+      files['config.json'] = Buffer.from(JSON.stringify(stripped, null, 2), 'utf8');
+      const archive = new Bun.Archive(files, { compress: 'gzip' });
+      restoreBody = Buffer.from(await archive.bytes());
       if (removed.length > 0) {
         console.log(`  Excluded ${removed.length} OAuth provider(s): ${removed.join(', ')}`);
       } else {
@@ -451,7 +391,8 @@ async function main() {
   console.log(`  Target local:  ${LOCAL_URL}`);
   console.log(`  Data path:     ${DEV_DATA_PATH}`);
   console.log(`  Live mode:     ${shouldUseLive ? 'yes' : 'no'}`);
-  console.log(`  Save mode:     ${shouldSave ? 'yes' : 'no'}\n`);
+  console.log(`  Save mode:     ${shouldSave ? 'yes' : 'no'}`);
+  console.log(`  Admin key from: ${LOCAL_KEY_SOURCE}\n`);
 
   let backupData: Buffer | null = null;
 

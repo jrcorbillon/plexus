@@ -4,7 +4,7 @@ import { createAuthHook } from '../../utils/auth';
 import { Dispatcher } from '../../services/dispatch/dispatcher';
 import { UsageStorageService } from '../../services/observability/usage-storage';
 import { QuotaEnforcer } from '../../services/quota/quota-enforcer';
-import { registerModelsRoute } from './models';
+import { registerModelsRoute, registerMuseCodeModelsRoute } from './models';
 import { registerChatRoute } from './chat';
 import { registerMessagesRoute } from './messages';
 import { registerGeminiRoute } from './gemini';
@@ -14,6 +14,7 @@ import { registerSpeechRoute } from './speech';
 import { registerImagesRoute } from './images';
 import { registerResponsesRoute } from './responses';
 import { registerCompletionsRoute } from './completions';
+import { registerDecisionsRoute } from './decisions';
 
 export async function registerInferenceRoutes(
   fastify: FastifyInstance,
@@ -32,11 +33,13 @@ export async function registerInferenceRoutes(
 
     await protectedRoutes.register(bearerAuth, auth.bearerAuthOptions);
 
+    await registerMuseCodeModelsRoute(protectedRoutes);
     await registerChatRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerMessagesRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerGeminiRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerResponsesRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerCompletionsRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
+    await registerDecisionsRoute(protectedRoutes, dispatcher, usageStorage, quotaEnforcer);
     await registerEmbeddingsRoute(protectedRoutes, dispatcher, usageStorage);
     await registerTranscriptionsRoute(protectedRoutes, dispatcher, usageStorage);
     await registerSpeechRoute(protectedRoutes, dispatcher, usageStorage);

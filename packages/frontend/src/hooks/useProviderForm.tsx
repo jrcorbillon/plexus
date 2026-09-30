@@ -1,10 +1,23 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { findUnresolvedPresetVars, isOAuthPlaceholderUrl } from '@plexus/shared';
 import { useNavigate } from 'react-router-dom';
-import { api, Provider, OAuthSession, fetchQuotaCheckers } from '../lib/api';
+import { api, Provider, OAuthSession, OAuthProviderInfo, fetchQuotaCheckers } from '../lib/api';
+import {
+  collectProviderEndpointUrls,
+  isOAuthProviderDraft,
+  PI_AI_AUTO_VALUE,
+} from '../lib/piAiProvider';
 import type { QuotaCheckerInfo } from '../types/quota';
+import type { OAuthCredentialStatus } from '../types/settings';
+import {
+  isDecisionsTargetAccess,
+  migrateLegacyDecisionsAccess,
+  migrateLegacyDecisionsBaseUrls,
+} from '../lib/apiFormats';
 import { formatMeterValue } from '../components/quota/MeterValue';
 import { Badge } from '../components/ui/Badge';
 import { useToast } from '../contexts/ToastContext';
+import { useCurrency } from '../lib/CurrencyContext';
 
 const KNOWN_APIS = [
   'chat',
@@ -14,18 +27,13 @@ const KNOWN_APIS = [
   'embeddings',
   'transcriptions',
   'speech',
-  'images',
+  'openai-images',
+  'openrouter-images',
+  'codex-images',
+  'systemone',
   'responses',
   'ollama',
 ];
-
-export const OAUTH_PROVIDERS = [
-  { value: 'anthropic', label: 'Anthropic (Claude Code Pro/Max)' },
-  { value: 'github-copilot', label: 'GitHub Copilot' },
-  { value: 'openai-codex', label: 'ChatGPT Plus/Pro (Codex Subscription)' },
-];
-// Gemini CLI / Antigravity OAuth were dropped; they are no
-// longer offered as new-provider options.
 
 const getOAuthCheckerType = (oauthProvider?: string): string | null => {
   if (!oauthProvider) return null;
@@ -34,6 +42,7 @@ const getOAuthCheckerType = (oauthProvider?: string): string | null => {
     anthropic: 'claude-code',
     'claude-code': 'claude-code',
     'github-copilot': 'copilot',
+    meta: 'muse-code',
   };
   return map[oauthProvider] ?? null;
 };
@@ -41,8 +50,8 @@ const getOAuthCheckerType = (oauthProvider?: string): string | null => {
 const inferProviderTypes = (apiBaseUrl?: string | Record<string, string>): string[] => {
   if (!apiBaseUrl) return ['chat'];
   if (typeof apiBaseUrl === 'string') {
-    const url = apiBaseUrl.toLowerCase();
-    if (url.startsWith('oauth://')) return ['oauth'];
+    const url = apiBaseUrl.trim().toLowerCase();
+    if (isOAuthPlaceholderUrl(apiBaseUrl)) return ['oauth'];
     if (url.includes('anthropic.com')) return ['messages'];
     if (url.includes('generativelanguage.googleapis.com')) return ['gemini'];
     return ['chat'];
@@ -59,12 +68,13 @@ export const EMPTY_PROVIDER: Provider = {
   type: [],
   apiKey: '',
   oauthProvider: '',
-  oauthAccount: '',
   enabled: true,
   disableCooldown: false,
   stallCooldown: false,
+  allow100PercentUtilization: false,
   estimateTokens: false,
   useClaudeMasking: false,
+  cacheKeyInjection: undefined,
   apiBaseUrl: {},
   headers: {},
   extraBody: {},
@@ -89,18 +99,36 @@ export interface FetchedModel {
   owned_by?: string;
   description?: string;
   pricing?: { prompt?: string; completion?: string };
+  /** Modality hint — image models are added with an image-only protocol. */
+  type?: 'text' | 'image';
+  /** Protocols this model can be reached through (e.g. `codex-images`). */
+  access_via?: string[];
+  /** `hide` models work but the upstream does not advertise them. */
+  visibility?: 'list' | 'hide';
 }
+
+/** Fallback protocol for Codex image models when the backend sends none. */
+const CODEX_IMAGE_ACCESS = 'codex-images';
+const CODEX_OAUTH_PROVIDER = 'openai-codex';
 
 export function useProviderForm() {
   const toast = useToast();
   const navigate = useNavigate();
+  const { currency, rate, symbol } = useCurrency();
 
   const [providers, setProviders] = useState<Provider[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<Provider>(EMPTY_PROVIDER);
   const [originalId, setOriginalId] = useState<string | null>(null);
+  const [presetSelected, setPresetSelected] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [quotaCheckerTypes, setQuotaCheckerTypes] = useState<string[]>([]);
+  // Populated from the backend, which surfaces every OAuth-capable provider
+  // pi-ai ships — new provider flows (e.g. xAI, Kimi Code, OpenRouter) show
+  // up here automatically with no frontend change.
+  const [oauthProviders, setOauthProviders] = useState<OAuthProviderInfo[]>([]);
+  const OAUTH_PROVIDERS = oauthProviders.map((p) => ({ value: p.id, label: p.name }));
+  const [customCheckerIds, setCustomCheckerIds] = useState<string[]>([]);
   const [quotas, setQuotas] = useState<QuotaCheckerInfo[]>([]);
   const [quotasLoading, setQuotasLoading] = useState(true);
 
@@ -112,6 +140,10 @@ export function useProviderForm() {
   const [oauthBusy, setOauthBusy] = useState(false);
   const [oauthCredentialReady, setOauthCredentialReady] = useState(false);
   const [oauthCredentialChecking, setOauthCredentialChecking] = useState(false);
+  // Credential age (connected / refreshed / expires) for the status line.
+  const [oauthCredentialStatus, setOauthCredentialStatus] = useState<OAuthCredentialStatus | null>(
+    null
+  );
 
   // Accordion state
   const [isModelsOpen, setIsModelsOpen] = useState(false);
@@ -129,6 +161,8 @@ export function useProviderForm() {
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // A catalog fallback is a warning, not an error: the list is still usable.
+  const [fetchWarning, setFetchWarning] = useState<string | null>(null);
 
   const [deleteModalProvider, setDeleteModalProvider] = useState<Provider | null>(null);
   const [deleteModalLoading, setDeleteModalLoading] = useState(false);
@@ -136,23 +170,71 @@ export function useProviderForm() {
     { aliasId: string; targetsCount: number }[]
   >([]);
 
-  const [testStates, setTestStates] = useState<
-    Record<
-      string,
-      {
-        loading: boolean;
-        result?: 'success' | 'error';
-        message?: string;
-        showResult: boolean;
-        showMessage?: boolean;
+  type TestState = {
+    loading: boolean;
+    result?: 'success' | 'error';
+    message?: string;
+    showResult: boolean;
+    showMessage?: boolean;
+  };
+  const [testStates, setTestStates] = useState<Record<string, TestState>>({});
+  const nextTestRequestId = useRef(0);
+  const activeTestRequests = useRef(new Map<number, string>());
+
+  const updateTestState = (testKey: string, update: (state: TestState) => TestState) => {
+    setTestStates((prev) => {
+      const current = prev[testKey];
+      if (!current) return prev;
+      return { ...prev, [testKey]: update(current) };
+    });
+  };
+
+  const updateTestStateForRequest = (
+    requestId: number,
+    update: (state: TestState) => TestState
+  ) => {
+    setTestStates((prev) => {
+      const testKey = activeTestRequests.current.get(requestId);
+      const current = testKey ? prev[testKey] : undefined;
+      if (!testKey || !current) return prev;
+      return { ...prev, [testKey]: update(current) };
+    });
+  };
+
+  const migrateTestStateKey = (oldTestKey: string, newTestKey: string) => {
+    for (const [requestId, testKey] of activeTestRequests.current) {
+      if (testKey === oldTestKey) {
+        activeTestRequests.current.set(requestId, newTestKey);
       }
-    >
-  >({});
+    }
+
+    setTestStates((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, oldTestKey)) return prev;
+      const next = { ...prev, [newTestKey]: prev[oldTestKey] };
+      delete next[oldTestKey];
+      return next;
+    });
+  };
+
+  const removeTestStateKey = (testKey: string) => {
+    for (const [requestId, activeKey] of activeTestRequests.current) {
+      if (activeKey === testKey) {
+        activeTestRequests.current.delete(requestId);
+      }
+    }
+
+    setTestStates((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, testKey)) return prev;
+      const next = { ...prev };
+      delete next[testKey];
+      return next;
+    });
+  };
 
   // Derived
   const isOAuthMode =
     typeof editingProvider.apiBaseUrl === 'string' &&
-    editingProvider.apiBaseUrl.toLowerCase().startsWith('oauth://');
+    isOAuthPlaceholderUrl(editingProvider.apiBaseUrl);
   const oauthCheckerType = isOAuthMode ? getOAuthCheckerType(editingProvider.oauthProvider) : null;
   const selectableQuotaCheckerTypes = oauthCheckerType
     ? [oauthCheckerType]
@@ -190,7 +272,15 @@ export function useProviderForm() {
   useEffect(() => {
     fetchQuotaCheckers().then((res) => {
       setQuotaCheckerTypes(res.knownTypes.map((t) => t.type));
+      setCustomCheckerIds(res.knownTypes.filter((t) => t.custom).map((t) => t.type));
     });
+  }, []);
+
+  useEffect(() => {
+    api
+      .getOAuthProviders()
+      .then(setOauthProviders)
+      .catch(() => setOauthProviders([]));
   }, []);
 
   useEffect(() => {
@@ -221,6 +311,7 @@ export function useProviderForm() {
     if (!isModalOpen) {
       resetOAuthState();
       setOauthCredentialReady(false);
+      setOauthCredentialStatus(null);
       setOauthCredentialChecking(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,44 +321,102 @@ export function useProviderForm() {
   useEffect(() => {
     if (!isModalOpen || !isOAuthMode) {
       setOauthCredentialReady(false);
+      setOauthCredentialStatus(null);
       setOauthCredentialChecking(false);
       return;
     }
-    const providerId = editingProvider.oauthProvider || OAUTH_PROVIDERS[0].value;
-    const accountId = editingProvider.oauthAccount?.trim();
+    const providerId = editingProvider.oauthProvider || (OAUTH_PROVIDERS[0]?.value ?? '');
+    // The OAuth account is the provider ID (1:1) — never typed separately.
+    const accountId = editingProvider.id.trim();
     if (!accountId) {
       setOauthCredentialReady(false);
+      setOauthCredentialStatus(null);
       setOauthCredentialChecking(false);
       return;
     }
     let cancelled = false;
-    setOauthCredentialChecking(true);
-    api
-      .getOAuthCredentialStatus(providerId, accountId)
-      .then((result) => {
-        if (!cancelled) setOauthCredentialReady(!!result.ready);
-      })
-      .catch(() => {
-        if (!cancelled) setOauthCredentialReady(false);
-      })
-      .finally(() => {
-        if (!cancelled) setOauthCredentialChecking(false);
-      });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const checkStatus = async (initial: boolean) => {
+      if (initial) setOauthCredentialChecking(true);
+      try {
+        const result = await api.getOAuthCredentialStatus(providerId, accountId);
+        if (cancelled) return;
+        setOauthCredentialReady(!!result.ready);
+        setOauthCredentialStatus(result.ready ? result : null);
+      } catch {
+        if (cancelled) return;
+        if (initial) {
+          setOauthCredentialReady(false);
+          setOauthCredentialStatus(null);
+        }
+      } finally {
+        if (!cancelled) {
+          if (initial) setOauthCredentialChecking(false);
+          timer = setTimeout(() => void checkStatus(false), 10_000);
+        }
+      }
+    };
+    void checkStatus(true);
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [
-    isModalOpen,
-    isOAuthMode,
-    editingProvider.oauthProvider,
-    editingProvider.oauthAccount,
-    oauthStatus,
-  ]);
+  }, [isModalOpen, isOAuthMode, editingProvider.oauthProvider, editingProvider.id, oauthStatus]);
 
   useEffect(() => {
     if (!isOAuthMode) return;
     resetOAuthState();
   }, [editingProvider.oauthProvider, isOAuthMode]);
+
+  // Auto-detect the pi-ai provider for new Custom drafts only. A preset
+  // explicitly chooses builtin, inline quirks, or neither; URL matching must
+  // not override that choice. Existing configs and manual selections are
+  // never changed.
+  const lastAutoSuggestion = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isModalOpen) {
+      lastAutoSuggestion.current = null;
+      return;
+    }
+    if (originalId !== null) return;
+    if (presetSelected) return;
+    const urls = collectProviderEndpointUrls(editingProvider.apiBaseUrl);
+    const oauthProvider = isOAuthProviderDraft(editingProvider.apiBaseUrl)
+      ? editingProvider.oauthProvider?.trim() || undefined
+      : undefined;
+    if (urls.length === 0 && !oauthProvider) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      let suggestion: string | null = null;
+      try {
+        suggestion = await api.resolvePiAiProvider({ urls, oauthProvider });
+      } catch {
+        return; // non-fatal — the user can still pick manually
+      }
+      if (cancelled || !suggestion) return;
+      const previous = lastAutoSuggestion.current;
+      lastAutoSuggestion.current = suggestion;
+      setEditingProvider((prev) => {
+        if (prev.pi_ai_quirks) return prev;
+        const current = prev.pi_ai_provider;
+        const untouched = !current || current === PI_AI_AUTO_VALUE || current === previous;
+        if (!untouched) return prev;
+        if (current === suggestion && prev.auto_compat === true) return prev;
+        return { ...prev, pi_ai_provider: suggestion, auto_compat: true };
+      });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    isModalOpen,
+    originalId,
+    presetSelected,
+    editingProvider.apiBaseUrl,
+    editingProvider.oauthProvider,
+  ]);
 
   // OAuth session polling
   useEffect(() => {
@@ -301,12 +450,34 @@ export function useProviderForm() {
 
   // Handlers
   const handleEdit = (provider: Provider) => {
+    setPresetSelected(false);
     setOriginalId(provider.id);
-    setEditingProvider(JSON.parse(JSON.stringify(provider)));
+    const cloned: Provider = JSON.parse(JSON.stringify(provider));
+    // Collapse legacy Decisions config onto `systemone` when the form loads
+    // so saving persists the migration (the backend normalizes at runtime
+    // regardless). Both halves migrate together: models without a matching
+    // base URL (or vice versa) would leave the row internally inconsistent.
+    const migratedBaseUrls = migrateLegacyDecisionsBaseUrls(cloned.apiBaseUrl);
+    if (migratedBaseUrls !== cloned.apiBaseUrl) cloned.apiBaseUrl = migratedBaseUrls;
+    if (cloned.models && !Array.isArray(cloned.models)) {
+      for (const [modelId, modelConfig] of Object.entries(cloned.models)) {
+        const access = (modelConfig as { access_via?: unknown })?.access_via;
+        if (!Array.isArray(access)) continue;
+        const migrated = migrateLegacyDecisionsAccess(access);
+        if (migrated && JSON.stringify(migrated) !== JSON.stringify(access)) {
+          (cloned.models as Record<string, unknown>)[modelId] = {
+            ...(modelConfig as Record<string, unknown>),
+            access_via: migrated,
+          };
+        }
+      }
+    }
+    setEditingProvider(cloned);
     setIsModalOpen(true);
   };
 
   const handleAddNew = () => {
+    setPresetSelected(false);
     setOriginalId(null);
     setEditingProvider(JSON.parse(JSON.stringify(EMPTY_PROVIDER)));
     setIsModalOpen(true);
@@ -337,15 +508,27 @@ export function useProviderForm() {
       toast.error('Provider ID is required');
       return;
     }
+    // Template placeholders (e.g. a preset's {account_id}) are never valid
+    // upstream hosts — the backend accepts map values verbatim, so block
+    // the save here instead of persisting a broken provider.
+    const unresolvedTemplateVars =
+      typeof editingProvider.apiBaseUrl === 'object' && editingProvider.apiBaseUrl !== null
+        ? findUnresolvedPresetVars(editingProvider.apiBaseUrl as Record<string, string>)
+        : [];
+    if (unresolvedTemplateVars.length > 0) {
+      toast.error(`Fill in template values (${unresolvedTemplateVars.join(', ')}) before saving`);
+      return;
+    }
     setIsSaving(true);
     try {
       let providerToSave = editingProvider;
-      if (isOAuthMode && !providerToSave.oauthProvider) {
-        providerToSave = { ...providerToSave, oauthProvider: OAUTH_PROVIDERS[0].value };
+      // `- auto -` resolves to a concrete id on select and should never be
+      // saved; drop it defensively if it ever lingers in the draft.
+      if (providerToSave.pi_ai_provider === PI_AI_AUTO_VALUE) {
+        providerToSave = { ...providerToSave, pi_ai_provider: undefined };
       }
-      if (isOAuthMode && !providerToSave.oauthAccount?.trim()) {
-        toast.error('OAuth account is required');
-        return;
+      if (isOAuthMode && !providerToSave.oauthProvider) {
+        providerToSave = { ...providerToSave, oauthProvider: OAUTH_PROVIDERS[0]?.value ?? '' };
       }
       if (providerToSave.rawPassthrough?.enabled) {
         if (isOAuthMode) {
@@ -377,7 +560,7 @@ export function useProviderForm() {
   const handleToggleEnabled = async (provider: Provider, newState: boolean) => {
     setProviders(providers.map((p) => (p.id === provider.id ? { ...p, enabled: newState } : p)));
     try {
-      await api.saveProvider({ ...provider, enabled: newState }, provider.id);
+      await api.updateProviderEnabled(provider.id, newState);
     } catch (e) {
       console.error('Toggle error', e);
       toast.error('Failed to update provider status: ' + e);
@@ -387,12 +570,24 @@ export function useProviderForm() {
 
   const handleTestModel = async (providerId: string, modelId: string, modelType?: string) => {
     const testKey = `${providerId}-${modelId}`;
+    const requestId = ++nextTestRequestId.current;
+    activeTestRequests.current.set(requestId, testKey);
     setTestStates((prev) => ({
       ...prev,
       [testKey]: { loading: true, showResult: true, showMessage: false },
     }));
+    const provider =
+      editingProvider.id === providerId
+        ? editingProvider
+        : providers.find((candidate) => candidate.id === providerId);
+    const accessVia: string[] | undefined = Array.isArray(provider?.models)
+      ? undefined
+      : provider?.models?.[modelId]?.access_via;
+    const availableTypes = accessVia?.length ? accessVia : inferProviderTypes(provider?.apiBaseUrl);
+    const usesDecisions = availableTypes.some((type) => isDecisionsTargetAccess(type));
     let testApiTypes: string[] = ['chat'];
-    if (modelType === 'embeddings') testApiTypes = ['embeddings'];
+    if (usesDecisions) testApiTypes = ['decisions'];
+    else if (modelType === 'embeddings') testApiTypes = ['embeddings'];
     else if (modelType === 'image') testApiTypes = ['images'];
     else if (modelType === 'responses') testApiTypes = ['responses'];
     else if (modelType === 'transcriptions') testApiTypes = ['transcriptions'];
@@ -405,60 +600,49 @@ export function useProviderForm() {
       const firstError = results.find((r) => !r.success);
       const totalDuration = results.reduce((sum, r) => sum + (r.durationMs || 0), 0);
       const avgDuration = Math.round(totalDuration / results.length);
-      setTestStates((prev) => ({
-        ...prev,
-        [testKey]: {
-          loading: false,
-          result: allSuccess ? 'success' : 'error',
-          message: allSuccess
-            ? `Success (${avgDuration}ms avg, ${testApiTypes.length} API${testApiTypes.length > 1 ? 's' : ''})`
-            : `Failed via ${firstError?.apiType || 'unknown'}: ${firstError?.error || 'Test failed'}`,
-          showResult: true,
-          showMessage: true,
-        },
+      updateTestStateForRequest(requestId, (state) => ({
+        ...state,
+        loading: false,
+        result: allSuccess ? 'success' : 'error',
+        message: allSuccess
+          ? usesDecisions
+            ? `Success (${avgDuration}ms): ${results[0]?.response || ''}`
+            : `Success (${avgDuration}ms avg, ${testApiTypes.length} API${testApiTypes.length > 1 ? 's' : ''})`
+          : `Failed via ${firstError?.apiType || 'unknown'}: ${firstError?.error || 'Test failed'}`,
+        showResult: true,
+        showMessage: true,
       }));
       setTimeout(
         () => {
-          setTestStates((prev) => ({
-            ...prev,
-            [testKey]: { ...prev[testKey], showResult: false },
-          }));
+          updateTestStateForRequest(requestId, (state) => ({ ...state, showResult: false }));
+          if (!allSuccess) activeTestRequests.current.delete(requestId);
         },
         allSuccess ? 3000 : 1500
       );
       if (allSuccess) {
         setTimeout(() => {
-          setTestStates((prev) => ({
-            ...prev,
-            [testKey]: { ...prev[testKey], showMessage: false },
-          }));
+          updateTestStateForRequest(requestId, (state) => ({ ...state, showMessage: false }));
+          activeTestRequests.current.delete(requestId);
         }, 3000);
       }
     } catch (e) {
-      setTestStates((prev) => ({
-        ...prev,
-        [testKey]: {
-          loading: false,
-          result: 'error',
-          message: String(e),
-          showResult: true,
-          showMessage: true,
-        },
+      updateTestStateForRequest(requestId, (state) => ({
+        ...state,
+        loading: false,
+        result: 'error',
+        message: String(e),
+        showResult: true,
+        showMessage: true,
       }));
       setTimeout(() => {
-        setTestStates((prev) => ({
-          ...prev,
-          [testKey]: { ...prev[testKey], showResult: false },
-        }));
+        updateTestStateForRequest(requestId, (state) => ({ ...state, showResult: false }));
+        activeTestRequests.current.delete(requestId);
       }, 1500);
     }
   };
 
   const dismissTestMessage = (testKey: string) => {
-    setTestStates((prev) => ({
-      ...prev,
-      [testKey]: { ...prev[testKey], showMessage: false },
-    }));
+    updateTestState(testKey, (state) => ({ ...state, showMessage: false }));
   };
 
   // OAuth handlers
@@ -472,10 +656,10 @@ export function useProviderForm() {
   };
 
   const handleStartOAuth = async () => {
-    const providerId = editingProvider.oauthProvider || OAUTH_PROVIDERS[0].value;
-    const accountId = editingProvider.oauthAccount?.trim();
+    const providerId = editingProvider.oauthProvider || (OAUTH_PROVIDERS[0]?.value ?? '');
+    const accountId = editingProvider.id.trim();
     if (!accountId) {
-      setOauthError('OAuth account is required before starting login');
+      setOauthError('Provider ID is required before starting login');
       return;
     }
     setOauthBusy(true);
@@ -538,6 +722,27 @@ export function useProviderForm() {
     }
   };
 
+  const handleDeleteOAuthCredential = async () => {
+    const providerId = editingProvider.oauthProvider || (OAUTH_PROVIDERS[0]?.value ?? '');
+    const accountId = editingProvider.id.trim();
+    if (!accountId) {
+      setOauthError('Provider ID is required');
+      return;
+    }
+    setOauthBusy(true);
+    setOauthError(null);
+    try {
+      await api.deleteOAuthCredentials(providerId, accountId);
+      setOauthCredentialReady(false);
+      setOauthCredentialStatus(null);
+      resetOAuthState();
+    } catch (error) {
+      setOauthError(error instanceof Error ? error.message : 'Failed to delete OAuth credentials');
+    } finally {
+      setOauthBusy(false);
+    }
+  };
+
   // API URL helpers
   const getApiBaseUrlMap = (): Record<string, string> => {
     if (
@@ -562,7 +767,7 @@ export function useProviderForm() {
       if (types.includes(apiType) && types.length === 1) return editingProvider.apiBaseUrl;
       return '';
     }
-    return (editingProvider.apiBaseUrl as any)?.[apiType] || '';
+    return getApiBaseUrlMap()[apiType] || '';
   };
 
   const addApiBaseUrlEntry = () => {
@@ -669,6 +874,15 @@ export function useProviderForm() {
     delete models[oldId];
     setEditingProvider({ ...editingProvider, models });
     if (openModelIdx === oldId) setOpenModelIdx(newId);
+    const oldTestKey = `${editingProvider.id}-${oldId}`;
+    const newTestKey = `${editingProvider.id}-${newId}`;
+    setIsModelExtraBodyOpen((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, oldId)) return prev;
+      const next = { ...prev, [newId]: prev[oldId] };
+      delete next[oldId];
+      return next;
+    });
+    migrateTestStateKey(oldTestKey, newTestKey);
   };
 
   const updateModelConfig = (modelId: string, updates: any) => {
@@ -681,6 +895,15 @@ export function useProviderForm() {
     const models = { ...(editingProvider.models as Record<string, any>) };
     delete models[modelId];
     setEditingProvider({ ...editingProvider, models });
+    if (openModelIdx === modelId) setOpenModelIdx(null);
+    const testKey = `${editingProvider.id}-${modelId}`;
+    setIsModelExtraBodyOpen((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, modelId)) return prev;
+      const next = { ...prev };
+      delete next[modelId];
+      return next;
+    });
+    removeTestStateKey(testKey);
   };
 
   // Fetch models helpers
@@ -689,8 +912,14 @@ export function useProviderForm() {
     const ollamaUrl = getApiUrlValue('ollama');
     if (ollamaUrl) return 'https://ollama.com/api/tags';
     const chatUrl = getApiUrlValue('chat');
-    if (!chatUrl) return '';
-    return `${chatUrl.replace(/\/chat\/completions\/?$/, '')}/models`;
+    if (chatUrl) {
+      return `${chatUrl.replace(/\/(?:chat\/completions|messages)\/?$/, '')}/models`;
+    }
+    const messagesUrl = getApiUrlValue('messages');
+    if (messagesUrl) {
+      return `${messagesUrl.replace(/\/(?:chat\/completions|messages)\/?$/, '')}/models`;
+    }
+    return '';
   };
 
   const handleOpenFetchModels = () => {
@@ -699,17 +928,22 @@ export function useProviderForm() {
     setFetchedModels([]);
     setSelectedModelIds(new Set());
     setFetchError(null);
+    setFetchWarning(null);
     setIsFetchModelsModalOpen(true);
   };
 
   const handleFetchModels = async () => {
     if (isOAuthMode) {
-      const oauthProvider = editingProvider.oauthProvider || OAUTH_PROVIDERS[0].value;
+      const oauthProvider = editingProvider.oauthProvider || (OAUTH_PROVIDERS[0]?.value ?? '');
+      // OAuth model lists are account-scoped; the account is the provider ID.
+      const accountId = editingProvider.id.trim() || undefined;
       setIsFetchingModels(true);
       setFetchError(null);
+      setFetchWarning(null);
       try {
-        const models = await api.getOAuthProviderModels(oauthProvider);
+        const { models, warning } = await api.getOAuthProviderModels(oauthProvider, accountId);
         const sortedModels = [...models].sort((a, b) => a.id.localeCompare(b.id));
+        setFetchWarning(warning ?? null);
         if (sortedModels.length === 0) {
           setFetchError(`No models found for OAuth provider '${oauthProvider}'.`);
           setFetchedModels([]);
@@ -732,6 +966,7 @@ export function useProviderForm() {
     }
     setIsFetchingModels(true);
     setFetchError(null);
+    setFetchWarning(null);
     try {
       const data = await api.fetchProviderModels(modelsUrl, editingProvider.apiKey);
       if (!data.data || !Array.isArray(data.data)) throw new Error('Invalid response format');
@@ -770,9 +1005,25 @@ export function useProviderForm() {
         ? editingProvider.models
         : {}),
     };
+    // Codex is the only provider whose discovery reports image models, and
+    // `codex-images` is the only image protocol its dispatcher accepts. Anywhere
+    // else an upstream `type: "image"` carries no protocol we could name, so
+    // those entries keep the plain shape and the admin picks a type by hand.
+    const isCodexOAuthProvider =
+      isOAuthMode && editingProvider.oauthProvider === CODEX_OAUTH_PROVIDER;
     fetchedModels.forEach((model) => {
       if (selectedModelIds.has(model.id) && !models[model.id]) {
-        models[model.id] = { pricing: { source: 'simple', input: 0, output: 0 }, access_via: [] };
+        const pricing = { source: 'simple', input: 0, output: 0 };
+        // Image models cannot serve chat, so they are added as `image` with an
+        // image protocol rather than as a chat target.
+        models[model.id] =
+          isCodexOAuthProvider && model.type === 'image'
+            ? {
+                pricing,
+                type: 'image',
+                access_via: model.access_via?.length ? model.access_via : [CODEX_IMAGE_ACCESS],
+              }
+            : { pricing, access_via: [] };
       }
     });
     setEditingProvider({ ...editingProvider, models });
@@ -812,12 +1063,28 @@ export function useProviderForm() {
   const getQuotaDisplay = (provider: Provider): React.ReactNode => {
     if (!provider.quotaChecker?.enabled) return null;
     if (quotasLoading) return <span className="text-text-secondary text-xs">—</span>;
-    const quota = quotas.find((q) => q.checkerId === provider.id);
-    if (!quota?.meters?.length) return null;
     const handleQuotaClick = (e: React.MouseEvent) => {
       e.stopPropagation();
       navigate('/quotas');
     };
+    const quota = quotas.find((q) => q.checkerId === provider.id);
+    if (!quota) return null;
+    // GET /v0/management/quotas reports success:false with no error before
+    // the first snapshot exists — only badge an actual check failure.
+    if (!quota.success && quota.error) {
+      return (
+        <Badge
+          status="error"
+          noDot
+          className="cursor-pointer text-[10px] py-0.5 px-2"
+          onClick={handleQuotaClick}
+          title={quota.error}
+        >
+          Quota error
+        </Badge>
+      );
+    }
+    if (!quota.meters?.length) return null;
 
     const badges: React.ReactNode[] = [];
 
@@ -833,7 +1100,11 @@ export function useProviderForm() {
           className="[&_.connection-dot]:hidden cursor-pointer text-[10px] py-0.5 px-2 bg-bg-subtle border border-border text-text-secondary"
           onClick={handleQuotaClick}
         >
-          {formatMeterValue(balanceMeter.remaining, balanceMeter.unit)}
+          {formatMeterValue(balanceMeter.remaining, balanceMeter.unit, false, {
+            currency,
+            rate,
+            symbol,
+          })}
         </Badge>
       );
     }
@@ -877,9 +1148,11 @@ export function useProviderForm() {
     setIsModalOpen,
     editingProvider,
     setEditingProvider,
+    setPresetSelected,
     originalId,
     isSaving,
     quotaCheckerTypes,
+    customCheckerIds,
     quotas,
     quotasLoading,
     oauthSessionId,
@@ -892,6 +1165,7 @@ export function useProviderForm() {
     oauthBusy,
     oauthCredentialReady,
     oauthCredentialChecking,
+    oauthCredentialStatus,
     oauthStatus,
     oauthIsTerminal,
     oauthStatusLabel,
@@ -925,6 +1199,7 @@ export function useProviderForm() {
     selectedModelIds,
     setSelectedModelIds,
     fetchError,
+    fetchWarning,
     // Delete
     deleteModalProvider,
     setDeleteModalProvider,
@@ -946,6 +1221,7 @@ export function useProviderForm() {
     handleSubmitPrompt,
     handleSubmitManualCode,
     handleCancelOAuth,
+    handleDeleteOAuthCredential,
     // API URLs
     getApiBaseUrlMap,
     getApiUrlValue,

@@ -1,6 +1,8 @@
-import React from 'react';
 import { Link } from 'react-router-dom';
-import { Trash2, Loader2, CheckCircle, AlertTriangle, Play, BarChart3 } from 'lucide-react';
+import { BarChart3 } from 'lucide-react';
+import { modelInsightsPath } from '../../lib/model-insights';
+import React from 'react';
+import { Trash2, Loader2, CheckCircle, AlertTriangle, Play, Link2 } from 'lucide-react';
 import { CopyButton } from '../ui/CopyButton';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -8,7 +10,8 @@ import { Switch } from '../ui/Switch';
 import { ModelTypeBadge } from './ModelTypeBadge';
 import type { Alias, Provider, Cooldown } from '../../lib/api';
 import { getAliasProviderLabels, getAliasTargetCount } from '../../lib/modelList';
-import { modelInsightsPath } from '../../lib/model-insights';
+import { dedupeStrings } from '../../lib/modelOptions';
+import { formatMsToMinSec } from '@plexus/shared';
 
 interface Props {
   alias: Alias;
@@ -51,7 +54,18 @@ export const AliasMobileCard: React.FC<Props> = ({
   return (
     <article key={alias.id} className="rounded-md border border-border-glass bg-bg-subtle p-3">
       <div className="flex items-start justify-between gap-3">
-        <button type="button" onClick={() => onEdit(alias)} className="min-w-0 flex-1 text-left">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onEdit(alias)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onEdit(alias);
+            }
+          }}
+          className="min-w-0 flex-1 cursor-pointer text-left"
+        >
           <div className="flex items-center gap-2">
             <div className="truncate font-heading text-sm font-semibold text-text">{alias.id}</div>
             <CopyButton value={alias.id} size="sm" />
@@ -64,7 +78,7 @@ export const AliasMobileCard: React.FC<Props> = ({
               </span>
             )}
           </div>
-        </button>
+        </div>
         <Link
           to={modelInsightsPath(alias.id)}
           onClick={(e) => e.stopPropagation()}
@@ -114,7 +128,7 @@ export const AliasMobileCard: React.FC<Props> = ({
           <div className="text-[10px] uppercase tracking-wider text-text-muted">Aliases</div>
           <div className="flex flex-wrap gap-1 font-medium text-text-secondary">
             {alias.aliases?.length
-              ? alias.aliases.map((a) => (
+              ? dedupeStrings(alias.aliases).map((a) => (
                   <span key={a} className="inline-flex items-center gap-1">
                     <span className="text-xs">{a}</span>
                     <CopyButton value={a} size="sm" />
@@ -144,6 +158,36 @@ export const AliasMobileCard: React.FC<Props> = ({
           ) : (
             <div className="space-y-2">
               {firstTargetGroup.targets.map((t, i) => {
+                if (t.alias) {
+                  const isTargetDisabled = t.enabled === false;
+                  return (
+                    <div
+                      key={`alias-${t.alias}-${i}`}
+                      className={`rounded border border-border-glass bg-bg-glass px-2 py-2 ${
+                        isTargetDisabled ? 'opacity-70' : ''
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className={`flex items-center gap-1 truncate text-xs font-medium ${
+                              isTargetDisabled ? 'text-danger line-through' : 'text-text-secondary'
+                            }`}
+                          >
+                            <Link2 size={12} className="text-primary opacity-70" />
+                            alias: {t.alias}
+                          </div>
+                        </div>
+                        <Switch
+                          checked={t.enabled !== false}
+                          onChange={(val) => onToggleTarget(alias, 0, i, val)}
+                          size="sm"
+                        />
+                      </div>
+                    </div>
+                  );
+                }
+
                 const provider = providers.find((p) => p.id === t.provider);
                 const isProviderDisabled = provider?.enabled === false;
                 const isTargetDisabled = t.enabled === false;
@@ -153,7 +197,9 @@ export const AliasMobileCard: React.FC<Props> = ({
                 const cooldown = cooldowns.find(
                   (c) => c.provider === t.provider && c.model === t.model && !c.accountId
                 );
-                const cooldownMinutes = cooldown ? Math.ceil(cooldown.timeRemainingMs / 60000) : 0;
+                const cooldownText = cooldown
+                  ? formatMsToMinSec(cooldown.timeRemainingMs, cooldown.lastError)
+                  : '';
 
                 return (
                   <div
@@ -177,7 +223,7 @@ export const AliasMobileCard: React.FC<Props> = ({
                         )}
                         {cooldown && (
                           <div className="mt-1 text-[11px] font-medium text-warning">
-                            Cooldown {cooldownMinutes}m
+                            Cooldown ({cooldownText})
                           </div>
                         )}
                         {testState?.showResult && testState.message && (
@@ -194,18 +240,13 @@ export const AliasMobileCard: React.FC<Props> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            if (isDisabled) return;
+                            if (isDisabled || !t.provider || !t.model) return;
                             let testApiTypes: string[] = ['chat'];
                             if (alias.type === 'embeddings') testApiTypes = ['embeddings'];
                             else if (alias.type === 'image') testApiTypes = ['images'];
+                            else if (alias.type === 'decisions') testApiTypes = ['decisions'];
 
-                            onTestTarget(
-                              alias.id,
-                              `${alias.id}-mobile-${i}`,
-                              t.provider,
-                              t.model,
-                              testApiTypes
-                            );
+                            onTestTarget(alias.id, testKey, t.provider, t.model, testApiTypes);
                           }}
                           disabled={isDisabled}
                           className="flex h-7 w-7 items-center justify-center rounded text-primary transition-colors hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
@@ -229,22 +270,28 @@ export const AliasMobileCard: React.FC<Props> = ({
                         />
                       </div>
                     </div>
-                    {testState?.showMessage &&
-                      testState.result === 'error' &&
-                      testState.message && (
-                        <div
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDismissTestMessage(testKey);
-                          }}
-                          className="mt-2 cursor-pointer rounded border border-danger/30 bg-danger/10 px-2 py-1"
-                          title="Click to dismiss"
+                    {testState?.showMessage && testState.message && (
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDismissTestMessage(testKey);
+                        }}
+                        className={`mt-2 cursor-pointer rounded border px-2 py-1 ${
+                          testState.result === 'error'
+                            ? 'border-danger/30 bg-danger/10'
+                            : 'border-success/30 bg-success/10'
+                        }`}
+                        title="Click to dismiss"
+                      >
+                        <span
+                          className={`text-[11px] italic ${
+                            testState.result === 'error' ? 'text-danger' : 'text-success'
+                          }`}
                         >
-                          <span className="text-[11px] italic text-danger">
-                            {testState.message} [×]
-                          </span>
-                        </div>
-                      )}
+                          {testState.message} [×]
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               })}

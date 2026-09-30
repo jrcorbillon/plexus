@@ -15,6 +15,7 @@ import { Switch } from '../ui/Switch';
 import { MetadataOverrideForm } from './MetadataOverrideForm';
 import { useMetadataEditor } from '../../hooks/useMetadataEditor';
 import { api } from '../../lib/api';
+import { dedupeById } from '../../lib/modelOptions';
 import { useToast } from '../../contexts/ToastContext';
 import type {
   Alias,
@@ -144,7 +145,7 @@ export function ModelMetadataEditor({ editingAlias, setEditingAlias, isModalOpen
       editingAlias.id.trim().length > 0 ||
       !!editingAlias.pi_model?.model_id ||
       editingAlias.target_groups.some((group) =>
-        group.targets.some((target) => target.enabled !== false && target.model.trim().length > 0)
+        group.targets.some((target) => target.enabled !== false && !!target.model?.trim().length)
       );
     if (!isOpen || metadataSource !== 'auto' || !hasInput) {
       setAutomaticResolution(null);
@@ -623,7 +624,7 @@ export function ModelMetadataEditor({ editingAlias, setEditingAlias, isModalOpen
                           }}
                         >
                           <option value="">Select model...</option>
-                          {piModels.map((m) => (
+                          {dedupeById(piModels).map((m) => (
                             <option key={m.id} value={m.id} title={m.api}>
                               {m.name} ({m.id}){m.custom ? ' — custom' : ''}
                             </option>
@@ -820,7 +821,7 @@ export function ModelMetadataEditor({ editingAlias, setEditingAlias, isModalOpen
               overflowY: 'auto',
             }}
           >
-            {metadataResults.map((result) => (
+            {dedupeById(metadataResults).map((result) => (
               <button
                 key={result.id}
                 type="button"

@@ -4,7 +4,9 @@ import { Dispatcher } from '../../services/dispatch/dispatcher';
 import {
   ResponsesTransformer,
   normalizeCompositeResponsesCallIds,
+  normalizeResponsesFunctionCallItemIds,
   normalizeResponsesReasoningContent,
+  normalizeResponsesNullEntries,
 } from '../../transformers/responses';
 import { UsageStorageService } from '../../services/observability/usage-storage';
 import { ResponsesStorageService } from '../../services/responses/responses-storage';
@@ -21,6 +23,7 @@ import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
 import { sanitizeHeaders } from '../../utils/sanitize-headers';
 import { CLIENT_REQUEST_ID_HEADER, getClientRequestId } from '../../utils/client-request-id';
 import { getCacheRoutingHeaders } from '../../utils/cache-routing-headers';
+import { getReasoningLogValue } from '../../services/pi-ai/reasoning';
 
 export function detectResponsesApiType(
   headers: Record<string, unknown>,
@@ -34,7 +37,18 @@ export function detectResponsesApiType(
 
   const hasAdditionalTools =
     Array.isArray(body?.input) && body.input.some((item: any) => item?.type === 'additional_tools');
-  return hasAdditionalTools ? 'responses:lite' : 'responses';
+  // A declared `tool_search` tool is Codex CLI's lazy tool-discovery
+  // mechanism — the defining feature of "lite" mode (the client hasn't sent
+  // its full tool catalog upfront and expects to discover more via a
+  // tool_search_call mid-turn). Recognizing it here, not just
+  // `additional_tools`/the internal header, lets routing correctly prefer
+  // providers that explicitly advertise `responses:lite` support (see
+  // router.ts's subtype-first target matching) for a request that's
+  // genuinely Codex-native, instead of silently defaulting to the base
+  // `responses` type and losing that routing preference.
+  const hasToolSearch =
+    Array.isArray(body?.tools) && body.tools.some((tool: any) => tool?.type === 'tool_search');
+  return hasAdditionalTools || hasToolSearch ? 'responses:lite' : 'responses';
 }
 
 export async function registerResponsesRoute(
@@ -76,6 +90,7 @@ export async function registerResponsesRoute(
       startTime,
       isStreamed: false,
       responseStatus: 'pending',
+      reasoningEffort: getReasoningLogValue(undefined, request.body) ?? null,
     };
 
     // Emit 'started' event immediately - this allows frontend to show in-flight requests
@@ -164,11 +179,29 @@ export async function registerResponsesRoute(
       // dispatch body so strict Responses providers don't reject composite
       // tool call IDs observed in replayed Codex CLI conversations.
       const rawBodyForDebug = JSON.parse(JSON.stringify(body));
+      // Start debug capture before parsing so malformed payloads are still traced.
+      DebugManager.getInstance().startLog(
+        requestId,
+        rawBodyForDebug,
+        sanitizeHeaders(request.headers as any)
+      );
+      const removedNullEntries = normalizeResponsesNullEntries(body);
+      if (removedNullEntries > 0) {
+        logger.warn(
+          `Removed ${removedNullEntries} null Responses input/content entr(ies) for request ${requestId}`
+        );
+      }
       const normalizedCallIds = normalizeCompositeResponsesCallIds(body);
+      const normalizedItemIds = normalizeResponsesFunctionCallItemIds(body);
       const normalizedReasoningItems = normalizeResponsesReasoningContent(body);
       if (normalizedCallIds > 0) {
         logger.warn(
           `Normalized ${normalizedCallIds} composite Responses call_id value(s) for request ${requestId}`
+        );
+      }
+      if (normalizedItemIds > 0) {
+        logger.warn(
+          `Removed call-ID-shaped item id(s) from ${normalizedItemIds} Responses function_call item(s) for request ${requestId}`
         );
       }
       if (normalizedReasoningItems > 0) {
@@ -181,6 +214,7 @@ export async function registerResponsesRoute(
       unifiedRequest.incomingApiType = incomingApiType;
       unifiedRequest.originalBody = body;
       unifiedRequest.requestId = requestId;
+      usageRecord.reasoningEffort = getReasoningLogValue(unifiedRequest, body) ?? null;
       if (body.previous_response_id) {
         unifiedRequest.previousResponseId = body.previous_response_id;
       }
@@ -205,12 +239,6 @@ export async function registerResponsesRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(
-        requestId,
-        rawBodyForDebug,
-        sanitizeHeaders(request.headers as any)
-      );
-
       // Check quota before processing
       if (quotaEnforcer) {
         const quotaCheck = await checkQuotaMiddleware(request, reply, quotaEnforcer);
@@ -223,7 +251,12 @@ export async function registerResponsesRoute(
 
       const abortController = new AbortController();
       const { signal: dispatchSignal, resolveTimeoutMs } = wireUpstreamTimeout(abortController);
-      earlyDisconnect = wireEarlyDisconnectDetection(request, abortController);
+      earlyDisconnect = wireEarlyDisconnectDetection(
+        request,
+        abortController,
+        requestId,
+        incomingApiType === 'responses:lite'
+      );
       const stallDetectionResult = wireStallDetection(abortController, getGlobalStallConfig());
       const unifiedResponse = await dispatcher.dispatch(
         unifiedRequest,
@@ -238,6 +271,7 @@ export async function registerResponsesRoute(
         provider: unifiedResponse.plexus?.provider,
         selectedModelName: unifiedResponse.plexus?.model,
         canonicalModelName: unifiedResponse.plexus?.canonicalModel,
+        reasoningEffort: usageRecord.reasoningEffort,
       });
 
       // Determine if token estimation is needed

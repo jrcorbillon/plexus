@@ -1,11 +1,15 @@
 import { z } from 'zod';
-import { McpServerConfigSchema } from '@plexus/shared';
+import {
+  isOAuthPlaceholderUrl,
+  McpServerConfigSchema,
+  PiAiQuirksSchema,
+  ProviderCacheKeyInjectionSchema,
+} from '@plexus/shared';
 import { logger } from './utils/logger';
 import { DEFAULT_VISION_DESCRIPTION_PROMPT } from './utils/constants';
 import { isValidIpRule } from './utils/ip-match';
-import { resolveGpuParams, VALID_GPU_PROFILES } from '@plexus/shared';
-import type { ModelArchitecture } from '@plexus/shared';
 import { getCatalogModel } from './services/pi-ai/catalog';
+import { isKnownOAuthProviderId } from './services/oauth/oauth-providers';
 
 // --- Zod Schemas ---
 
@@ -212,389 +216,27 @@ const ModelProviderConfigSchema = z.object({
   pi_ai_model_id: z.string().optional(),
 });
 
-// Gemini CLI / Antigravity OAuth were removed. Their enum
-// values are gone, so new configs referencing them are rejected on write; any
-// persisted rows are purged at startup by
-// ConfigService.dropRetiredOAuthProviders() (which loads from DB columns, not
-// this schema, so old rows never fail to load before they are dropped).
-const OAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'github-copilot']);
-
-const NagaQuotaCheckerOptionsSchema = z.object({
-  apiKey: z.string().min(1, 'Naga provisioning key is required'),
-  max: z.number().positive('Max balance must be a positive number').optional(),
-  endpoint: z.string().url().optional(),
+// Validated dynamically against every OAuth-capable provider pi-ai ships
+// (see services/oauth/oauth-providers.ts) rather than a hardcoded enum, so
+// new pi-ai OAuth flows (e.g. xAI, Kimi Code, OpenRouter) are usable without
+// a Plexus code change. `radius` is deliberately excluded there.
+//
+// Gemini CLI / Antigravity OAuth were removed upstream, so configs
+// referencing them are rejected on write; any persisted rows are purged at
+// startup by ConfigService.dropRetiredOAuthProviders() (which loads from DB
+// columns, not this schema, so old rows never fail to load before they are
+// dropped).
+const OAuthProviderSchema = z.string().refine((id) => isKnownOAuthProviderId(id), {
+  message: 'oauth_provider must be a supported OAuth provider id',
 });
 
-const SyntheticQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  maxUtilizationPercent: z
-    .number()
-    .min(1)
-    .max(100)
-    .optional()
-    .describe(
-      'Maximum utilization percentage before the provider is placed on cooldown (default: 99). ' +
-        'Set lower to reserve quota — e.g. 30 means the provider is treated as exhausted at 30% usage, ' +
-        'preserving 70% of remaining quota. Minimum 1 (use enabled: false to fully disable a provider).'
-    ),
+const ProviderQuotaCheckerSchema = z.object({
+  type: z.string().trim().min(1),
+  enabled: z.boolean().default(true),
+  intervalMinutes: z.number().min(1).default(30),
+  id: z.string().trim().min(1).optional(),
+  options: z.record(z.string(), z.any()).default({}),
 });
-
-const NanoGPTQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const ZAIQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const MoonshotQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const NovitaQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const MiniMaxQuotaCheckerOptionsSchema = z.object({
-  groupid: z.string().trim().min(1, 'MiniMax groupid is required'),
-  token: z.string().trim().min(1, 'MiniMax _token cookie value is required'),
-});
-
-const MiniMaxCodingQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const OpenRouterQuotaCheckerOptionsSchema = z.object({
-  apiKey: z.string().min(1, 'OpenRouter management key is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const KiloQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  organizationId: z.string().trim().min(1).optional(),
-});
-
-const OpenAICodexQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  userAgent: z.string().trim().min(1).optional(),
-  timeoutMs: z.number().int().positive().optional(),
-});
-
-const KimiCodeQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const ClaudeCodeQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const CopilotQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  userAgent: z.string().trim().min(1).optional(),
-  editorVersion: z.string().trim().min(1).optional(),
-  apiVersion: z.string().trim().min(1).optional(),
-  timeoutMs: z.number().int().positive().optional(),
-});
-
-const WisdomGateQuotaCheckerOptionsSchema = z.object({
-  session: z.string().trim().min(1, 'Session cookie is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const GeminiCliQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  userAgent: z.string().trim().min(1).optional(),
-  googApiClient: z.string().trim().min(1).optional(),
-  clientMetadata: z.string().trim().min(1).optional(),
-});
-
-const AntigravityQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const OllamaQuotaCheckerOptionsSchema = z.object({
-  sessionCookie: z.string().min(1, 'Ollama __Secure-session cookie is required'),
-});
-
-const ApertisQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  mode: z.enum(['subscription', 'payg']).optional(),
-});
-
-const NeuralwattQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const ZenmuxQuotaCheckerOptionsSchema = z.object({
-  managementApiKey: z.string().min(1, 'Zenmux management API key is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const WaferQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-  includeAllowance: z.boolean().optional(),
-});
-
-const PoeQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const RoutingRunQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const DevPassQuotaCheckerOptionsSchema = z.object({
-  session: z.string().trim().min(1, 'DevPass session cookie is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const OpenCodeGoQuotaCheckerOptionsSchema = z.object({
-  workspaceId: z.string().min(1, 'OpenCode Go workspace ID is required'),
-  authCookie: z.string().min(1, 'OpenCode Go auth cookie is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const CrofQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const ExeDevQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.string().url().optional(),
-});
-
-const HyperQuotaCheckerOptionsSchema = z.object({
-  endpoint: z.url().optional(),
-});
-
-const SakanaQuotaCheckerOptionsSchema = z.object({
-  sessionCookie: z.string().trim().min(1, 'Sakana session cookie is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const ClineQuotaCheckerOptionsSchema = z.object({
-  apiKey: z.string().min(1, 'Cline API key is required'),
-  endpoint: z.string().url().optional(),
-});
-
-const ProviderQuotaCheckerSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('naga'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: NagaQuotaCheckerOptionsSchema.optional(),
-  }),
-  z.object({
-    type: z.literal('synthetic'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: SyntheticQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('nanogpt'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: NanoGPTQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('zai'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: ZAIQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('moonshot'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: MoonshotQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('novita'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: NovitaQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('minimax'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: MiniMaxQuotaCheckerOptionsSchema,
-  }),
-  z.object({
-    type: z.literal('openrouter'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: OpenRouterQuotaCheckerOptionsSchema,
-  }),
-  z.object({
-    type: z.literal('kilo'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: KiloQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('openai-codex'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: OpenAICodexQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('kimi-code'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: KimiCodeQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('claude-code'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: ClaudeCodeQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('copilot'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: CopilotQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('wisdomgate'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: WisdomGateQuotaCheckerOptionsSchema.optional(),
-  }),
-  z.object({
-    type: z.literal('apertis'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: ApertisQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('minimax-coding'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: MiniMaxCodingQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('poe'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: PoeQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('routing-run'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: RoutingRunQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('gemini-cli'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: GeminiCliQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('antigravity'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: AntigravityQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('neuralwatt'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: NeuralwattQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('ollama'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: OllamaQuotaCheckerOptionsSchema,
-  }),
-  z.object({
-    type: z.literal('zenmux'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: ZenmuxQuotaCheckerOptionsSchema.optional(),
-  }),
-  z.object({
-    type: z.literal('devpass'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: DevPassQuotaCheckerOptionsSchema.optional(),
-  }),
-  z.object({
-    type: z.literal('wafer'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: WaferQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('opencode-go'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: OpenCodeGoQuotaCheckerOptionsSchema.optional(),
-  }),
-  z.object({
-    type: z.literal('crof'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: CrofQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('exedev'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: ExeDevQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('hyper'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: HyperQuotaCheckerOptionsSchema.optional().default({}),
-  }),
-  z.object({
-    type: z.literal('sakana'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: SakanaQuotaCheckerOptionsSchema,
-  }),
-  z.object({
-    type: z.literal('cline'),
-    enabled: z.boolean().default(true),
-    intervalMinutes: z.number().min(1).default(30),
-    id: z.string().trim().min(1).optional(),
-    options: ClineQuotaCheckerOptionsSchema.optional(),
-  }),
-]);
 
 const ModelAutosyncSchema = z.object({
   enabled: z.boolean().default(false),
@@ -648,7 +290,13 @@ export const ProviderConfigSchema = z
       z.string().refine((value) => isValidUrlOrOAuth(value), {
         message: 'api_base_url must be a valid URL or oauth://',
       }),
-      z.record(z.string(), z.string()),
+      // The map form is dispatched verbatim (see resolveProviderBaseUrl), so an
+      // `oauth://` entry here would be handed straight to fetch. OAuth providers
+      // must declare the placeholder through the string form instead.
+      z.record(z.string(), z.string()).refine((urlMap) => !hasOAuthPlaceholder(urlMap), {
+        message:
+          "api_base_url map entries must be real URLs; use the string form api_base_url: 'oauth://' for OAuth providers",
+      }),
     ]),
     api_key: z.string().optional(),
     oauth_provider: OAuthProviderSchema.optional(),
@@ -656,6 +304,7 @@ export const ProviderConfigSchema = z
     enabled: z.boolean().default(true).optional(),
     disable_cooldown: z.boolean().optional().default(false),
     stall_cooldown: z.boolean().optional().default(false),
+    allow_100_percent_utilization: z.boolean().optional().default(false),
     discount: z.number().min(0).max(1).optional(),
     models: z
       .union([z.array(z.string()), z.record(z.string(), ModelProviderConfigSchema)])
@@ -664,16 +313,14 @@ export const ProviderConfigSchema = z
     extraBody: z.record(z.string(), z.any()).optional(),
     estimateTokens: z.boolean().optional().default(false),
     useClaudeMasking: z.boolean().optional().default(false),
+    /**
+     * Inject Plexus's derived per-run cache/session key into this field on
+     * upstream requests. `undefined` leaves the client's request unchanged,
+     * except Meta OAuth routes which default to `prompt_cache_key`.
+     */
+    cache_key_injection: ProviderCacheKeyInjectionSchema.optional(),
     quota_checker: ProviderQuotaCheckerSchema.optional(),
     model_autosync: ModelAutosyncSchema.optional(),
-    // GPU Profile settings — gpu_profile is a display hint (e.g. 'H100', 'custom').
-    // The 4 numeric fields are the source of truth; the frontend resolves named
-    // profiles to concrete values before saving. The backend never resolves.
-    gpu_profile: z.enum(VALID_GPU_PROFILES as unknown as [string, ...string[]]).optional(),
-    gpu_ram_gb: z.number().positive().optional(),
-    gpu_bandwidth_tb_s: z.number().positive().optional(),
-    gpu_flops_tflop: z.number().positive().optional(),
-    gpu_power_draw_watts: z.number().positive().optional(),
     geminiThinkingEnabled: z.boolean().optional(),
     adapter: AdapterConfigSchema,
     auto_compat: z.boolean().optional(),
@@ -686,8 +333,12 @@ export const ProviderConfigSchema = z
     stallWindowMs: z.number().int().min(3000).max(30000).nullable().optional(),
     stallGracePeriodMs: z.number().int().min(0).max(120000).nullable().optional(),
     pi_ai_provider: z.string().optional(),
+    pi_ai_quirks: PiAiQuirksSchema.optional(),
     compaction: CompactionOverrideSchema.optional(),
     raw_passthrough: RawPassthroughConfigSchema.optional(),
+  })
+  .refine((data) => !data.pi_ai_provider || !data.pi_ai_quirks, {
+    message: "'pi_ai_provider' and 'pi_ai_quirks' are mutually exclusive",
   })
   .refine((data) => !!data.api_key || isOAuthProviderConfig(data), {
     message: "'api_key' must be specified for provider",
@@ -695,18 +346,26 @@ export const ProviderConfigSchema = z
   .refine((data) => !isOAuthProviderConfig(data) || !!data.oauth_provider, {
     message: "'oauth_provider' must be specified when using oauth://",
   })
-  .refine((data) => !isOAuthProviderConfig(data) || !!data.oauth_account, {
-    message: "'oauth_account' must be specified when using oauth://",
-  })
+  // The OAuth account is derived from the provider slug (1:1) at login time
+  // and never entered by users — oauth_account survives in the schema only
+  // as a grandfathered fallback for restores/imports that predate slug keying.
   .refine((data) => data.raw_passthrough?.enabled !== true || !isOAuthProviderConfig(data), {
     message: 'raw_passthrough currently supports static API-key providers only',
   });
 
-const ModelTargetSchema = z.object({
-  provider: z.string(),
-  model: z.string(),
-  enabled: z.boolean().default(true).optional(),
-});
+const ModelTargetSchema = z
+  .object({
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    alias: z.string().min(1).optional(),
+    enabled: z.boolean().default(true).optional(),
+  })
+  .refine(
+    (data) => (data.alias ? !data.provider && !data.model : !!data.provider && !!data.model),
+    {
+      message: "A target must specify either 'alias' or both 'provider' and 'model', but not both",
+    }
+  );
 
 const SelectorTypeSchema = z.enum([
   'random',
@@ -714,6 +373,7 @@ const SelectorTypeSchema = z.enum([
   'cost',
   'latency',
   'usage',
+  'quota',
   'performance',
   'e2e_performance',
 ]);
@@ -723,6 +383,97 @@ const ModelTargetGroupSchema = z.object({
   selector: SelectorTypeSchema,
   targets: z.array(ModelTargetSchema),
 });
+
+export function findDuplicateAliasTargets(
+  targetGroups:
+    | Array<{ targets: Array<{ provider?: string; model?: string; alias?: string }> }>
+    | undefined
+): Array<{ provider?: string; model?: string; alias?: string }> {
+  const seen = new Set<string>();
+  const duplicates = new Map<string, { provider?: string; model?: string; alias?: string }>();
+
+  for (const group of targetGroups ?? []) {
+    for (const target of group.targets) {
+      const key = target.alias
+        ? JSON.stringify(['alias', target.alias])
+        : JSON.stringify([target.provider, target.model]);
+      if (seen.has(key)) duplicates.set(key, target);
+      else seen.add(key);
+    }
+  }
+
+  return Array.from(duplicates.values());
+}
+
+/**
+ * Walks the alias-ref graph (target.alias references) starting from every
+ * alias and throws if a cycle is found. Called at config-load time as a hard
+ * validation error — route-time expansion also guards with a visited-set as
+ * a safety net, but cycles should never reach the router.
+ */
+export function assertNoAliasRefCycles(models: Record<string, ModelConfig> | undefined): void {
+  if (!models) return;
+
+  // target.alias may reference either a canonical model key or one of its
+  // additional_aliases (nicknames) — resolve nicknames to their canonical
+  // key so cycles routed through a nickname are still detected, matching
+  // how the router resolves alias refs at request time (see findAlias).
+  const canonicalBySlug = new Map<string, string>();
+  for (const key of Object.keys(models)) {
+    canonicalBySlug.set(key, key);
+    for (const nickname of models[key]?.additional_aliases ?? []) {
+      if (!canonicalBySlug.has(nickname)) canonicalBySlug.set(nickname, key);
+    }
+  }
+
+  const referencedAliases = (slug: string): string[] => {
+    const model = models[slug];
+    if (!model?.target_groups) return [];
+    const refs: string[] = [];
+    for (const group of model.target_groups) {
+      for (const target of group.targets) {
+        if (target.enabled !== false && target.alias) {
+          refs.push(canonicalBySlug.get(target.alias) ?? target.alias);
+        }
+      }
+    }
+    return refs;
+  };
+
+  for (const startSlug of Object.keys(models)) {
+    const path: string[] = [];
+    const visiting = new Set<string>();
+
+    const walk = (slug: string) => {
+      if (visiting.has(slug)) {
+        const cycleStart = path.indexOf(slug);
+        const cycle = [...path.slice(cycleStart), slug].join(' -> ');
+        throw new Error(`Alias reference cycle detected: ${cycle}`);
+      }
+      visiting.add(slug);
+      path.push(slug);
+      for (const ref of referencedAliases(slug)) {
+        walk(ref);
+      }
+      path.pop();
+      visiting.delete(slug);
+    };
+
+    walk(startSlug);
+  }
+}
+
+export function findDuplicateAdditionalAliases(additionalAliases: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+
+  for (const alias of additionalAliases ?? []) {
+    if (seen.has(alias)) duplicates.add(alias);
+    else seen.add(alias);
+  }
+
+  return Array.from(duplicates);
+}
 
 // Shared scope/limit fields applied to every quota-type union member below:
 //  - allowed*/excluded* restrict which provider/model pairs the quota counts
@@ -897,7 +648,14 @@ export const ModelConfigSchema = z
     preferred_api: z
       .array(z.enum(['chat_completions', 'messages', 'gemini', 'responses']))
       .optional(),
-    type: z.enum(['text', 'embeddings', 'transcriptions', 'speech', 'image']).optional(),
+    // Alias capability type. `decisions` marks a buffered Jev-style alias
+    // (served through `systemone` targets).
+    // Provider-model `type` intentionally has no `decisions` value: on
+    // Postgres it persists into a pgEnum without that value, so provider
+    // models advertise Decisions capability through `access_via` instead.
+    type: z
+      .enum(['text', 'embeddings', 'transcriptions', 'speech', 'image', 'decisions'])
+      .optional(),
     advanced: z.array(ModelBehaviorSchema).optional(),
     metadata: ModelMetadataSchema.optional(),
     // pi-ai model reference: when set, pi_options (compat) will be included in GET /v1/models
@@ -910,22 +668,34 @@ export const ModelConfigSchema = z
     // Extra body fields merged into every request dispatched through this alias.
     // Merged after provider-level and model-level extraBody, so alias values win.
     extraBody: z.record(z.string(), z.any()).optional(),
-    // Model architecture override for inference energy calculation
-    model_architecture: z
-      .object({
-        total_params: z.number().positive().optional(),
-        active_params: z.number().positive().optional(),
-        layers: z.number().int().positive().optional(),
-        heads: z.number().int().positive().optional(),
-        kv_lora_rank: z.number().int().positive().optional(),
-        qk_rope_head_dim: z.number().int().positive().optional(),
-        context_length: z.number().int().positive().optional(),
-        dtype: z
-          .enum(['fp16', 'bf16', 'fp8', 'fp8_e4m3', 'fp8_e5m2', 'nvfp4', 'int4', 'int8'])
-          .optional(),
-      })
-      .optional(),
+    // When true, translated (non-native Messages) responses for this alias
+    // carry synthetic `safeguard_results` (`evaluated`/`not_flagged` with an
+    // explanatory note) when the inbound Messages request asked via
+    // `safeguards`. Opt-in, default off: no real classifier runs.
+    synthetic_safeguard_approval: z.boolean().default(false).optional(),
     compaction: CompactionOverrideSchema.optional(),
+  })
+  .superRefine((data, context) => {
+    const targetGroups =
+      data.target_groups ?? (data.targets ? [{ targets: data.targets }] : undefined);
+
+    for (const target of findDuplicateAliasTargets(targetGroups)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['target_groups'],
+        message: target.alias
+          ? `Duplicate target 'alias:${target.alias}' is not allowed`
+          : `Duplicate target '${target.provider}/${target.model}' is not allowed`,
+      });
+    }
+
+    for (const alias of findDuplicateAdditionalAliases(data.additional_aliases)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['additional_aliases'],
+        message: `Duplicate additional alias '${alias}' is not allowed`,
+      });
+    }
   })
   .transform((data) => {
     // Normalise legacy flat format to grouped format immediately.
@@ -1007,6 +777,123 @@ export function normalizeKeyConfig<T extends { quota?: unknown; quotas?: unknown
   return data;
 }
 
+/** Pre-collapse Decisions target names. Still accepted (see below), never written. */
+const LEGACY_DECISIONS_TARGET_TYPES: ReadonlySet<string> = new Set([
+  'openrouter-decisions',
+  'typesafe-decisions',
+]);
+
+/** The only base URL the old preset ever shipped for the legacy OpenRouter target. */
+const LEGACY_OPENROUTER_ALPHA_BASE = 'https://openrouter.ai/api/alpha';
+
+/** Replacement base: OpenRouter serves System One at `/api/v1/systemone`. */
+const OPENROUTER_V1_BASE = 'https://openrouter.ai/api/v1';
+
+function isLegacyDecisionsTargetType(value: unknown): boolean {
+  return typeof value === 'string' && LEGACY_DECISIONS_TARGET_TYPES.has(value.trim().toLowerCase());
+}
+
+function apiAccessEntryKey(entry: unknown): string {
+  if (typeof entry === 'string') return entry.trim().toLowerCase();
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    const type = typeof record.type === 'string' ? record.type.trim().toLowerCase() : '';
+    const subtype =
+      typeof record.subtype === 'string' && record.subtype.trim().length > 0
+        ? record.subtype.trim().toLowerCase()
+        : undefined;
+    return subtype ? `${type}:${subtype}` : type;
+  }
+  return '';
+}
+
+/** Map one `access_via` entry onto the single `systemone` target, preserving subtypes. */
+function systemOneAccessEntry(entry: unknown): unknown {
+  if (typeof entry === 'string') {
+    return isLegacyDecisionsTargetType(entry) ? 'systemone' : entry;
+  }
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    if (isLegacyDecisionsTargetType(record.type)) {
+      return { ...record, type: 'systemone' };
+    }
+  }
+  return entry;
+}
+
+/**
+ * Collapse legacy Decisions targets onto the single `systemone` target at
+ * load time. `openrouter-decisions` / `typesafe-decisions` `api_base_url`
+ * keys become `systemone` (an explicit `systemone` entry always wins); a
+ * base URL of exactly the old preset value (`/api/alpha`) is rewritten to
+ * `/api/v1`, while custom bases are kept verbatim. Model-level `access_via`
+ * entries are mapped the same way and deduped. Returns a new object unless
+ * nothing needed changing.
+ *
+ * Applied in `hydrateConfig` (file/test configs) and `ConfigService`
+ * rebuilds (database configs) so every runtime read sees the canonical
+ * form; stored rows are left untouched.
+ */
+export function normalizeSystemOneProviderConfig(data: ProviderConfig): ProviderConfig {
+  let apiBaseUrl = data.api_base_url;
+  if (apiBaseUrl && typeof apiBaseUrl === 'object' && !Array.isArray(apiBaseUrl)) {
+    const urlMap = apiBaseUrl as Record<string, string>;
+    const legacyKeys = Object.keys(urlMap).filter((key) =>
+      LEGACY_DECISIONS_TARGET_TYPES.has(key.trim().toLowerCase())
+    );
+    if (legacyKeys.length > 0) {
+      const next: Record<string, string> = { ...urlMap };
+      for (const key of legacyKeys) {
+        const base = next[key] as string;
+        delete next[key];
+        if (next['systemone'] === undefined) {
+          next['systemone'] =
+            base.replace(/\/+$/, '').toLowerCase() === LEGACY_OPENROUTER_ALPHA_BASE
+              ? OPENROUTER_V1_BASE
+              : base;
+        }
+      }
+      apiBaseUrl = next;
+    }
+  }
+
+  let models = data.models;
+  if (models && typeof models === 'object' && !Array.isArray(models)) {
+    const record = models as Record<string, unknown>;
+    const nextModels: Record<string, unknown> = {};
+    let changed = false;
+    for (const [modelId, modelCfg] of Object.entries(record)) {
+      const access = (modelCfg as { access_via?: unknown } | null)?.access_via;
+      if (!Array.isArray(access)) {
+        nextModels[modelId] = modelCfg;
+        continue;
+      }
+      // Map legacy entries, drop empties, collapse duplicates.
+      const seen = new Set<string>();
+      const mapped: unknown[] = [];
+      for (const entry of access) {
+        const next = systemOneAccessEntry(entry);
+        const key = apiAccessEntryKey(next);
+        if (key.length === 0 || seen.has(key)) continue;
+        seen.add(key);
+        mapped.push(next);
+      }
+      if (JSON.stringify(mapped) === JSON.stringify(access)) {
+        nextModels[modelId] = modelCfg;
+      } else {
+        changed = true;
+        nextModels[modelId] = { ...(modelCfg as Record<string, unknown>), access_via: mapped };
+      }
+    }
+    if (changed) {
+      models = nextModels as ProviderConfig['models'];
+    }
+  }
+
+  if (apiBaseUrl === data.api_base_url && models === data.models) return data;
+  return { ...data, api_base_url: apiBaseUrl, models };
+}
+
 const QuotaConfigSchema = z.object({
   id: z.string(),
   type: z.string(),
@@ -1016,7 +903,7 @@ const QuotaConfigSchema = z.object({
   options: z.record(z.string(), z.any()).default({}),
 });
 
-export { McpServerConfigSchema } from '@plexus/shared';
+export { isOAuthPlaceholderUrl, McpServerConfigSchema } from '@plexus/shared';
 
 const CooldownPolicySchema = z.object({
   initialMinutes: z.number().min(0.1).default(2),
@@ -1043,6 +930,16 @@ const StallConfigSchema = z.object({
   stallCooldown: z.boolean().default(false).optional(),
 });
 
+export const McpOAuthConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(['plexus-idp']).default('plexus-idp'),
+  /**
+   * Optional externally-visible base URL. If omitted, OAuth metadata and
+   * validation are derived from the incoming request origin.
+   */
+  issuer: z.string().url().optional(),
+});
+
 const RawPlexusConfigSchema = z
   .object({
     providers: z.record(z.string(), ProviderConfigSchema),
@@ -1057,6 +954,7 @@ const RawPlexusConfigSchema = z
     timeout: z.object({ defaultSeconds: z.number().min(1).max(3600).default(300) }).optional(),
     stall: StallConfigSchema.optional(),
     backgroundExploration: BackgroundExplorationConfigSchema.optional(),
+    mcpOAuth: McpOAuthConfigSchema.optional(),
     mcp_servers: z.record(z.string(), McpServerConfigSchema).optional(),
     user_quotas: z.record(z.string(), QuotaDefinitionSchema).optional(),
     // Applied to keys with NO quotas assigned (`quotas` absent/empty). Non-stacking:
@@ -1078,6 +976,7 @@ export type StallConfigType = {
   gracePeriodSeconds?: number;
   stallCooldown?: boolean;
 };
+export type McpOAuthConfig = z.infer<typeof McpOAuthConfigSchema>;
 export type PlexusConfig = z.infer<typeof RawPlexusConfigSchema> & {
   failover: FailoverPolicy;
   cooldown?: CooldownPolicy;
@@ -1085,6 +984,7 @@ export type PlexusConfig = z.infer<typeof RawPlexusConfigSchema> & {
   stall?: StallConfigType;
   quotas: QuotaConfig[];
   mcpServers?: Record<string, McpServerConfig>;
+  mcpOAuth?: McpOAuthConfig;
   // Immediate-peer IPs/CIDRs whose forwarding headers are trusted when
   // resolving the client IP. Semantics:
   //  - undefined: legacy trust-all before DB-backed config is loaded
@@ -1124,7 +1024,7 @@ export function getProviderTypes(provider: ProviderConfig): string[] {
     // Single URL - infer type from URL pattern
     const url = provider.api_base_url.toLowerCase();
 
-    if (url.startsWith('oauth://')) {
+    if (isOAuthPlaceholderUrl(provider.api_base_url)) {
       return ['oauth'];
     }
 
@@ -1150,8 +1050,12 @@ export function getProviderTypes(provider: ProviderConfig): string[] {
   }
 }
 
+function hasOAuthPlaceholder(urlMap: Record<string, string>): boolean {
+  return Object.values(urlMap).some(isOAuthPlaceholderUrl);
+}
+
 function isValidUrlOrOAuth(value: string): boolean {
-  if (value.startsWith('oauth://')) return true;
+  if (isOAuthPlaceholderUrl(value)) return true;
   try {
     new URL(value);
     return true;
@@ -1164,9 +1068,9 @@ function isOAuthProviderConfig(provider: {
   api_base_url: string | Record<string, string>;
 }): boolean {
   if (typeof provider.api_base_url === 'string') {
-    return provider.api_base_url.startsWith('oauth://');
+    return isOAuthPlaceholderUrl(provider.api_base_url);
   }
-  return Object.values(provider.api_base_url).some((value) => value.startsWith('oauth://'));
+  return hasOAuthPlaceholder(provider.api_base_url);
 }
 
 // --- Loader ---
@@ -1183,35 +1087,7 @@ export function validateConfig(configJson: string): PlexusConfig {
 }
 
 function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusConfig {
-  // Resolve GPU profiles for providers loaded from config.
-  // If a provider has gpu_profile set but the numeric fields aren't populated,
-  // resolve them now so the backend never needs to resolve at request time.
-  const resolvedProviders: Record<string, ProviderConfig> = {};
-  for (const [providerId, providerConfig] of Object.entries(config.providers)) {
-    const pc = providerConfig as ProviderConfig;
-    if (pc.gpu_profile && (pc.gpu_ram_gb == null || pc.gpu_bandwidth_tb_s == null)) {
-      const resolved = resolveGpuParams(
-        pc.gpu_profile,
-        pc.gpu_profile === 'custom'
-          ? {
-              ram_gb: pc.gpu_ram_gb,
-              bandwidth_tb_s: pc.gpu_bandwidth_tb_s,
-              flops_tflop: pc.gpu_flops_tflop,
-              power_draw_watts: pc.gpu_power_draw_watts,
-            }
-          : undefined
-      );
-      resolvedProviders[providerId] = {
-        ...pc,
-        gpu_ram_gb: resolved.ram_gb,
-        gpu_bandwidth_tb_s: resolved.bandwidth_tb_s,
-        gpu_flops_tflop: resolved.flops_tflop,
-        gpu_power_draw_watts: resolved.power_draw_watts,
-      };
-    } else {
-      resolvedProviders[providerId] = pc;
-    }
-  }
+  assertNoAliasRefCycles(config.models);
 
   // Startup registry validation: warn (non-fatally) for any configured
   // (pi_ai_provider, pi_ai_model_id) pair that does not resolve via the
@@ -1222,7 +1098,7 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
     getCatalogModel(provider, modelId) != null;
   const piPairResolves = (provider: string, modelId: string): boolean =>
     registryHas(provider, modelId);
-  for (const [providerId, providerConfig] of Object.entries(resolvedProviders)) {
+  for (const [providerId, providerConfig] of Object.entries(config.providers)) {
     const pc = providerConfig as ProviderConfig;
     if (!pc.pi_ai_provider) continue;
     if (!pc.models || Array.isArray(pc.models)) continue;
@@ -1251,9 +1127,19 @@ function hydrateConfig(config: z.infer<typeof RawPlexusConfigSchema>): PlexusCon
     ])
   );
 
+  // Collapse legacy Decisions targets onto `systemone` (see
+  // normalizeSystemOneProviderConfig): stored configs keep working without
+  // a data migration.
+  const normalizedProviders = Object.fromEntries(
+    Object.entries(config.providers).map(([providerId, providerConfig]) => [
+      providerId,
+      normalizeSystemOneProviderConfig(providerConfig as ProviderConfig),
+    ])
+  );
+
   return {
     ...config,
-    providers: resolvedProviders,
+    providers: normalizedProviders,
     keys: normalizedKeys,
     failover: FailoverPolicySchema.parse(config.failover ?? {}),
     cooldown: CooldownPolicySchema.parse(config.cooldown ?? {}),
@@ -1288,12 +1174,12 @@ function migrateOAuthAccounts(parsed: unknown): {
     const providerConfig = providerValue as Record<string, unknown>;
     const baseUrl = providerConfig.api_base_url;
     const isOAuth =
-      (typeof baseUrl === 'string' && baseUrl.startsWith('oauth://')) ||
+      (typeof baseUrl === 'string' && isOAuthPlaceholderUrl(baseUrl)) ||
       (typeof baseUrl === 'object' &&
         baseUrl !== null &&
         !Array.isArray(baseUrl) &&
         Object.values(baseUrl as Record<string, unknown>).some(
-          (value) => typeof value === 'string' && value.startsWith('oauth://')
+          (value) => typeof value === 'string' && isOAuthPlaceholderUrl(value)
         ));
 
     if (!isOAuth) {
@@ -1362,6 +1248,13 @@ function buildProviderQuotaConfigs(config: z.infer<typeof RawPlexusConfigSchema>
       options.oauthAccountId = providerConfig.oauth_account;
     }
 
+    if (
+      providerConfig.allow_100_percent_utilization !== undefined &&
+      options.allow100PercentUtilization === undefined
+    ) {
+      options.allow100PercentUtilization = providerConfig.allow_100_percent_utilization;
+    }
+
     quotas.push({
       id: checkerId,
       provider: providerId,
@@ -1426,6 +1319,16 @@ export function setConfigForTesting(config: PlexusConfig) {
         }
         return [slug, modelCfg];
       })
+    );
+  }
+  // Mirror production load-time normalization so legacy Decisions targets
+  // collapse onto `systemone` in tests too (see hydrateConfig).
+  if (normalised.providers) {
+    normalised.providers = Object.fromEntries(
+      Object.entries(normalised.providers).map(([providerId, providerConfig]) => [
+        providerId,
+        normalizeSystemOneProviderConfig(providerConfig as ProviderConfig),
+      ])
     );
   }
 

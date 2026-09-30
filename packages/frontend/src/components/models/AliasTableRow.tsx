@@ -1,14 +1,16 @@
-import React from 'react';
 import { Link } from 'react-router-dom';
-import { Edit2, Trash2, Clock, Play, Loader2, CheckCircle, XCircle, BarChart3 } from 'lucide-react';
+import { BarChart3 } from 'lucide-react';
+import { modelInsightsPath } from '../../lib/model-insights';
+import React from 'react';
+import { Edit2, Trash2, Clock, Play, Loader2, CheckCircle, XCircle, Link2 } from 'lucide-react';
 import { CopyButton } from '../ui/CopyButton';
 import { Badge } from '../ui/Badge';
 import { Switch } from '../ui/Switch';
 import { Alias, Provider, Cooldown } from '../../lib/api';
-import { formatMsToMinSec } from '@plexus/shared';
+import { formatMsToMinSec, INDEFINITE_COOLDOWN_THRESHOLD_MS } from '@plexus/shared';
 import { SELECTOR_LABELS } from '../../lib/selectors';
 import { getAliasProviderLabels, getAliasTargetCount } from '../../lib/modelList';
-import { modelInsightsPath } from '../../lib/model-insights';
+import { dedupeStrings } from '../../lib/modelOptions';
 
 interface AliasTableRowProps {
   alias: Alias;
@@ -107,7 +109,7 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
         </div>
         {alias.aliases && alias.aliases.length > 0 && (
           <div className="flex flex-col gap-1 mt-1.5 pl-5">
-            {alias.aliases.map((a) => (
+            {dedupeStrings(alias.aliases).map((a) => (
               <span
                 key={a}
                 className="inline-flex items-center gap-1 text-[10px] text-text-muted w-fit"
@@ -159,6 +161,30 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
               </div>
               <div className="flex flex-col gap-0.5">
                 {group.targets.map((t, targetIdx) => {
+                  if (t.alias) {
+                    const isTargetDisabled = t.enabled === false;
+                    return (
+                      <div
+                        key={`alias-${t.alias}-${targetIdx}`}
+                        className={`flex items-center gap-1.5 text-[11px] transition-opacity ${
+                          isTargetDisabled
+                            ? 'opacity-70 line-through text-danger'
+                            : 'text-text-secondary'
+                        }`}
+                      >
+                        <Link2 size={12} className="text-primary opacity-70" />
+                        <Switch
+                          checked={t.enabled !== false}
+                          onChange={(val) => onToggleTarget(alias, groupIdx, targetIdx, val)}
+                          size="sm"
+                        />
+                        <div className="flex-1 truncate" title={`alias: ${t.alias}`}>
+                          alias: {t.alias}
+                        </div>
+                      </div>
+                    );
+                  }
+
                   const provider = providers.find((p) => p.id === t.provider);
                   const isProviderDisabled = provider?.enabled === false;
                   const isTargetDisabled = t.enabled === false;
@@ -171,8 +197,11 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
                   );
                   const isCoolingDown = !!cooldown;
                   const cooldownDisplay = cooldown
-                    ? formatMsToMinSec(cooldown.timeRemainingMs)
+                    ? formatMsToMinSec(cooldown.timeRemainingMs, cooldown.lastError)
                     : '';
+                  const isIndefinite =
+                    cooldown && cooldown.timeRemainingMs >= INDEFINITE_COOLDOWN_THRESHOLD_MS;
+                  const titlePrefix = isIndefinite ? 'On cooldown ' : 'On cooldown for ';
 
                   return (
                     <React.Fragment key={`${t.provider}-${t.model}-${targetIdx}`}>
@@ -184,7 +213,7 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
                         {isCoolingDown && (
                           <div
                             className="flex items-center gap-1 text-warning font-medium text-[11px]"
-                            title={`On cooldown for ${cooldownDisplay}`}
+                            title={`${titlePrefix}${cooldownDisplay}`}
                           >
                             <Clock size={12} />
                             <span>{cooldownDisplay}</span>
@@ -193,10 +222,11 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (!isDisabled) {
+                            if (!isDisabled && t.provider && t.model) {
                               let testApiTypes: string[] = ['chat'];
                               if (alias.type === 'embeddings') testApiTypes = ['embeddings'];
                               else if (alias.type === 'image') testApiTypes = ['images'];
+                              else if (alias.type === 'decisions') testApiTypes = ['decisions'];
 
                               onTestTarget(alias.id, testKey, t.provider, t.model, testApiTypes);
                             }
@@ -226,29 +256,35 @@ export const AliasTableRow: React.FC<AliasTableRowProps> = ({
                         />
                         <div className="flex-1 truncate" title={`${t.provider} → ${t.model}`}>
                           {t.provider} →{' '}
-                          {t.model.includes('/')
+                          {t.model?.includes('/')
                             ? `…/${t.model.split('/').slice(1).join('/')}`
                             : t.model}
                         </div>
                       </div>
-                      {testState?.showMessage &&
-                        testState.result === 'error' &&
-                        testState.message && (
-                          <div className="mt-1">
-                            <div
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onDismissTestMessage(testKey);
-                              }}
-                              className="cursor-pointer rounded border border-danger/30 bg-danger/10 px-2 py-1"
-                              title="Click to dismiss"
+                      {testState?.showMessage && testState.message && (
+                        <div className="mt-1">
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDismissTestMessage(testKey);
+                            }}
+                            className={`cursor-pointer rounded border px-2 py-1 ${
+                              testState.result === 'error'
+                                ? 'border-danger/30 bg-danger/10'
+                                : 'border-success/30 bg-success/10'
+                            }`}
+                            title="Click to dismiss"
+                          >
+                            <span
+                              className={`text-[11px] italic ${
+                                testState.result === 'error' ? 'text-danger' : 'text-success'
+                              }`}
                             >
-                              <span className="text-[11px] italic text-danger">
-                                {testState.message} [×]
-                              </span>
-                            </div>
+                              {testState.message} [×]
+                            </span>
                           </div>
-                        )}
+                        </div>
+                      )}
                     </React.Fragment>
                   );
                 })}

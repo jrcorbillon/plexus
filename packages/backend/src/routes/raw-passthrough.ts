@@ -346,7 +346,11 @@ export async function registerRawPassthroughRoutes(
         }
 
         const abortController = new AbortController();
-        const disconnectDetection = wireEarlyDisconnectDetection(request, abortController);
+        const disconnectDetection = wireEarlyDisconnectDetection(
+          request,
+          abortController,
+          requestId
+        );
         const timeoutMs = provider.timeoutMs ?? (getConfig().timeout?.defaultSeconds ?? 300) * 1000;
         const timeout = setTimeout(() => {
           abortController.abort(new DOMException('Upstream request timed out', 'TimeoutError'));
@@ -428,10 +432,12 @@ export async function registerRawPassthroughRoutes(
             DEFAULT_STALL_CONFIG,
             abortController
           );
+          stallInspector.setProgressApiType(observedApiType);
           usageStorage.registerInFlight(
             requestId,
             stallInspector,
-            (request as any).keyName ?? null
+            (request as any).keyName ?? null,
+            usageRecord.isStreamed
           );
           // pipeline() (not .pipe()) so an upstream error destroys the inspector
           // too and the for-await below terminates instead of hanging.

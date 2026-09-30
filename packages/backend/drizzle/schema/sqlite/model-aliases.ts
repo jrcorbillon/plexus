@@ -11,8 +11,9 @@ export const modelAliases = sqliteTable('model_aliases', {
   metadataSource: text('metadata_source'), // 'openrouter' | 'models.dev' | 'catwalk' | 'custom'
   metadataSourcePath: text('metadata_source_path'),
   useImageFallthrough: integer('use_image_fallthrough').notNull().default(0),
-  // Model architecture override for inference energy calculation
-  modelArchitecture: text('model_architecture'), // JSON: override for total_params, active_params, layers, heads, kv_lora_rank, qk_rope_head_dim, context_length, dtype
+  // Deprecated / Unused: Legacy model architecture parameters for removed synthetic energy estimation.
+  // Retained in schema for database backwards compatibility without requiring migrations.
+  modelArchitecture: text('model_architecture'), // Deprecated / Unused: JSON override for transformer params
   enforceLimits: integer('enforce_limits').notNull().default(0),
   stickySession: integer('sticky_session').notNull().default(0),
   maxAttempts: integer('max_attempts').notNull().default(1),
@@ -22,6 +23,7 @@ export const modelAliases = sqliteTable('model_aliases', {
   targetGroups: text('target_groups'), // JSON: {name, selector}[]
   extraBody: text('extra_body'), // JSON: Record<string, any>
   generation: text('generation'), // JSON: { reasoning?, maxTokens?, verbosity?, serviceTier? }
+  syntheticSafeguardApproval: integer('synthetic_safeguard_approval').notNull().default(0),
   compaction: text('compaction'), // JSON: compaction config
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),

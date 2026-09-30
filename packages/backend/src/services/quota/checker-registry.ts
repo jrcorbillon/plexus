@@ -1,5 +1,12 @@
 import { z } from 'zod';
 import type { Meter, MeterStatus, Utilization, MeterKind } from '../../types/meter';
+import { getCurrentDialect, getDatabase, getSchema } from '../../db/client';
+import { eq } from 'drizzle-orm';
+import {
+  buildCustomCheckerHeaders,
+  createCustomCheckerFetch,
+  runCustomChecker,
+} from './custom-checker-runtime';
 
 // ── Context passed to each checker's check() method ─────────────────────────
 
@@ -9,11 +16,13 @@ export interface MeterContext {
   options: Record<string, unknown>;
   getOption<T>(key: string, defaultValue: T): T;
   requireOption<T>(key: string): T;
+  requestHeaders(): Record<string, string>;
+  fetch(input: string | URL, init?: RequestInit): Promise<Response>;
   balance(params: BalanceParams): Meter;
   allowance(params: AllowanceParams): Meter;
 }
 
-interface BalanceParams {
+export interface BalanceParams {
   key: string;
   label: string;
   unit: string;
@@ -25,7 +34,7 @@ interface BalanceParams {
   exhaustionThreshold?: number;
 }
 
-interface AllowanceParams {
+export interface AllowanceParams {
   key: string;
   label: string;
   unit: string;
@@ -47,17 +56,32 @@ export interface CheckerDefinition<TOptions extends z.ZodTypeAny = z.ZodTypeAny>
   type: string;
   displayName: string;
   optionsSchema: TOptions;
+  /** Display order for meter keys; unlisted meters follow in their stored order. */
+  meterOrder?: readonly string[];
   check(ctx: MeterContext): Promise<Meter[]>;
 }
 
 // ── In-process registry ───────────────────────────────────────────────────────
 
 const REGISTRY = new Map<string, CheckerDefinition>();
+const CUSTOM_CHECKER_TYPES = new Set<string>();
+
+export function registerCheckerDefinition(
+  def: CheckerDefinition,
+  source: 'builtin' | 'custom'
+): CheckerDefinition {
+  if (REGISTRY.has(def.type)) {
+    throw new Error(`Quota checker type '${def.type}' is already registered`);
+  }
+  REGISTRY.set(def.type, def);
+  if (source === 'custom') CUSTOM_CHECKER_TYPES.add(def.type);
+  return def;
+}
 
 export function defineChecker<TOptions extends z.ZodTypeAny>(
   def: CheckerDefinition<TOptions>
 ): CheckerDefinition<TOptions> {
-  REGISTRY.set(def.type, def as unknown as CheckerDefinition);
+  registerCheckerDefinition(def as unknown as CheckerDefinition, 'builtin');
   return def;
 }
 
@@ -75,6 +99,59 @@ export function getCheckerDefinition(type: string): CheckerDefinition | undefine
 
 export function isCheckerRegistered(type: string): boolean {
   return REGISTRY.has(type);
+}
+
+export function validateCheckerOptions(type: string, options: Record<string, unknown>) {
+  const definition = getCheckerDefinition(type);
+  if (!definition) {
+    return {
+      success: false as const,
+      error: new z.ZodError([
+        {
+          code: 'custom',
+          path: ['type'],
+          message: `Unknown quota checker type '${type}'`,
+        },
+      ]),
+    };
+  }
+  return definition.optionsSchema.safeParse(options);
+}
+
+export function isCustomCheckerRegistered(type: string): boolean {
+  return CUSTOM_CHECKER_TYPES.has(type);
+}
+
+function removeCustomCheckerDefinitions(): void {
+  for (const type of CUSTOM_CHECKER_TYPES) REGISTRY.delete(type);
+  CUSTOM_CHECKER_TYPES.clear();
+}
+
+export async function loadCustomCheckers(): Promise<void> {
+  removeCustomCheckerDefinitions();
+
+  const schema = getSchema();
+  const rows = await getDatabase()
+    .select()
+    .from(schema.customCheckers)
+    .where(eq(schema.customCheckers.enabled, getCurrentDialect() === 'sqlite' ? 1 : true));
+
+  for (const row of rows) {
+    const type = row.id.trim();
+    if (!type || REGISTRY.has(type)) {
+      throw new Error(`Custom quota checker type '${row.id}' collides with a registered checker`);
+    }
+
+    registerCheckerDefinition(
+      {
+        type,
+        displayName: row.displayName,
+        optionsSchema: z.record(z.string(), z.any()),
+        check: (ctx) => runCustomChecker(row.code, ctx),
+      },
+      'custom'
+    );
+  }
 }
 
 // ── Context factory ───────────────────────────────────────────────────────────
@@ -102,6 +179,17 @@ function deriveStatus(utilization: Utilization): MeterStatus {
   return 'ok';
 }
 
+/**
+ * A balance meter is exhausted when the remaining balance is at or below
+ * zero. Non-finite values (NaN/Infinity) are also treated as exhausted so
+ * callers gating on exhausted balances get a single consistent signal.
+ */
+function isBalanceExhausted(remaining: number | undefined): boolean {
+  if (remaining === undefined) return false;
+  if (!Number.isFinite(remaining)) return true;
+  return remaining <= 0;
+}
+
 export function createMeterContext(
   checkerId: string,
   provider: string,
@@ -124,13 +212,21 @@ export function createMeterContext(
       return value;
     },
 
+    requestHeaders(): Record<string, string> {
+      return buildCustomCheckerHeaders(options);
+    },
+
+    fetch: createCustomCheckerFetch(options),
+
     balance(params: BalanceParams): Meter {
-      const utilization: Utilization =
-        params.limit !== undefined && params.used !== undefined
-          ? deriveUtilization(params.used, params.limit, params.remaining)
+      const hasLimitAndUsed = params.limit !== undefined && params.used !== undefined;
+      const utilization: Utilization = hasLimitAndUsed
+        ? deriveUtilization(params.used, params.limit, params.remaining)
+        : isBalanceExhausted(params.remaining)
+          ? 100
           : 'not_applicable';
 
-      const status = deriveStatus(utilization);
+      const status = isBalanceExhausted(params.remaining) ? 'exhausted' : deriveStatus(utilization);
 
       return {
         key: params.key,
@@ -195,6 +291,7 @@ export async function loadAllCheckers(): Promise<void> {
   await import('./checkers/kilo-checker');
   await import('./checkers/openai-codex-checker');
   await import('./checkers/kimi-code-checker');
+  await import('./checkers/muse-code-checker');
   await import('./checkers/claude-code-checker');
   await import('./checkers/copilot-checker');
   await import('./checkers/wisdomgate-checker');
@@ -210,6 +307,8 @@ export async function loadAllCheckers(): Promise<void> {
   await import('./checkers/crof-checker');
   await import('./checkers/exedev-checker');
   await import('./checkers/hyper-checker');
+  await import('./checkers/deepseek-checker');
   await import('./checkers/sakana-checker');
   await import('./checkers/cline-checker');
+  await loadCustomCheckers();
 }

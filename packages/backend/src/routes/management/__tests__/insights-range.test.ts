@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  deriveBucketSizeMs,
-  parseInsightsQuery,
-  resolveCustomRange,
-} from '../insights-shared';
+import { deriveBucketSizeMs, parseInsightsQuery, resolveCustomRange } from '../insights-shared';
 
 describe('insights custom range', () => {
   it('resolveCustomRange returns meta with auto bucket size', () => {
@@ -38,10 +34,7 @@ describe('insights custom range', () => {
   });
 
   it('parseInsightsQuery rejects partial custom range', () => {
-    const parsed = parseInsightsQuery(
-      { provider: 'openai', startTime: '1000' },
-      'provider'
-    );
+    const parsed = parseInsightsQuery({ provider: 'openai', startTime: '1000' }, 'provider');
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.error.message).toContain('startTime and endTime');

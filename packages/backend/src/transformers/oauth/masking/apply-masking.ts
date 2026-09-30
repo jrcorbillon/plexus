@@ -22,16 +22,15 @@
  * module — this is just the composition):
  *
  *   1. `buildToolRenamePairs()` — compute renames: real-Claude-Code-name
- *      collisions with an incompatible shape (`cc-collision-shape.ts`), and
- *      MCP-server tools clustered into the `mcp__<server>__<tool>`
- *      convention (`mcp-shape.ts`).
+ *      collisions with an incompatible shape (`cc-collision-shape.ts`), then
+ *      any remaining name that is not a current real CC tool moved into the
+ *      `mcp__<server>__<tool>` namespace (`cc-namespace-shape.ts`).
  *   2. `applyToolRenames()` — apply those renames across `tools[]`,
  *      `tool_choice`, and any `tool_use` blocks in message history.
- *   3. `stripDescriptionsAndInjectSyntheticTools()` — strip caller tool
- *      descriptions (fingerprint parity); collision renames only keep an
- *      "INSTEAD OF" description note when the original CC tool name is still
- *      present in the final `tools[]`; prepend any synthetic Claude Code
- *      stubs from `CC_SYNTHETIC_TOOLS` (currently none — see that constant).
+ *   3. `stripDescriptionsAndInjectSyntheticTools()` — preserve caller tool
+ *      descriptions, except collision renames get a note appended instructing
+ *      the model to prefer them over the real CC tool of their original name;
+ *      prepend the synthetic Claude Code tool stubs.
  *   4. `dedupeSyntheticToolCollisions()` — defensive backstop for the rare
  *      case a computed rename collides with one of the synthetic names.
  *   5. `injectClaudeCodeIdentity()` — replace `system[]` with the genuine
@@ -77,6 +76,7 @@ export function applyClaudeCodeMasking(payloadStr: string): ClaudeCodeMaskingRes
   const toolDescriptors = (parsedPayload.tools ?? []).map((t: any) => ({
     name: t?.name,
     parameters: t?.input_schema,
+    type: t?.type,
   }));
   const toolRenamePairs = buildToolRenamePairs(toolDescriptors);
 

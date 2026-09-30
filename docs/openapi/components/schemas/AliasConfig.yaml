@@ -27,6 +27,7 @@ properties:
             - cost
             - latency
             - usage
+            - quota
             - performance
             - e2e_performance
           description: Selection strategy for this group.
@@ -148,6 +149,14 @@ properties:
     description: >
       Fixed wait in seconds before starting each subsequent retry round.
       No delay before the first round.
+  synthetic_safeguard_approval:
+    type: boolean
+    default: false
+    description: >
+      When enabled, translated (non-native Messages) responses for this alias
+      carry synthetic safeguard_results (evaluated/not_flagged with an
+      explanatory note) when the inbound Messages request asked via
+      safeguards. Opt-in: no real classifier runs.
   metadata:
     description: >
       Model metadata strategy. When omitted or set to `auto`, Plexus derives a
@@ -244,40 +253,6 @@ properties:
         additionalProperties: false
     discriminator:
       propertyName: source
-  model_architecture:
-    type: object
-    description: >
-      Model architecture details used for inference energy estimation.
-      When modified, triggers async recalculation of kWh for all affected
-      historical usage records.
-    properties:
-      total_params:
-        type: number
-        description: Total parameter count (billions).
-      active_params:
-        type: number
-        description: Active (non-MoE-gated) parameter count (billions).
-      layers:
-        type: integer
-      heads:
-        type: integer
-      kv_lora_rank:
-        type: integer
-      qk_rope_head_dim:
-        type: integer
-      context_length:
-        type: integer
-      dtype:
-        type: string
-        enum:
-          - fp16
-          - bf16
-          - fp8
-          - fp8_e4m3
-          - fp8_e5m2
-          - nvfp4
-          - int4
-          - int8
   input_price_per_million:
     type: number
     description: >

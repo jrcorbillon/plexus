@@ -3,19 +3,19 @@ import { UsageRecord } from '../../types/usage';
 import { getDatabase, getSchema } from '../../db/client';
 import { NewRequestUsage } from '../../db/types';
 import { EventEmitter } from 'node:events';
-import { eq, and, gte, lte, like, desc, asc, sql, getTableName } from 'drizzle-orm';
+import { eq, and, gte, lte, lt, like, desc, asc, sql, getTableName } from 'drizzle-orm';
 import { DebugLogRecord, DebugManager } from './debug-manager';
 import { getCurrentKeyName } from './request-context';
-import { estimateKwhUsed } from './inference-energy';
-import { resolveModelParams, DEFAULT_GPU_PARAMS } from '@plexus/shared';
-import type { ModelArchitecture, GpuParams } from '@plexus/shared';
 import type { StallInspector } from '../inspectors/stall-inspector';
 
 export interface ProgressUpdate {
   requestId: string;
   apiKey: string | null;
+  isStreamed: boolean;
   bytesReceived: number;
   bytesPerSec: number | null;
+  semanticBytesReceived: number;
+  semanticBytesPerSec: number | null;
   state: 'DISPATCHED' | 'GRACE_PERIOD' | 'MONITORING' | 'THROUGHPUT_STALLED';
   elapsedMs: number;
 }
@@ -61,18 +61,61 @@ export type UsageSortField =
 
 export type UsageSortDirection = 'asc' | 'desc';
 
+/**
+ * Default retention for observability and quota-history tables
+ * (`request_usage`, `debug_logs`, `inference_errors`, `mcp_request_usage`,
+ * `mcp_debug_logs`, `meter_snapshots`): rows older than this are pruned by
+ * the scheduled cleanup jobs. Overridden by the
+ * `PLEXUS_USAGE_RETENTION_DAYS` environment variable.
+ */
+export const DEFAULT_USAGE_RETENTION_DAYS = 365;
+
+/**
+ * Minimum retention that keeps monthly user-quota windows intact. Values
+ * below this still apply (operator's choice) but trigger a warning, because
+ * `QuotaEnforcer` recomputes usage from `request_usage` over windows up to
+ * ~31 days (monthly) or longer (rolling durations) — pruning inside an
+ * active window undercounts usage and over-grants quota.
+ */
+export const MIN_RECOMMENDED_RETENTION_DAYS = 31;
+
+export function getUsageRetentionDays(): number {
+  const envValue = process.env.PLEXUS_USAGE_RETENTION_DAYS;
+  const parsed = envValue ? parseInt(envValue, 10) : DEFAULT_USAGE_RETENTION_DAYS;
+
+  if (Number.isNaN(parsed) || parsed < 1) {
+    return DEFAULT_USAGE_RETENTION_DAYS;
+  }
+
+  if (parsed < MIN_RECOMMENDED_RETENTION_DAYS) {
+    logger.warn(
+      `PLEXUS_USAGE_RETENTION_DAYS=${parsed} is below the recommended minimum of ` +
+        `${MIN_RECOMMENDED_RETENTION_DAYS} days: user-quota recompute reads up to a monthly ` +
+        `window back from request_usage, so shorter retention can undercount usage and over-grant quota.`
+    );
+  }
+
+  return parsed;
+}
+
 export class UsageStorageService extends EventEmitter {
   private db: ReturnType<typeof getDatabase> | null = null;
   private schema: any = null;
   private readonly defaultPerformanceRetentionLimit = 100;
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   private telemetryQueue: Promise<void> = Promise.resolve();
   private inFlightRegistry = new Map<
     string,
-    { inspector: StallInspector; apiKey: string | null }
+    { inspector: StallInspector; apiKey: string | null; isStreamed: boolean }
   >();
 
-  registerInFlight(requestId: string, inspector: StallInspector, apiKey: string | null): void {
-    this.inFlightRegistry.set(requestId, { inspector, apiKey });
+  registerInFlight(
+    requestId: string,
+    inspector: StallInspector,
+    apiKey: string | null,
+    isStreamed = false
+  ): void {
+    this.inFlightRegistry.set(requestId, { inspector, apiKey, isStreamed });
   }
 
   deregisterInFlight(requestId: string): void {
@@ -81,10 +124,10 @@ export class UsageStorageService extends EventEmitter {
 
   getProgressUpdates(): ProgressUpdate[] {
     const updates: ProgressUpdate[] = [];
-    for (const [requestId, { inspector, apiKey }] of this.inFlightRegistry) {
+    for (const [requestId, { inspector, apiKey, isStreamed }] of this.inFlightRegistry) {
       try {
         const stats = inspector.getStats();
-        updates.push({ requestId, apiKey, ...stats });
+        updates.push({ requestId, apiKey, isStreamed, ...stats });
       } catch {
         // Inspector may have been destroyed; skip it
       }
@@ -106,6 +149,100 @@ export class UsageStorageService extends EventEmitter {
 
   getDb() {
     return this.ensureDb();
+  }
+
+  /**
+   * Start the scheduled retention job that prunes `request_usage`,
+   * `debug_logs`, and `inference_errors` rows older than `ttlDays`.
+   * Runs an initial sweep immediately, then repeats every `intervalHours`.
+   */
+  startCleanupJob(intervalHours: number = 24, ttlDays: number = getUsageRetentionDays()): void {
+    if (this.cleanupInterval) {
+      logger.warn('Usage retention cleanup job already running');
+      return;
+    }
+
+    // Run initial cleanup
+    this.cleanupOldRecords(ttlDays).catch((err) =>
+      logger.error('Initial usage retention cleanup failed:', err)
+    );
+
+    // Schedule periodic cleanup
+    this.cleanupInterval = setInterval(
+      async () => {
+        try {
+          const result = await this.cleanupOldRecords(ttlDays);
+          const total = result.deletedUsage + result.deletedDebugLogs + result.deletedErrors;
+          if (total > 0) {
+            logger.debug(
+              `Scheduled usage retention cleanup: deleted ${result.deletedUsage} usage logs, ` +
+                `${result.deletedDebugLogs} debug logs, ${result.deletedErrors} error logs`
+            );
+          }
+        } catch (err) {
+          logger.error('Scheduled usage retention cleanup failed:', err);
+        }
+      },
+      intervalHours * 60 * 60 * 1000
+    );
+
+    logger.debug(
+      `Usage retention cleanup job started (every ${intervalHours}h, TTL ${ttlDays} days)`
+    );
+  }
+
+  /**
+   * Stop the retention cleanup job.
+   */
+  stopCleanupJob(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+      logger.debug('Usage retention cleanup job stopped');
+    }
+  }
+
+  /**
+   * Delete `request_usage`, `debug_logs`, and `inference_errors` rows older
+   * than `ttlDays`. Returns per-table deletion counts.
+   */
+  async cleanupOldRecords(
+    ttlDays: number = getUsageRetentionDays()
+  ): Promise<{ deletedUsage: number; deletedDebugLogs: number; deletedErrors: number }> {
+    const cutoffMs = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
+    const cutoffIso = new Date(cutoffMs).toISOString();
+    const db = this.ensureDb();
+    const schema = this.schema!;
+
+    const countOlder = async (table: any, condition: any): Promise<number> => {
+      const rows = await db.select({ count: sql<number>`COUNT(*)` }).from(table).where(condition);
+      return Number(rows[0]?.count ?? 0);
+    };
+
+    const usageCondition = lte(schema.requestUsage.date, cutoffIso);
+    const debugCondition = lt(schema.debugLogs.createdAt, cutoffMs);
+    const errorCondition = lte(schema.inferenceErrors.date, cutoffIso);
+
+    const [usageCount, debugCount, errorCount] = await Promise.all([
+      countOlder(schema.requestUsage, usageCondition),
+      countOlder(schema.debugLogs, debugCondition),
+      countOlder(schema.inferenceErrors, errorCondition),
+    ]);
+
+    await Promise.all([
+      usageCount > 0 ? db.delete(schema.requestUsage).where(usageCondition) : null,
+      debugCount > 0 ? db.delete(schema.debugLogs).where(debugCondition) : null,
+      errorCount > 0 ? db.delete(schema.inferenceErrors).where(errorCondition) : null,
+    ]);
+
+    if (usageCount > 0 || debugCount > 0 || errorCount > 0) {
+      logger.debug(
+        `Usage retention cleanup: deleted ${usageCount} usage logs, ` +
+          `${debugCount} debug logs, ${errorCount} error logs older than ${ttlDays} days`
+      );
+    }
+
+    return { deletedUsage: usageCount, deletedDebugLogs: debugCount, deletedErrors: errorCount };
   }
 
   private getPerformanceRetentionLimit(): number {
@@ -218,6 +355,7 @@ export class UsageStorageService extends EventEmitter {
           canonicalModelName: record.canonicalModelName || null,
           selectedModelName: record.selectedModelName || null,
           outgoingApiType: record.outgoingApiType || null,
+          reasoningEffort: record.reasoningEffort || null,
           startTime: record.startTime || Date.now(),
           durationMs: null, // null indicates pending/in-flight
           responseStatus: 'pending',
@@ -246,12 +384,17 @@ export class UsageStorageService extends EventEmitter {
    */
   async emitUpdated(record: Partial<UsageRecord>): Promise<void> {
     // Update the pending record in DB if we have provider/model info
-    if (record.requestId && (record.provider || record.canonicalModelName)) {
+    if (
+      record.requestId &&
+      (record.provider || record.canonicalModelName || record.reasoningEffort !== undefined)
+    ) {
       try {
         const updateSet: Record<string, unknown> = {};
         if (record.provider) updateSet.provider = record.provider;
         if (record.canonicalModelName) updateSet.canonicalModelName = record.canonicalModelName;
         if (record.selectedModelName) updateSet.selectedModelName = record.selectedModelName;
+        if (record.reasoningEffort !== undefined)
+          updateSet.reasoningEffort = record.reasoningEffort;
         if (record.incomingModelAlias) updateSet.incomingModelAlias = record.incomingModelAlias;
         if (record.apiKey) updateSet.apiKey = record.apiKey;
         if (record.attribution !== undefined) updateSet.attribution = record.attribution;
@@ -374,7 +517,11 @@ export class UsageStorageService extends EventEmitter {
     }
   }
 
-  async getErrors(limit: number = 50, offset: number = 0, apiKey?: string): Promise<any[]> {
+  async getErrors(
+    limit: number = 50,
+    offset: number = 0,
+    apiKey?: string
+  ): Promise<{ data: any[]; total: number }> {
     try {
       const db = this.ensureDb();
       const where = apiKey ? eq(this.schema.inferenceErrors.apiKey, apiKey) : undefined;
@@ -384,11 +531,14 @@ export class UsageStorageService extends EventEmitter {
         .orderBy(desc(this.schema.inferenceErrors.createdAt))
         .limit(limit)
         .offset(offset);
-      const results = where ? await query.where(where) : await query;
-      return results;
+      const [data, countRows] = await Promise.all([
+        where ? query.where(where) : query,
+        db.select({ count: sql<number>`COUNT(*)` }).from(this.schema.inferenceErrors).where(where),
+      ]);
+      return { data, total: Number(countRows[0]?.count ?? 0) };
     } catch (error) {
       logger.error('Failed to get inference errors', error);
-      return [];
+      return { data: [], total: 0 };
     }
   }
 
@@ -447,10 +597,17 @@ export class UsageStorageService extends EventEmitter {
     }
   }
 
-  async deleteAllErrors(): Promise<boolean> {
+  async deleteAllErrors(beforeDate?: Date): Promise<boolean> {
     try {
-      await this.ensureDb().delete(this.schema.inferenceErrors);
-      logger.debug('Deleted all error logs');
+      if (beforeDate) {
+        await this.ensureDb()
+          .delete(this.schema.inferenceErrors)
+          .where(lte(this.schema.inferenceErrors.date, beforeDate.toISOString()));
+        logger.debug(`Deleted error logs older than ${beforeDate.toISOString()}`);
+      } else {
+        await this.ensureDb().delete(this.schema.inferenceErrors);
+        logger.debug('Deleted all error logs');
+      }
       return true;
     } catch (error) {
       logger.error('Failed to delete all error logs', error);
@@ -462,7 +619,10 @@ export class UsageStorageService extends EventEmitter {
     limit: number = 50,
     offset: number = 0,
     apiKey?: string
-  ): Promise<{ requestId: string; createdAt: number; responseStatus: number | null }[]> {
+  ): Promise<{
+    data: { requestId: string; createdAt: number; responseStatus: number | null }[];
+    total: number;
+  }> {
     try {
       const db = this.ensureDb();
       const where = apiKey ? eq(this.schema.debugLogs.apiKey, apiKey) : undefined;
@@ -476,16 +636,22 @@ export class UsageStorageService extends EventEmitter {
         .orderBy(desc(this.schema.debugLogs.createdAt))
         .limit(limit)
         .offset(offset);
-      const results = where ? await query.where(where) : await query;
+      const [results, countRows] = await Promise.all([
+        where ? query.where(where) : query,
+        db.select({ count: sql<number>`COUNT(*)` }).from(this.schema.debugLogs).where(where),
+      ]);
 
-      return results.map((row: any) => ({
-        requestId: row.requestId,
-        createdAt: row.createdAt,
-        responseStatus: row.responseStatus,
-      }));
+      return {
+        data: results.map((row: any) => ({
+          requestId: row.requestId,
+          createdAt: row.createdAt,
+          responseStatus: row.responseStatus,
+        })),
+        total: Number(countRows[0]?.count ?? 0),
+      };
     } catch (error) {
       logger.error('Failed to get debug logs', error);
-      return [];
+      return { data: [], total: 0 };
     }
   }
 
@@ -532,10 +698,17 @@ export class UsageStorageService extends EventEmitter {
     }
   }
 
-  async deleteAllDebugLogs(): Promise<boolean> {
+  async deleteAllDebugLogs(beforeDate?: Date): Promise<boolean> {
     try {
-      await this.ensureDb().delete(this.schema.debugLogs);
-      logger.debug('Deleted all debug logs');
+      if (beforeDate) {
+        await this.ensureDb()
+          .delete(this.schema.debugLogs)
+          .where(lt(this.schema.debugLogs.createdAt, beforeDate.getTime()));
+        logger.debug(`Deleted debug logs older than ${beforeDate.toISOString()}`);
+      } else {
+        await this.ensureDb().delete(this.schema.debugLogs);
+        logger.debug('Deleted all debug logs');
+      }
       return true;
     } catch (error) {
       logger.error('Failed to delete all debug logs', error);
@@ -632,8 +805,10 @@ export class UsageStorageService extends EventEmitter {
           selectedModelName: schema.requestUsage.selectedModelName,
           finalAttemptProvider: schema.requestUsage.finalAttemptProvider,
           finalAttemptModel: schema.requestUsage.finalAttemptModel,
+          upstreamModel: schema.requestUsage.upstreamModel,
           allAttemptedProviders: schema.requestUsage.allAttemptedProviders,
           outgoingApiType: schema.requestUsage.outgoingApiType,
+          reasoningEffort: schema.requestUsage.reasoningEffort,
           tokensInput: schema.requestUsage.tokensInput,
           tokensOutput: schema.requestUsage.tokensOutput,
           tokensReasoning: schema.requestUsage.tokensReasoning,
@@ -691,8 +866,10 @@ export class UsageStorageService extends EventEmitter {
         selectedModelName: row.selectedModelName,
         finalAttemptProvider: row.finalAttemptProvider,
         finalAttemptModel: row.finalAttemptModel,
+        upstreamModel: (row as any).upstreamModel ?? null,
         allAttemptedProviders: row.allAttemptedProviders,
         outgoingApiType: row.outgoingApiType,
+        reasoningEffort: row.reasoningEffort,
         tokensInput: row.tokensInput,
         tokensOutput: row.tokensOutput,
         tokensReasoning: row.tokensReasoning,
@@ -1037,91 +1214,6 @@ export class UsageStorageService extends EventEmitter {
     } catch (error) {
       logger.error('Failed to get provider performance', { provider, model, error });
       return [];
-    }
-  }
-
-  /**
-   * Recalculate energy usage for all requests associated with an alias.
-   * This is called when an alias's model_architecture is updated.
-   *
-   * @param aliasSlug - The alias slug to recalculate energy for
-   * @param modelArchitecture - The new model architecture parameters
-   * @param providerGpuParams - Optional map of provider -> resolved GpuParams
-   * @returns The number of records updated
-   */
-  async recalculateEnergyForAlias(
-    aliasSlug: string,
-    modelArchitecture: ModelArchitecture,
-    providerGpuParams?: Record<string, GpuParams>
-  ): Promise<number> {
-    try {
-      const db = this.ensureDb();
-      const BATCH_SIZE = 500;
-      let totalUpdated = 0;
-      let offset = 0;
-
-      logger.debug(`Recalculating energy for alias ${aliasSlug} (batched)`);
-
-      // Process in batches using limit+offset to avoid loading all rows into memory
-      while (true) {
-        const batch = await db
-          .select({
-            requestId: this.schema.requestUsage.requestId,
-            tokensInput: this.schema.requestUsage.tokensInput,
-            tokensOutput: this.schema.requestUsage.tokensOutput,
-            provider: this.schema.requestUsage.finalAttemptProvider,
-          })
-          .from(this.schema.requestUsage)
-          .where(eq(this.schema.requestUsage.incomingModelAlias, aliasSlug))
-          .limit(BATCH_SIZE)
-          .offset(offset);
-
-        if (batch.length === 0) break;
-
-        // Process this batch
-        await Promise.all(
-          batch.map(async (request: any) => {
-            const tokensInput = request.tokensInput || 0;
-            const tokensOutput = request.tokensOutput || 0;
-
-            if (tokensInput === 0 && tokensOutput === 0) {
-              return; // Skip requests with no tokens
-            }
-
-            // Get GPU params for this provider (use default H100 if not specified)
-            const gpuParams = providerGpuParams?.[request.provider || ''] ?? DEFAULT_GPU_PARAMS;
-
-            // Build model params from architecture using shared resolver
-            const modelParams = resolveModelParams(modelArchitecture);
-
-            // Calculate new energy
-            const kwhUsed = estimateKwhUsed(tokensInput, tokensOutput, modelParams, gpuParams);
-
-            // Update the record
-            await db
-              .update(this.schema.requestUsage)
-              .set({ kwhUsed })
-              .where(eq(this.schema.requestUsage.requestId, request.requestId));
-
-            totalUpdated++;
-          })
-        );
-
-        offset += BATCH_SIZE;
-
-        // If we got fewer than BATCH_SIZE rows, we've reached the end
-        if (batch.length < BATCH_SIZE) break;
-      }
-
-      if (totalUpdated === 0) {
-        logger.debug(`No requests found for alias ${aliasSlug}`);
-      } else {
-        logger.debug(`Recalculated energy for ${totalUpdated} requests for alias ${aliasSlug}`);
-      }
-      return totalUpdated;
-    } catch (error) {
-      logger.error(`Failed to recalculate energy for alias ${aliasSlug}`, error);
-      throw error;
     }
   }
 }

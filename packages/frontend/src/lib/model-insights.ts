@@ -137,7 +137,7 @@ const API_BASE = ''; // Proxied via server.ts
 export async function fetchModelInsights(
   model: string,
   selection: InsightsRangeSelection,
-  adminKey?: string,
+  adminKey?: string
 ): Promise<ModelInsightsResponse> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const key = adminKey ?? localStorage.getItem('plexus_admin_key') ?? '';
@@ -169,7 +169,7 @@ export async function fetchModelInsights(
     throw new Error(
       (body as Record<string, unknown>).error
         ? String((body as Record<string, unknown>).error)
-        : `Failed to fetch model insights (HTTP ${res.status})`,
+        : `Failed to fetch model insights (HTTP ${res.status})`
     );
   }
 

@@ -1,12 +1,6 @@
 import React, { useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import {
-  ArrowLeft,
-  BarChart3,
-  RefreshCw,
-  Activity,
-  AlertTriangle,
-} from 'lucide-react';
+import { ArrowLeft, BarChart3, RefreshCw, Activity, AlertTriangle } from 'lucide-react';
 import { PageHeader } from '../components/layout/PageHeader';
 import { PageContainer } from '../components/layout/PageContainer';
 import { Card } from '../components/ui/Card';
@@ -17,7 +11,11 @@ import {
   formatBucketLabel,
   InsightsTimeSeriesCharts,
 } from '../components/insights/insights-charts';
-import { HeroMetric, SectionMetric, LoadingSkeleton } from '../components/insights/insights-metrics';
+import {
+  HeroMetric,
+  SectionMetric,
+  LoadingSkeleton,
+} from '../components/insights/insights-metrics';
 import { useInsightsPage } from '../hooks/useInsightsPage';
 import { InsightsRangeControls } from '../components/insights/InsightsRangeControls';
 import {
@@ -90,11 +88,7 @@ export const ProviderInsights: React.FC = () => {
       dataForCurrentProvider.range.endTimeMs - dataForCurrentProvider.range.startTimeMs;
     return dataForCurrentProvider.series.map((bucket: ProviderInsightSeriesBucket) => ({
       bucketStartMs: bucket.bucketStartMs,
-      label: formatBucketLabel(
-        bucket.bucketStartMs,
-        dataForCurrentProvider.range.key,
-        rangeSpanMs
-      ),
+      label: formatBucketLabel(bucket.bucketStartMs, dataForCurrentProvider.range.key, rangeSpanMs),
       requests: bucket.metrics.requests,
       totalTokens: bucket.metrics.totalTokens,
       inputTokens: bucket.metrics.inputTokens,
@@ -154,8 +148,8 @@ export const ProviderInsights: React.FC = () => {
             <div className="flex flex-col items-center justify-center py-16 gap-4">
               <AlertTriangle size={32} className="text-warning opacity-60" />
               <div className="text-sm text-text-secondary text-center max-w-md">
-                <strong className="text-text">{decodedProviderId}</strong> is not currently configured
-                as a provider. It may have been removed or the URL may be incorrect.
+                <strong className="text-text">{decodedProviderId}</strong> is not currently
+                configured as a provider. It may have been removed or the URL may be incorrect.
               </div>
               <Link
                 to="/providers"
@@ -168,24 +162,26 @@ export const ProviderInsights: React.FC = () => {
           </Card>
         )}
 
-        {!isLoadingCurrentProvider && errorForCurrentProvider && isConfiguredForCurrentProvider === true && (
-          <Card className="mb-6">
-            <div className="flex flex-col items-center justify-center py-16 gap-4">
-              <Activity size={32} className="text-danger opacity-60" />
-              <div className="text-sm text-text-secondary text-center max-w-md">
-                {errorForCurrentProvider}
+        {!isLoadingCurrentProvider &&
+          errorForCurrentProvider &&
+          isConfiguredForCurrentProvider === true && (
+            <Card className="mb-6">
+              <div className="flex flex-col items-center justify-center py-16 gap-4">
+                <Activity size={32} className="text-danger opacity-60" />
+                <div className="text-sm text-text-secondary text-center max-w-md">
+                  {errorForCurrentProvider}
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  leftIcon={<RefreshCw size={14} />}
+                  onClick={handleRetry}
+                >
+                  Retry
+                </Button>
               </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                leftIcon={<RefreshCw size={14} />}
-                onClick={handleRetry}
-              >
-                Retry
-              </Button>
-            </div>
-          </Card>
-        )}
+            </Card>
+          )}
 
         {!isLoadingCurrentProvider &&
           !errorForCurrentProvider &&
@@ -195,8 +191,8 @@ export const ProviderInsights: React.FC = () => {
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <BarChart3 size={32} className="text-text-muted opacity-40" />
                 <div className="text-sm text-text-muted text-center">
-                  No usage data found for <strong className="text-text">{decodedProviderId}</strong> in
-                  the selected time range.
+                  No usage data found for <strong className="text-text">{decodedProviderId}</strong>{' '}
+                  in the selected time range.
                 </div>
                 <div className="text-xs text-text-muted">
                   Try selecting a different time range, or check back after this provider has been
@@ -232,34 +228,88 @@ export const ProviderInsights: React.FC = () => {
 
               <Card title="Performance" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Avg Latency" value={formatMs(dataForCurrentProvider.metrics.avgLatencyMs)} />
-                  <SectionMetric label="Avg TTFT" value={formatMs(dataForCurrentProvider.metrics.avgTtftMs)} />
-                  <SectionMetric label="Throughput" value={`${formatTPS(dataForCurrentProvider.metrics.avgThroughputTps)} tok/s`} />
-                  <SectionMetric label="E2E TPS" value={`${formatTPS(dataForCurrentProvider.metrics.avgE2eTps)} tok/s`} />
-                  <SectionMetric label="Cache Hit Rate" value={formatPercent(dataForCurrentProvider.metrics.cacheHitRate * 100)} />
+                  <SectionMetric
+                    label="Avg Latency"
+                    value={formatMs(dataForCurrentProvider.metrics.avgLatencyMs)}
+                  />
+                  <SectionMetric
+                    label="Avg TTFT"
+                    value={formatMs(dataForCurrentProvider.metrics.avgTtftMs)}
+                  />
+                  <SectionMetric
+                    label="Throughput"
+                    value={`${formatTPS(dataForCurrentProvider.metrics.avgThroughputTps)} tok/s`}
+                  />
+                  <SectionMetric
+                    label="E2E TPS"
+                    value={`${formatTPS(dataForCurrentProvider.metrics.avgE2eTps)} tok/s`}
+                  />
+                  <SectionMetric
+                    label="Cache Hit Rate"
+                    value={formatPercent(dataForCurrentProvider.metrics.cacheHitRate * 100)}
+                  />
                 </div>
               </Card>
 
               <Card title="Tokens" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Total" value={formatInteger(dataForCurrentProvider.metrics.totalTokens)} />
-                  <SectionMetric label="Input" value={formatInteger(dataForCurrentProvider.metrics.inputTokens)} />
-                  <SectionMetric label="Output" value={formatInteger(dataForCurrentProvider.metrics.outputTokens)} />
-                  <SectionMetric label="Reasoning" value={formatInteger(dataForCurrentProvider.metrics.reasoningTokens)} />
-                  <SectionMetric label="Cached" value={formatInteger(dataForCurrentProvider.metrics.cachedTokens)} />
-                  <SectionMetric label="Cache Write" value={formatInteger(dataForCurrentProvider.metrics.cacheWriteTokens)} />
+                  <SectionMetric
+                    label="Total"
+                    value={formatInteger(dataForCurrentProvider.metrics.totalTokens)}
+                  />
+                  <SectionMetric
+                    label="Input"
+                    value={formatInteger(dataForCurrentProvider.metrics.inputTokens)}
+                  />
+                  <SectionMetric
+                    label="Output"
+                    value={formatInteger(dataForCurrentProvider.metrics.outputTokens)}
+                  />
+                  <SectionMetric
+                    label="Reasoning"
+                    value={formatInteger(dataForCurrentProvider.metrics.reasoningTokens)}
+                  />
+                  <SectionMetric
+                    label="Cached"
+                    value={formatInteger(dataForCurrentProvider.metrics.cachedTokens)}
+                  />
+                  <SectionMetric
+                    label="Cache Write"
+                    value={formatInteger(dataForCurrentProvider.metrics.cacheWriteTokens)}
+                  />
                 </div>
               </Card>
 
               <Card title="Cost Details" className="mb-6" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Cost per Request" value={formatCost(dataForCurrentProvider.metrics.costPerRequest)} />
-                  <SectionMetric label="Cost per 1M Tokens" value={formatCost(dataForCurrentProvider.metrics.costPerMillionTokens)} />
-                  <SectionMetric label="Provider-Reported Cost" value={formatCost(dataForCurrentProvider.metrics.providerReportedCost)} />
-                  <SectionMetric label="Calculated Cost" value={formatCost(dataForCurrentProvider.metrics.calculatedCost)} />
-                  <SectionMetric label="Failover Requests" value={formatInteger(dataForCurrentProvider.metrics.failoverRequests)} />
-                  <SectionMetric label="Streamed Requests" value={formatNumber(dataForCurrentProvider.metrics.streamedRequests, 0)} />
-                  <SectionMetric label="Non-Streamed" value={formatNumber(dataForCurrentProvider.metrics.nonStreamedRequests, 0)} />
+                  <SectionMetric
+                    label="Cost per Request"
+                    value={formatCost(dataForCurrentProvider.metrics.costPerRequest)}
+                  />
+                  <SectionMetric
+                    label="Cost per 1M Tokens"
+                    value={formatCost(dataForCurrentProvider.metrics.costPerMillionTokens)}
+                  />
+                  <SectionMetric
+                    label="Provider-Reported Cost"
+                    value={formatCost(dataForCurrentProvider.metrics.providerReportedCost)}
+                  />
+                  <SectionMetric
+                    label="Calculated Cost"
+                    value={formatCost(dataForCurrentProvider.metrics.calculatedCost)}
+                  />
+                  <SectionMetric
+                    label="Failover Requests"
+                    value={formatInteger(dataForCurrentProvider.metrics.failoverRequests)}
+                  />
+                  <SectionMetric
+                    label="Streamed Requests"
+                    value={formatNumber(dataForCurrentProvider.metrics.streamedRequests, 0)}
+                  />
+                  <SectionMetric
+                    label="Non-Streamed"
+                    value={formatNumber(dataForCurrentProvider.metrics.nonStreamedRequests, 0)}
+                  />
                 </div>
               </Card>
 

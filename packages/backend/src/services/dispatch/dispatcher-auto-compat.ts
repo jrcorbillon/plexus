@@ -1,3 +1,4 @@
+import type { PiAiQuirks } from '@plexus/shared';
 import type { UnifiedChatRequest } from '../../types/unified';
 import { logger } from '../../utils/logger';
 import type { RouteResult } from '../routing/router';
@@ -5,29 +6,37 @@ import { buildGenerationOptions, resolvePiAiModel } from '../pi-ai/registry';
 import type { GenerationIntent } from '../pi-ai/generation';
 import { normalizeVerbosity } from '../pi-ai/generation';
 import type { ReasoningIntent, ReasoningVisibility } from '../pi-ai/reasoning';
-import { normalizeEffort, normalizeVisibility } from '../pi-ai/reasoning';
+import { clampEffortToWindow, normalizeEffort, normalizeVisibility } from '../pi-ai/reasoning';
+import { projectReasoningForResponses } from '../../transformers/utils';
+import { clampAnthropicEffortAndThinking } from '../../transformers/anthropic/thinking-clamp';
+import { getApiBaseType } from '../../utils/api-format';
 
 function hasOwn(value: Record<string, any>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 /**
- * Detects Codex CLI Responses API extensions (namespace tools, custom/freeform
- * tools, and their corresponding input items) that most Responses-API-compatible
- * upstream providers don't understand. When present, the raw body cannot be
- * forwarded as-is (pass-through) — it must go through ResponsesTransformer's
- * namespace-flattening/custom-tool-normalization so the upstream provider only
- * ever sees plain function tools.
+ * Detects Codex CLI Responses API extensions (namespace tools and their
+ * corresponding input items) that most Responses-API-compatible upstream
+ * providers don't understand. When present, the raw body cannot be forwarded
+ * as-is (pass-through) — it must go through ResponsesTransformer's
+ * namespace-flattening so the upstream provider only ever sees plain function
+ * tools.
+ *
+ * NOTE: a bare `type: 'custom'` tool declaration is deliberately NOT treated
+ * as a Codex-only extension — `custom` (freeform/grammar) tools are a plain
+ * OpenAI Responses API tool type that real OpenAI (and any spec-compliant
+ * Responses provider) understands natively. Only `custom_tool_call`/
+ * `custom_tool_call_output` items in the conversation history (checked below)
+ * are a genuine Codex-CLI-shaped signal, since those items only ever exist if
+ * a prior turn already invoked a custom tool through the pi-ai/Codex-CLI IR.
  */
 export function hasCodexResponsesExtensions(body: any): boolean {
   if (!body || typeof body !== 'object') {
     return false;
   }
 
-  if (
-    Array.isArray(body.tools) &&
-    body.tools.some((t: any) => t?.type === 'namespace' || t?.type === 'custom')
-  ) {
+  if (Array.isArray(body.tools) && body.tools.some((t: any) => t?.type === 'namespace')) {
     return true;
   }
 
@@ -61,6 +70,7 @@ function normalizeReasoningFromUnified(
     ...(effort && effort !== 'off' ? { effort } : {}),
     ...(reasoning?.max_tokens != null ? { budgetTokens: reasoning.max_tokens } : {}),
     ...(enabled !== undefined ? { enabled } : {}),
+    ...(reasoning?.adaptive ? { adaptive: true } : {}),
     ...(visibility ? { visibility } : {}),
     ...(reasoning?.summary ? { summaryDetail: reasoning.summary } : {}),
     source: 'client',
@@ -172,6 +182,7 @@ function shouldDropTemperature(intent: GenerationIntent, options: Record<string,
 
 function projectOpenAiCompletionsAutoCompat(
   payload: Record<string, any>,
+  request: UnifiedChatRequest,
   model: any,
   intent: GenerationIntent,
   options: Record<string, any>
@@ -200,14 +211,35 @@ function projectOpenAiCompletionsAutoCompat(
 
   const mapped = mappedThinkingValue(model, reasoningEffort);
   const off = mappedOffValue(model);
+  // A client-side `reasoning` object is the AUTHORITATIVE intent source
+  // (extractReasoningIntent checks it before reasoning_effort), so when it is
+  // present a leftover reasoning_effort may contradict the intent we are about
+  // to translate — count it as stale no matter what the branch writes. Mirror
+  // the extractor's nullish fallback to request.reasoning; malformed non-object
+  // values remain ignored and must not make the effort look stale.
+  const resolvedReasoning = next.reasoning ?? request.reasoning;
+  const hadReasoningObject =
+    resolvedReasoning != null &&
+    typeof resolvedReasoning === 'object' &&
+    !Array.isArray(resolvedReasoning);
 
+  // The switch below translated the client's reasoning intent into the
+  // target provider's dialect. Each case also DELETEs the OpenAI-style
+  // spellings the dialect does not consume (`reasoning` object and/or
+  // top-level `reasoning_effort`) so a strict upstream (the Meta Model API
+  // hard-400s on unknown fields) never receives the leftover untranslated
+  // notation alongside the translated one.
   switch (compat.thinkingFormat) {
     case 'zai':
       next.thinking = enabled ? { type: 'enabled', clear_thinking: false } : { type: 'disabled' };
+      delete next.reasoning;
+      delete next.reasoning_effort;
       if (enabled && compat.supportsReasoningEffort && mapped) next.reasoning_effort = mapped;
       break;
     case 'qwen':
       next.enable_thinking = enabled;
+      delete next.reasoning;
+      delete next.reasoning_effort;
       break;
     case 'qwen-chat-template':
       next.chat_template_kwargs = {
@@ -215,35 +247,63 @@ function projectOpenAiCompletionsAutoCompat(
         enable_thinking: enabled,
         preserve_thinking: true,
       };
+      delete next.reasoning;
+      delete next.reasoning_effort;
       break;
     case 'chat-template':
       next.chat_template_kwargs = {
         ...(next.chat_template_kwargs ?? {}),
         ...resolveChatTemplateKwargs(model, options),
       };
+      delete next.reasoning;
+      delete next.reasoning_effort;
       break;
     case 'deepseek':
       next.thinking = enabled ? { type: 'enabled' } : { type: 'disabled' };
+      delete next.reasoning;
+      delete next.reasoning_effort;
       if (enabled && compat.supportsReasoningEffort && mapped) next.reasoning_effort = mapped;
       break;
     case 'openrouter':
+      // Overwrites `reasoning` wholesale; stale top-level `reasoning_effort`
+      // is removed so OpenRouter's dialect is the single source of intent.
       next.reasoning = enabled ? { effort: mapped } : { effort: off ?? 'none' };
+      delete next.reasoning_effort;
       break;
     case 'ant-ling':
+      // Ant-ling can only express ENABLE with a mapped effort — when the
+      // intent is disable (or unexpressible) the only safe translation is to
+      // drop the unified notation entirely rather than leak it upstream.
+      // (mirrors pi-ai's ant-ling branch, which writes from scratch)
+      delete next.reasoning;
+      delete next.reasoning_effort;
       if (enabled && mapped) next.reasoning = { effort: mapped };
       break;
     case 'together':
+      // Together natively consumes BOTH notations — nothing to strip.
       next.reasoning = { enabled };
       if (enabled && compat.supportsReasoningEffort && mapped) next.reasoning_effort = mapped;
       break;
     case 'string-thinking':
       next.thinking = enabled ? mapped : (off ?? 'none');
+      delete next.reasoning;
+      delete next.reasoning_effort;
       break;
     default:
+      delete next.reasoning;
       if (enabled && compat.supportsReasoningEffort && mapped) {
         next.reasoning_effort = mapped;
       } else if (!enabled && compat.supportsReasoningEffort && off) {
         next.reasoning_effort = off;
+      } else if (compat.supportsReasoningEffort === false || hadReasoningObject) {
+        // Strip when the dialect provably lacks support, or when a translated
+        // reasoning object was the authoritative intent (a surviving
+        // reasoning_effort could contradict it).
+        // When support is merely UNKNOWN and no reasoning object was deleted,
+        // reasoning_effort was itself the intent source — pass it through:
+        // this branch IS the native OpenAI dialect, where the field stands a
+        // good chance of working.
+        delete next.reasoning_effort;
       }
       break;
   }
@@ -290,17 +350,18 @@ function projectResponsesAutoCompat(
   if (options.textVerbosity !== undefined) {
     next.text = { ...(next.text ?? {}), verbosity: options.textVerbosity };
   }
+  const existingReasoning = projectReasoningForResponses(next.reasoning);
   if (options.reasoningEffort || options.reasoningSummary) {
     next.reasoning = {
-      ...(next.reasoning ?? {}),
+      ...(existingReasoning ?? {}),
       effort: mappedThinkingValue(model, options.reasoningEffort) ?? 'medium',
-      summary: options.reasoningSummary ?? next.reasoning?.summary ?? 'auto',
+      summary: options.reasoningSummary ?? existingReasoning?.summary ?? 'auto',
     };
     next.include = Array.from(
       new Set([...(Array.isArray(next.include) ? next.include : []), 'reasoning.encrypted_content'])
     );
   } else if (options.reasoning === 'off') {
-    next.reasoning = { ...(next.reasoning ?? {}), effort: mappedOffValue(model) ?? 'none' };
+    next.reasoning = { ...(existingReasoning ?? {}), effort: mappedOffValue(model) ?? 'none' };
   }
   return next;
 }
@@ -309,7 +370,8 @@ function projectAnthropicAutoCompat(
   payload: Record<string, any>,
   model: any,
   intent: GenerationIntent,
-  options: Record<string, any>
+  options: Record<string, any>,
+  inline = false
 ): Record<string, any> {
   const next = { ...payload };
   if (options.maxTokens != null) next.max_tokens = options.maxTokens;
@@ -321,7 +383,8 @@ function projectAnthropicAutoCompat(
     if (model.compat?.forceAdaptiveThinking === true) {
       next.thinking = { type: 'adaptive', display };
       if (options.effort) {
-        next.output_config = { ...(next.output_config ?? {}), effort: options.effort };
+        const clampedEffort = clampEffortToWindow(options.effort, 'low', 'max');
+        next.output_config = { ...(next.output_config ?? {}), effort: clampedEffort };
       }
     } else {
       next.thinking = {
@@ -332,9 +395,13 @@ function projectAnthropicAutoCompat(
     }
   } else if (options.thinkingEnabled === false) {
     next.thinking = { type: 'disabled' };
+    if (next.output_config?.effort) {
+      delete next.output_config.effort;
+      if (Object.keys(next.output_config).length === 0) delete next.output_config;
+    }
   }
 
-  return next;
+  return inline ? next : clampAnthropicEffortAndThinking(next, model.id);
 }
 
 function projectGeminiAutoCompat(
@@ -362,6 +429,49 @@ function projectGeminiAutoCompat(
   return next;
 }
 
+type InlineQuirk = NonNullable<PiAiQuirks[keyof PiAiQuirks]>;
+
+/** Resolve only declared traits; a model map replaces the common map, not its entries. */
+export function resolveInlineQuirks(
+  quirks: PiAiQuirks | undefined,
+  targetApiType: string,
+  modelId: string
+): Omit<InlineQuirk, 'models'> | undefined {
+  const common = quirks?.[getApiBaseType(targetApiType) as keyof PiAiQuirks];
+  if (!common) return undefined;
+  const { models, ...traits } = common;
+  const model = models?.[modelId];
+  if (!model) return traits;
+  const merged = { ...traits, ...model, compat: { ...traits.compat, ...model.compat } };
+  if (model.reasoning === false) delete merged.thinkingLevelMap;
+  return merged;
+}
+
+function selectInlineGenerationIntent(
+  traits: Omit<InlineQuirk, 'models'>,
+  intent: GenerationIntent
+): GenerationIntent {
+  const canMapReasoning =
+    traits.reasoning === true &&
+    traits.thinkingLevelMap !== undefined &&
+    (traits.api !== 'openai-completions' ||
+      traits.compat?.thinkingFormat !== undefined ||
+      traits.compat?.supportsReasoningEffort !== undefined);
+  const explicitOff = intent.reasoning.enabled === false;
+  const mapOff = traits.thinkingLevelMap && Object.hasOwn(traits.thinkingLevelMap, 'off');
+  return {
+    reasoning:
+      canMapReasoning && (!explicitOff || mapOff) ? intent.reasoning : { source: 'client' },
+    ...((traits.maxTokens !== undefined || traits.compat?.maxTokensField !== undefined) &&
+    intent.maxTokens !== undefined
+      ? { maxTokens: intent.maxTokens }
+      : {}),
+    ...(traits.compat?.supportsTemperature !== undefined && intent.temperature !== undefined
+      ? { temperature: intent.temperature }
+      : {}),
+  };
+}
+
 export function applyRegistryAutoCompat(
   providerPayload: any,
   request: UnifiedChatRequest,
@@ -373,9 +483,21 @@ export function applyRegistryAutoCompat(
 
   const piAiProvider = route.config.pi_ai_provider;
   const piAiModelId = route.modelConfig?.pi_ai_model_id;
-  if (!piAiProvider || !piAiModelId) return providerPayload;
+  const inline = !piAiProvider
+    ? resolveInlineQuirks(route.config.pi_ai_quirks, targetApiType, route.model)
+    : undefined;
+  if (!inline && (!piAiProvider || !piAiModelId)) return providerPayload;
 
-  const piAiModel = resolvePiAiModel(piAiProvider, piAiModelId);
+  const piAiModel = inline
+    ? {
+        id: route.model,
+        api: inline.api,
+        reasoning: inline.reasoning === true && inline.thinkingLevelMap !== undefined,
+        thinkingLevelMap: inline.thinkingLevelMap ?? {},
+        maxTokens: inline.maxTokens,
+        compat: inline.compat ?? {},
+      }
+    : resolvePiAiModel(piAiProvider!, piAiModelId!);
   if (!piAiModel) {
     logger.debug(
       `Registry auto-compat skipped: ${route.provider}/${route.model} references unresolved ` +
@@ -385,8 +507,13 @@ export function applyRegistryAutoCompat(
   }
 
   const intent = extractGenerationIntent(providerPayload, request);
-  const options = buildGenerationOptions(piAiModel, intent);
-
+  const selectedIntent = inline ? selectInlineGenerationIntent(inline, intent) : intent;
+  const options = buildGenerationOptions(piAiModel, selectedIntent);
+  // An inline API declaration alone carries no model capabilities. Leave the
+  // payload untouched unless a declared trait actually requests a projection.
+  if (inline && Object.keys(options).length === 0 && inline.compat?.supportsTemperature !== false) {
+    return providerPayload;
+  }
   const api = (piAiModel.api as string | undefined) ?? targetApiType;
   let nextPayload: any;
   if (
@@ -394,18 +521,29 @@ export function applyRegistryAutoCompat(
     api === 'openai-codex-responses' ||
     api === 'azure-openai-responses'
   ) {
-    nextPayload = projectResponsesAutoCompat(providerPayload, piAiModel, intent, options);
+    nextPayload = projectResponsesAutoCompat(providerPayload, piAiModel, selectedIntent, options);
   } else if (api === 'anthropic-messages') {
-    nextPayload = projectAnthropicAutoCompat(providerPayload, piAiModel, intent, options);
+    nextPayload = projectAnthropicAutoCompat(
+      providerPayload,
+      piAiModel,
+      selectedIntent,
+      options,
+      !!inline
+    );
   } else if (api === 'google-generative-ai' || api === 'google-generative-ai-vertex') {
-    nextPayload = projectGeminiAutoCompat(providerPayload, intent, options);
+    nextPayload = projectGeminiAutoCompat(providerPayload, selectedIntent, options);
   } else {
-    nextPayload = projectOpenAiCompletionsAutoCompat(providerPayload, piAiModel, intent, options);
+    nextPayload = projectOpenAiCompletionsAutoCompat(
+      providerPayload,
+      request,
+      piAiModel,
+      selectedIntent,
+      options
+    );
   }
 
   logger.debug(`Registry auto-compat applied for ${route.provider}/${route.model}`, {
-    piAiProvider,
-    piAiModelId,
+    ...(inline ? { inline: true } : { piAiProvider, piAiModelId }),
     api,
     optionKeys: Object.keys(options),
   });
@@ -421,22 +559,24 @@ export function applyRegistryAutoCompat(
 // whole request (e.g. OpenAI-compatible Responses API providers reject a
 // client-sent `safety_identifier` or `prompt_cache_key` with
 // `{"detail":"Unsupported parameter: safety_identifier"}` or
-// `{"error":{"message":"Unsupported parameter: 'foo'"}}`). Failing over to the
+// `{"error":{"message":"Unknown parameter: 'foo'"}}`). Failing over to the
 // next configured target doesn't help when the *client* sent the offending
 // field — every target would reject it the same way. Instead, the dispatch
 // loop (see standard-attempt-request.ts) strips the named field from the
 // outbound payload and retries the SAME target.
 
 /**
- * Matches both `{"detail":"Unsupported parameter: X"}` and
- * `{"error":{"message":"Unsupported parameter: 'X'"}}` shapes. The captured
- * group also matches dotted paths (e.g. `reasoning.summary`) and
- * bracket-notation paths (e.g. `messages[0].name`), since providers name
- * nested fields both ways. A capture that stopped at `[` would truncate
- * `messages[0].name` to `messages` — and the paired delete would then remove
- * the ENTIRE conversation from the retry payload.
+ * Matches `{"detail":"Unsupported parameter: X"}`, `{"error":{"message":
+ * "Unknown parameter: 'X'"}}`, and backtick-quoted shapes (e.g. the Meta
+ * Model API's `unknown parameter \`reasoning\``). The captured group also
+ * matches dotted paths (e.g. `reasoning.summary`) and bracket-notation paths
+ * (e.g. `messages[0].name`), since providers name nested fields both ways. A
+ * capture that stopped at `[` would truncate `messages[0].name` to `messages`
+ * — and the paired delete would then remove the ENTIRE conversation from the
+ * retry payload.
  */
-const UNSUPPORTED_PARAMETER_PATTERN = /unsupported parameter[:\s]+['"]?([\w.[\]]+)['"]?/i;
+const UNSUPPORTED_PARAMETER_PATTERN =
+  /(?:unsupported|unknown) parameter[:\s]+['"`]?([\w.[\]]+)['"`]?/i;
 
 /**
  * Canonicalizes bracket-notation segments to dotted form
@@ -927,4 +1067,327 @@ export function planThinkingSignatureStrip(
  */
 export function refundThinkingSignatureStrip(state: ThinkingSignatureStripState): void {
   if (state.attempts > 0) state.attempts--;
+}
+
+// ---------------------------------------------------------------------------
+// Reactive auto-compat: strip-and-retry on account-bound Anthropic advisor
+// server-tool result content
+// ---------------------------------------------------------------------------
+//
+// The `advisor` server-side tool (beta `advisor-tool-2026-03-01`) returns its
+// result as an account/session-bound ENCRYPTED blob echoed back on every later
+// turn, paired with the assistant's `server_tool_use` invocation:
+//   { "type": "server_tool_use", "id": "srvtoolu_…", "name": "advisor", … }
+//   { "type": "advisor_tool_result", "tool_use_id": "srvtoolu_…",
+//     "content": { "type": "advisor_redacted_result", "encrypted_content": "…" } }
+// This is the same signed-blob mechanism as `redacted_thinking`: sealed under
+// the specific Claude account that produced it. When alias-level failover
+// replays that conversation against a DIFFERENT account (e.g. the sticky
+// account 529s and dispatch falls over to a sibling in the same pool),
+// Anthropic can't decrypt a blob sealed by another account and 400s:
+//   {"type":"error","error":{"type":"invalid_request_error",
+//    "message":"Advisor tool result content could not be processed."}}
+// Every remaining account in the pool rejects it the same way, so failing over
+// doesn't help. Strip the advisor exchange (the sealed result plus its paired
+// `server_tool_use` invocation, so the invocation isn't left unresolved) and
+// retry the SAME target once.
+
+/**
+ * Matches Anthropic's advisor sealed-result-rejection 400, e.g.
+ * `Advisor tool result content could not be processed.`. The wording names
+ * the advisor result generically (not a specific message index), so a plain
+ * substring/case-insensitive match is sufficient and won't misfire on
+ * unrelated 400s.
+ */
+const ADVISOR_RESULT_ERROR_PATTERN = /advisor tool result content could not be processed/i;
+
+/**
+ * True when an upstream error response body names an advisor result that
+ * could not be processed (an account-bound blob replayed against the wrong
+ * account).
+ */
+export function matchAdvisorResultError(responseBody: string): boolean {
+  if (!responseBody) return false;
+  return ADVISOR_RESULT_ERROR_PATTERN.test(responseBody);
+}
+
+function isAdvisorResultBlock(block: any): boolean {
+  return !!block && typeof block === 'object' && block.type === 'advisor_tool_result';
+}
+
+function isAdvisorInvocationBlock(block: any, sealedIds: Set<string>): boolean {
+  return (
+    !!block &&
+    typeof block === 'object' &&
+    (block.type === 'server_tool_use' || block.type === 'advisor_tool_use') &&
+    typeof block.id === 'string' &&
+    sealedIds.has(block.id)
+  );
+}
+
+// A fresh array/object per call (see reasoningElidedPlaceholder) so multiple
+// emptied advisor messages in one payload never alias the same mutable array.
+function advisorElidedPlaceholder(): Array<{ type: 'text'; text: string }> {
+  return [{ type: 'text', text: '[advisor result elided]' }];
+}
+
+export interface AdvisorResultStripResult {
+  /**
+   * The payload with every `advisor_tool_result` block — and the paired
+   * `server_tool_use`/`advisor_tool_use` invocation that produced it, matched
+   * by `tool_use_id` → `id` — removed. Copy-on-write when `strippedCount` > 0
+   * (identical semantics to `ThinkingSignatureStripResult`): the root and its
+   * `messages` array are shallow-cloned, each changed message is shallow-cloned,
+   * and untouched messages are shared by reference; the input payload is never
+   * mutated. Identical to the input `payload` reference when `strippedCount`
+   * is 0.
+   */
+  payload: Record<string, any>;
+  /**
+   * Number of `advisor_tool_result` blocks actually removed (0 when the
+   * payload isn't Anthropic-messages-shaped or carried no advisor result).
+   * Callers MUST treat 0 as "nothing changed" and skip the retry — the
+   * structural `isAnthropicMessagesPayload` gate also matches OpenAI
+   * chat-completions payloads, which never carry advisor blocks, so a 0-strip
+   * retry would resend a byte-identical request.
+   */
+  strippedCount: number;
+}
+
+/**
+ * Removes every `advisor_tool_result` block, plus its paired
+ * `server_tool_use`/`advisor_tool_use` invocation (matched by
+ * `tool_use_id` → `id`, across all messages so placement in the same or a
+ * separate message both work), copy-on-write. Emptied-content handling mirrors
+ * `stripThinkingSignatureBlocks`: when a message's `content` becomes empty the
+ * message is dropped UNLESS doing so would break user/assistant alternation or
+ * orphan a following `tool_result`, in which case an `[advisor result elided]`
+ * text placeholder is substituted so the conversation shape stays valid.
+ */
+export function stripAdvisorResultBlocks(payload: Record<string, any>): AdvisorResultStripResult {
+  if (!isAnthropicMessagesPayload(payload)) return { payload, strippedCount: 0 };
+
+  // Pass 1: collect the ids of every sealed advisor result so we can also
+  // drop the paired invocation and never leave a `server_tool_use` unresolved.
+  const sealedIds = new Set<string>();
+  for (const message of payload.messages) {
+    if (!message || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (isAdvisorResultBlock(block) && typeof block.tool_use_id === 'string') {
+        sealedIds.add(block.tool_use_id);
+      }
+    }
+  }
+
+  let strippedCount = 0;
+  const perMessage: Array<{
+    message: any;
+    content: any;
+    isArrayContent: boolean;
+    changed: boolean;
+  }> = payload.messages.map((message: any) => {
+    if (!message || !Array.isArray(message.content)) {
+      return { message, content: message?.content, isArrayContent: false, changed: false };
+    }
+    const kept = message.content.filter((block: any) => {
+      if (isAdvisorResultBlock(block)) {
+        strippedCount++;
+        return false;
+      }
+      if (isAdvisorInvocationBlock(block, sealedIds)) {
+        return false;
+      }
+      return true;
+    });
+    return {
+      message,
+      content: kept,
+      isArrayContent: true,
+      changed: kept.length !== message.content.length,
+    };
+  });
+
+  if (strippedCount === 0) return { payload, strippedCount: 0 };
+
+  const result: any[] = [];
+  for (let i = 0; i < perMessage.length; i++) {
+    const { message, content, isArrayContent, changed } = perMessage[i]!;
+
+    if (!isArrayContent || content.length > 0) {
+      result.push(changed ? { ...message, content } : message);
+      continue;
+    }
+
+    // Content became empty after stripping — decide drop vs. placeholder,
+    // identically to stripThinkingSignatureBlocks.
+    const prevMessage = result[result.length - 1];
+    const nextMessage = perMessage[i + 1]?.message;
+
+    const wouldBreakAlternation =
+      !!prevMessage && !!nextMessage && prevMessage.role === nextMessage.role;
+    const nextHasToolResult = contentHasBlockType(nextMessage?.content, 'tool_result');
+    const prevHasToolUse = contentHasBlockType(prevMessage?.content, 'tool_use');
+    const wouldOrphanToolResult = nextHasToolResult && !prevHasToolUse;
+
+    if (wouldBreakAlternation || wouldOrphanToolResult) {
+      result.push({ ...message, content: advisorElidedPlaceholder() });
+    }
+    // else: drop — push nothing for this message.
+  }
+
+  return { payload: { ...payload, messages: result }, strippedCount };
+}
+
+/** Per-target, per-request bound: at most one advisor-result-strip-and-retry cycle. */
+export const MAX_ADVISOR_RESULT_STRIP_RETRIES = 1;
+
+/** Tracks advisor-result-strip-and-retry progress for a single target within one request. */
+export interface AdvisorResultStripState {
+  attempts: number;
+}
+
+export function createAdvisorResultStripState(): AdvisorResultStripState {
+  return { attempts: 0 };
+}
+
+/**
+ * Decides whether an upstream 400 naming an unprocessable advisor result
+ * should trigger a strip-and-retry cycle against the same target, recording
+ * the attempt in `state` when it does. Returns `false` when the retry should
+ * NOT happen because:
+ *   - the body doesn't name the advisor-result error, OR
+ *   - the outbound payload isn't Anthropic-messages-shaped, OR
+ *   - MAX_ADVISOR_RESULT_STRIP_RETRIES has already been used for this target
+ *     (bounded to exactly one retry — once the advisor exchange is gone, a
+ *     repeat 400 means stripping it didn't fix it, so normal failover should
+ *     proceed rather than retrying again).
+ */
+export function planAdvisorResultStrip(
+  responseBody: string,
+  payload: any,
+  state: AdvisorResultStripState
+): boolean {
+  if (state.attempts >= MAX_ADVISOR_RESULT_STRIP_RETRIES) return false;
+  if (!matchAdvisorResultError(responseBody)) return false;
+  if (!isAnthropicMessagesPayload(payload)) return false;
+
+  state.attempts++;
+  return true;
+}
+
+/**
+ * Refunds the attempt recorded by the most recent `planAdvisorResultStrip`
+ * when the paired `stripAdvisorResultBlocks` turned out to be a no-op
+ * (`strippedCount` 0 — the structural `messages`-array check matched a payload
+ * that carries no advisor result). No retry happened, so the budget must not
+ * be consumed: a LATER genuine advisor-result 400 on the same target must
+ * still get its one strip-and-retry. Loop safety matches
+ * `refundThinkingSignatureStrip` — the refund is issued only on the advisor
+ * branch's no-strip path, which never `continue`s.
+ */
+export function refundAdvisorResultStrip(state: AdvisorResultStripState): void {
+  if (state.attempts > 0) state.attempts--;
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported responses:lite tools: proactive strip + reactive strip-and-retry
+// ---------------------------------------------------------------------------
+//
+// Real Codex CLI traffic declares a `web_search` tool by default (see staging
+// trace b672ebbd), but the `X-OpenAI-Internal-Codex-Responses-Lite` wire
+// contract (sent whenever targetApiType is exactly `responses:lite` — see
+// provider-request-headers.ts) restricts declared tools to `function`,
+// `custom`, and client-executed `tool_search` only. Both providers currently
+// configured for the subtype (openlimits, openai-s) reject anything else with
+// a 400 naming the restriction generically, not the specific offending
+// tool(s).
+//
+// `stripLiteUnsupportedTools` is used two ways:
+//   - PROACTIVELY, in request-payload-builder.ts, applied unconditionally
+//     whenever dispatching with the lite header so the common case (Codex's
+//     default `web_search` declaration) never pays a failed round trip.
+//   - REACTIVELY here, as a fallback for anything the proactive pass didn't
+//     anticipate (e.g. a disallowed tool type not yet known about) — failing
+//     over doesn't help, since every lite-configured target enforces the
+//     same restriction, so strip and retry the SAME target once instead.
+
+/**
+ * Matches the responses:lite tool-type-restriction 400, e.g.
+ * "X-OpenAI-Internal-Codex-Responses-Lite only supports function tools,
+ * custom tools, and client-executed tool search."
+ */
+const LITE_UNSUPPORTED_TOOLS_PATTERN =
+  /responses-lite only supports function tools, custom tools, and client-executed tool search/i;
+
+/** Tool `type`s the responses:lite wire contract allows. */
+const LITE_ALLOWED_TOOL_TYPES = new Set(['function', 'custom', 'tool_search']);
+
+/**
+ * True when an upstream error response body names the responses:lite
+ * tool-type restriction.
+ */
+export function matchLiteUnsupportedToolsError(responseBody: string): boolean {
+  if (!responseBody) return false;
+  return LITE_UNSUPPORTED_TOOLS_PATTERN.test(responseBody);
+}
+
+export interface LiteToolStripResult {
+  /**
+   * The payload with every disallowed tool removed. A NEW object
+   * (copy-on-write) with a NEW `tools` array when `strippedCount` > 0 — the
+   * input payload's `tools` array (possibly shared by reference with the
+   * long-lived UnifiedChatRequest) is never mutated. Identical to the input
+   * `payload` reference when `strippedCount` is 0 — nothing to rebuild.
+   */
+  payload: Record<string, any>;
+  /** Number of tools actually removed (0 when there was nothing to strip). */
+  strippedCount: number;
+}
+
+/**
+ * Removes any `payload.tools` entry whose `type` isn't `function`, `custom`,
+ * or `tool_search` (see `LITE_ALLOWED_TOOL_TYPES`) — copy-on-write, like the
+ * strips above.
+ */
+export function stripLiteUnsupportedTools(payload: Record<string, any>): LiteToolStripResult {
+  if (!Array.isArray(payload.tools)) return { payload, strippedCount: 0 };
+
+  const kept = payload.tools.filter(
+    (tool: any) => tool && typeof tool === 'object' && LITE_ALLOWED_TOOL_TYPES.has(tool.type)
+  );
+  const strippedCount = payload.tools.length - kept.length;
+  if (strippedCount === 0) return { payload, strippedCount: 0 };
+
+  return { payload: { ...payload, tools: kept }, strippedCount };
+}
+
+/** Per-target, per-request bound: at most one lite-tool-strip-and-retry cycle. */
+export const MAX_LITE_TOOL_STRIP_RETRIES = 1;
+
+/** Tracks lite-tool-strip-and-retry progress for a single target within one request. */
+export interface LiteToolStripState {
+  attempts: number;
+}
+
+export function createLiteToolStripState(): LiteToolStripState {
+  return { attempts: 0 };
+}
+
+/**
+ * Decides whether an upstream 400 body naming the responses:lite tool-type
+ * restriction should trigger a strip-and-retry cycle against the same
+ * target, recording the attempt in `state` when it does. Returns `false`
+ * when the retry should NOT happen because:
+ *   - the body doesn't name the restriction, OR
+ *   - MAX_LITE_TOOL_STRIP_RETRIES has already been used for this target
+ *     (bounded to exactly one retry — once the disallowed tools are gone, a
+ *     repeat 400 means something else is wrong, so normal failover should
+ *     proceed instead of retrying again).
+ */
+export function planLiteToolStrip(responseBody: string, state: LiteToolStripState): boolean {
+  if (state.attempts >= MAX_LITE_TOOL_STRIP_RETRIES) return false;
+  if (!matchLiteUnsupportedToolsError(responseBody)) return false;
+
+  state.attempts++;
+  return true;
 }

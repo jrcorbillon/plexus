@@ -7,7 +7,19 @@ import { runMigrations } from '../migrate';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const SQLITE_MIGRATIONS_DIR = path.join(moduleDir, '../../../drizzle/migrations');
-const ALIAS_RETRY_MIGRATION_TAG = '0054_add_alias_retry_rounds';
+async function findAliasRetryMigrationTag(): Promise<string> {
+  const journal = await Bun.file(path.join(SQLITE_MIGRATIONS_DIR, 'meta', '_journal.json')).json();
+  for (const entry of [...journal.entries].reverse()) {
+    const content = await Bun.file(path.join(SQLITE_MIGRATIONS_DIR, `${entry.tag}.sql`)).text();
+    if (
+      content.includes('ADD') &&
+      content.includes('max_attempts') &&
+      content.includes('retry_delay_seconds')
+    )
+      return entry.tag;
+  }
+  throw new Error('Alias retry migration is missing from the journal');
+}
 const PI_AI_CUSTOM_MIGRATION_TAG = '0052_add_pi_ai_custom_and_generation';
 
 async function migrationHash(tag: string): Promise<string> {
@@ -42,7 +54,7 @@ describe('SQLite idempotent migrations', () => {
       prepare: (sql: string) => { run: (...args: unknown[]) => void };
     };
 
-    const hash = await migrationHash(ALIAS_RETRY_MIGRATION_TAG);
+    const hash = await migrationHash(await findAliasRetryMigrationTag());
 
     // Simulate production drift: columns exist, but migration hash was never recorded
     // (e.g. crash after ADD COLUMN, or restore from a schema-only backup).

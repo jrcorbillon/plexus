@@ -12,12 +12,15 @@ import { ProviderOAuthEditor } from '../components/providers/ProviderOAuthEditor
 import { ProviderQuotaEditor } from '../components/providers/ProviderQuotaEditor';
 import { ProviderAdvancedEditor } from '../components/providers/ProviderAdvancedEditor';
 import { ProviderModelsEditor } from '../components/providers/ProviderModelsEditor';
+import { ProviderPresetPicker } from '../components/providers/ProviderPresetPicker';
 import { FetchModelsModal } from '../components/providers/FetchModelsModal';
 import { DeleteProviderModal } from '../components/providers/DeleteProviderModal';
-import { Plus } from 'lucide-react';
+import { Code2, Plus } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 
 export const Providers = () => {
   const f = useProviderForm();
+  const navigate = useNavigate();
 
   return (
     <div className="flex flex-col min-h-full">
@@ -25,9 +28,19 @@ export const Providers = () => {
         title="Providers"
         subtitle="Upstream LLM providers routed by the gateway"
         actions={
-          <Button leftIcon={<Plus size={14} />} onClick={f.handleAddNew} size="sm">
-            Add provider
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              leftIcon={<Code2 size={14} />}
+              onClick={() => navigate('/providers/custom-checkers')}
+              size="sm"
+            >
+              Custom Quota Checkers
+            </Button>
+            <Button leftIcon={<Plus size={14} />} onClick={f.handleAddNew} size="sm">
+              Add provider
+            </Button>
+          </div>
         }
       />
 
@@ -64,6 +77,15 @@ export const Providers = () => {
           }
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '-8px' }}>
+            {/* Preset picker (new providers only) */}
+            {!f.originalId && (
+              <ProviderPresetPicker
+                editingProvider={f.editingProvider}
+                setEditingProvider={f.setEditingProvider}
+                onSelectionChange={f.setPresetSelected}
+              />
+            )}
+
             {/* Basic fields */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_auto] xl:items-end">
               <Input
@@ -134,6 +156,7 @@ export const Providers = () => {
                 isOAuthMode={f.isOAuthMode}
                 oauthCheckerType={f.oauthCheckerType}
                 quotaValidationError={f.quotaValidationError}
+                customCheckerIds={f.customCheckerIds}
               />
             </div>
 
@@ -151,6 +174,7 @@ export const Providers = () => {
                 oauthBusy={f.oauthBusy}
                 oauthCredentialReady={f.oauthCredentialReady}
                 oauthCredentialChecking={f.oauthCredentialChecking}
+                oauthCredentialStatus={f.oauthCredentialStatus}
                 oauthStatus={f.oauthStatus}
                 oauthIsTerminal={f.oauthIsTerminal}
                 oauthStatusLabel={f.oauthStatusLabel}
@@ -158,6 +182,7 @@ export const Providers = () => {
                 onSubmitPrompt={f.handleSubmitPrompt}
                 onSubmitManualCode={f.handleSubmitManualCode}
                 onCancel={f.handleCancelOAuth}
+                onDeleteCredential={f.handleDeleteOAuthCredential}
               />
             )}
 
@@ -193,6 +218,7 @@ export const Providers = () => {
               onDismissTestMessage={f.dismissTestMessage}
               getApiBaseUrlMap={f.getApiBaseUrlMap}
               isNewProvider={!f.originalId}
+              isOAuthMode={f.isOAuthMode}
             />
           </div>
         </Modal>
@@ -207,6 +233,7 @@ export const Providers = () => {
           fetchedModels={f.fetchedModels}
           selectedModelIds={f.selectedModelIds}
           fetchError={f.fetchError}
+          fetchWarning={f.fetchWarning}
           isOAuthMode={f.isOAuthMode}
           onFetch={f.handleFetchModels}
           onToggleSelection={f.toggleModelSelection}

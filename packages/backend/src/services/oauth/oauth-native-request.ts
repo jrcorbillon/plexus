@@ -24,7 +24,7 @@
  * translation.
  */
 
-import { getCatalogModel } from '../pi-ai/catalog';
+import { getCatalogModel, getCatalogModels } from '../pi-ai/catalog';
 import type { OAuthProvider } from './oauth-providers';
 import { logger } from '../../utils/logger';
 import { OAuthAuthManager } from './oauth-auth-manager';
@@ -39,8 +39,10 @@ import {
   reverseToolRenames,
 } from '../../transformers/oauth/masking';
 import type { RenamePair } from '../../transformers/oauth/masking/types';
+import type { UnifiedChatRequest } from '../../types/unified';
 import { CodexVersionService } from './codex-version-service';
 import { stripUnsupportedGpt5Options } from '../../transformers/adapters/suppress-unsupported-gpt5-options.adapter';
+import { clampAnthropicEffortAndThinking } from '../../transformers/anthropic/thinking-clamp';
 
 /**
  * Auth for a native Anthropic request. Two modes, mirroring the old executor:
@@ -73,6 +75,8 @@ export interface PreparedOAuthRequest {
 const OAUTH_PROVIDER_BASE_URLS: Record<string, string> = {
   anthropic: 'https://api.anthropic.com',
   'openai-codex': 'https://chatgpt.com/backend-api',
+  // Meta's Model API base URL (normally resolved from pi-ai's registry entry).
+  meta: 'https://api.meta.ai/v1',
 };
 
 /**
@@ -94,16 +98,239 @@ function resolveOAuthBaseUrl(provider: OAuthProvider, modelId: string): string {
 }
 
 /**
+ * Union the hardcoded `REQUIRED_BETAS` with whatever `anthropic-beta` flags the
+ * caller sent, preserving REQUIRED_BETAS order and appending caller-only flags.
+ *
+ * Why: REQUIRED_BETAS is a hand-maintained snapshot of a genuine Claude Code
+ * request, so it goes stale every time Claude Code ships a new beta-gated
+ * feature. Overwriting the caller's header meant any newer flag was silently
+ * dropped, and Anthropic then rejected the corresponding tool — e.g. a client
+ * sending `advisor-tool-2026-03-01` + `advisor_20260301` got
+ * `tools.N: Input tag 'advisor_20260301' ... does not match any of the expected
+ * tags`, because the gateway stripped the flag that makes that tool legal.
+ *
+ * Merging (not replacing) keeps the masking-critical flags — notably
+ * `oauth-2025-04-20` — which the caller does not send, while letting newer
+ * client betas through without waiting for this constant to be updated.
+ */
+function mergeBetas(callerBetas?: string): string {
+  const merged = [...REQUIRED_BETAS];
+  const seen = new Set(merged);
+  for (const raw of (callerBetas ?? '').split(',')) {
+    const beta = raw.trim();
+    if (beta && !seen.has(beta)) {
+      seen.add(beta);
+      merged.push(beta);
+    }
+  }
+  return merged.join(',');
+}
+
+// ─── Genuine Claude Code client detection ───────────────────────────────
+//
+// A real Claude Code client talking to the real Anthropic endpoint needs no
+// masking: its body already carries the genuine CC identity (billing-header
+// placeholder, CC system prompt, device/session metadata). Masking such a
+// request is pure harm — it downgrades the advertised CC version, replaces
+// the client's real system prompt with a stale generic one, swaps the
+// device/session ids for gateway-generated ones, and prepends a synthetic
+// `<system-reminder>` to the first user message (verified against staging
+// traces). This mirrors `isCodexCliShapedBody` below: fail-closed heuristics
+// that route genuine clients to a verbatim + key-swap fast-path.
+
+/** Matches `claude-cli/<semver> (external, cli)` — the UA real Claude Code sends. */
+const CLAUDE_CLI_USER_AGENT_PATTERN = /^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/;
+
+/** The `anthropic-beta` flag every genuine Claude Code request carries. */
+const CLAUDE_CODE_BETA_FLAG = 'claude-code-20250219';
+
+/** `system[1]` of every genuine Claude Code request (see cc-identity.ts). */
+const CLAUDE_CODE_IDENTITY_LINE = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/** Wire shape the genuine-client detector reads (all fields optional). */
+interface ClaudeCodeWireBody {
+  system?: Array<{ type?: unknown; text?: unknown }>;
+  metadata?: { user_id?: unknown };
+}
+
+/** `metadata.user_id` JSON shape real Claude Code sends. */
+interface ClaudeCodeUserId {
+  device_id?: unknown;
+  session_id?: unknown;
+}
+
+/**
+ * Parse `metadata.user_id` into device/session ids, or null when it isn't a
+ * genuine client identity block (missing, unparseable, or incomplete).
+ */
+function parseClaudeCodeUserId(raw: unknown): { device_id: string; session_id: string } | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const { device_id, session_id } = parsed as ClaudeCodeUserId;
+  if (typeof device_id !== 'string' || device_id.length === 0) return null;
+  if (typeof session_id !== 'string' || session_id.length === 0) return null;
+  return { device_id, session_id };
+}
+
+/** The body's own session id, or '' when the body carries no client identity. */
+export function extractBodySessionId(body: unknown): string {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return '';
+  return parseClaudeCodeUserId((body as ClaudeCodeWireBody).metadata?.user_id)?.session_id ?? '';
+}
+
+/**
+ * True when the inbound request is from a genuine Claude Code client:
+ * the header gate (UA + `x-app: cli` + CC beta flag) AND the body gate
+ * (unmasked billing-header placeholder, exact CC identity line, parseable
+ * device/session metadata agreeing with the session-id header when present).
+ * Anything less certain returns false and the request takes the masking path.
+ */
+export function isGenuineClaudeCodeRequest(request: UnifiedChatRequest): boolean {
+  if (!request || typeof request !== 'object') return false;
+
+  const userAgent = typeof request.userAgent === 'string' ? request.userAgent.trim() : '';
+  if (!CLAUDE_CLI_USER_AGENT_PATTERN.test(userAgent)) return false;
+
+  const xApp = request.metadata?.plexus_metadata?.clientHeaders?.['x-app'];
+  if (typeof xApp !== 'string' || xApp.trim().toLowerCase() !== 'cli') return false;
+
+  const betas = (request.anthropicBeta ?? '').split(',').map((b) => b.trim());
+  if (!betas.includes(CLAUDE_CODE_BETA_FLAG)) return false;
+
+  const body = request.originalBody as ClaudeCodeWireBody | null | undefined;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+
+  const system = body.system;
+  if (!Array.isArray(system) || system.length < 2) return false;
+  const billingText = system[0]?.text;
+  if (
+    typeof billingText !== 'string' ||
+    !billingText.startsWith('x-anthropic-billing-header:') ||
+    !billingText.includes('cc_entrypoint=cli') ||
+    // A `cch=` hash means the body already went through masking — not a
+    // genuine unmasked client (and must not be masked a second time here).
+    billingText.includes('cch=')
+  ) {
+    return false;
+  }
+  if (system[1]?.text !== CLAUDE_CODE_IDENTITY_LINE) return false;
+
+  const userId = parseClaudeCodeUserId(body.metadata?.user_id);
+  if (!userId) return false;
+
+  const headerSessionId =
+    typeof request.claudeCodeSessionId === 'string' ? request.claudeCodeSessionId.trim() : '';
+  if (headerSessionId && userId.session_id !== headerSessionId) return false;
+
+  return true;
+}
+
+/** Options for `prepareAnthropicOAuthRequest` beyond the wire body. */
+export interface AnthropicNativeOptions {
+  /** The caller's raw `anthropic-beta` header, merged with REQUIRED_BETAS. */
+  callerBetas?: string;
+  /** Genuine Claude Code client: skip masking, forward the body verbatim. */
+  claudePassthrough?: boolean;
+  /** Caller's own UA / session id, preserved on the passthrough path. */
+  callerUserAgent?: string;
+  callerSessionId?: string;
+}
+
+/** Resolved upstream URL for native Anthropic Messages dispatch. */
+function resolveAnthropicMessagesUrl(modelId: string): string {
+  return `${resolveOAuthBaseUrl('anthropic', modelId)}/v1/messages`;
+}
+
+/**
+ * Wire headers for a native Anthropic request. `stainlessOverrides` swaps the
+ * gateway's generated Stainless identity for the real client's own values;
+ * without overrides the gateway fingerprint is sent (the masking path).
+ */
+function buildAnthropicNativeHeaders(
+  auth: NativeAnthropicAuth,
+  streaming: boolean,
+  callerBetas?: string,
+  stainlessOverrides?: { userAgent?: string; sessionId?: string }
+): Record<string, string> {
+  const stainless = getStainlessHeaders();
+  if (stainlessOverrides?.userAgent) stainless['user-agent'] = stainlessOverrides.userAgent;
+  if (stainlessOverrides?.sessionId)
+    stainless['x-claude-code-session-id'] = stainlessOverrides.sessionId;
+  return {
+    'Content-Type': 'application/json',
+    Accept: streaming ? 'text/event-stream' : 'application/json',
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': mergeBetas(callerBetas),
+    ...stainless,
+    // Auth: OAuth → Bearer; masking-API-key → x-api-key (real Anthropic key).
+    ...(auth.mode === 'oauth'
+      ? { Authorization: `Bearer ${auth.token}` }
+      : { 'x-api-key': auth.apiKey }),
+  };
+}
+
+/**
+ * Genuine-Claude-Code fast-path: auth + URL resolution only, body forwarded
+ * verbatim with an identity response reverser. The caller's own version
+ * (UA) and session attribution are preserved instead of the gateway's
+ * generated identity, so prompt-cache routing and session accounting see the
+ * real client. `nativeBody` already passed the standard pre-steps
+ * (registry auto-compat, extraBody, adapters, thinking clamp) upstream of
+ * this call — only the two masking transforms are skipped.
+ */
+function prepareGenuineClaudePassthrough(
+  modelId: string,
+  auth: NativeAnthropicAuth,
+  nativeBody: any,
+  streaming: boolean,
+  options?: AnthropicNativeOptions
+): PreparedOAuthRequest {
+  const url = resolveAnthropicMessagesUrl(modelId);
+
+  // Prefer the header session id, fall back to the body's own — never the
+  // gateway's per-process INSTANCE_SESSION_ID, which would group unrelated
+  // clients under one shared session and mismatch the forwarded body.
+  const callerUA = options?.callerUserAgent?.trim();
+  const callerSession = options?.callerSessionId?.trim() || extractBodySessionId(nativeBody);
+  const headers = buildAnthropicNativeHeaders(auth, streaming, options?.callerBetas, {
+    ...(callerUA ? { userAgent: callerUA } : {}),
+    ...(callerSession ? { sessionId: callerSession } : {}),
+  });
+  if (!callerSession) delete headers['x-claude-code-session-id'];
+
+  return {
+    url,
+    headers,
+    body: nativeBody,
+    reverseResponseFrame: (frame) => frame,
+  };
+}
+
+/**
  * Prepare an Anthropic OAuth request from a native Anthropic `/v1/messages`
  * body. Applies the exact masking sequence `executeRequest` runs today, then
- * returns everything the standard fetch path needs.
+ * returns everything the standard fetch path needs. A genuine Claude Code
+ * client (`options.claudePassthrough`) skips masking via
+ * `prepareGenuineClaudePassthrough` — see `isGenuineClaudeCodeRequest`.
  */
 function prepareAnthropicOAuthRequest(
   modelId: string,
   auth: NativeAnthropicAuth,
   nativeBody: any,
-  streaming: boolean
+  streaming: boolean,
+  options?: AnthropicNativeOptions
 ): PreparedOAuthRequest {
+  if (options?.claudePassthrough === true) {
+    return prepareGenuineClaudePassthrough(modelId, auth, nativeBody, streaming, options);
+  }
+  const callerBetas = options?.callerBetas;
+  const preparedBody = clampAnthropicEffortAndThinking(nativeBody, modelId);
   // The token used to GATE masking (not necessarily the auth credential). For
   // the API-key masking route we force the masking's OAuth codepath with the
   // same `sk-ant-oat-mask-` shim the old executor used; the real key still goes
@@ -118,7 +345,7 @@ function prepareAnthropicOAuthRequest(
   // We keep these verbatim for the body (verified byte-for-byte against a
   // canon-only variant, which drops the system relocation). We do NOT reuse
   // their internal rename bookkeeping for the response — see reversal below.
-  const { payload: transformed } = applyClaudeOAuthTransform(nativeBody, maskingToken, {
+  const { payload: transformed } = applyClaudeOAuthTransform(preparedBody, maskingToken, {
     version: '2.1.63',
     entrypoint: 'cli',
     workload: '',
@@ -134,24 +361,13 @@ function prepareAnthropicOAuthRequest(
   // EVERY rename in one place regardless of which internal step produced it.
   // The response reversal is simply this map inverted — no per-mechanism
   // bookkeeping, no dependency on masking-internal flags.
-  const callerToolNames: string[] = (Array.isArray(nativeBody?.tools) ? nativeBody.tools : [])
+  const callerToolNames: string[] = (Array.isArray(preparedBody?.tools) ? preparedBody.tools : [])
     .map((t: any) => t?.name)
     .filter((n: any): n is string => typeof n === 'string');
 
-  const baseUrl = resolveOAuthBaseUrl('anthropic', modelId);
-  const url = `${baseUrl}/v1/messages`;
+  const url = resolveAnthropicMessagesUrl(modelId);
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: streaming ? 'text/event-stream' : 'application/json',
-    'anthropic-version': '2023-06-01',
-    'anthropic-beta': REQUIRED_BETAS.join(','),
-    ...getStainlessHeaders(),
-    // Auth: OAuth → Bearer; masking-API-key → x-api-key (real Anthropic key).
-    ...(auth.mode === 'oauth'
-      ? { Authorization: `Bearer ${auth.token}` }
-      : { 'x-api-key': auth.apiKey }),
-  };
+  const headers: Record<string, string> = buildAnthropicNativeHeaders(auth, streaming, callerBetas);
 
   return {
     url,
@@ -258,7 +474,7 @@ export function isCodexCliShapedBody(body: any): boolean {
 }
 
 /** Extract the ChatGPT account id from the Codex OAuth token's JWT claim. */
-function extractChatgptAccountId(token: string): string | undefined {
+export function extractChatgptAccountId(token: string): string | undefined {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return undefined;
@@ -306,6 +522,29 @@ function stripCodexUnsupportedTokenCaps(payload: Record<string, any>): Record<st
 }
 
 /**
+ * The Codex OAuth identity every ChatGPT-backend call carries, regardless of
+ * endpoint: the Bearer token, the account the token was minted for, and the
+ * authentic Codex CLI fingerprint (the native path can finally send the real UA
+ * + originator; pi-ai clobbered the UA to "pi (...)").
+ *
+ * Deliberately excludes per-endpoint concerns — `Content-Type`, `accept`,
+ * `OpenAI-Beta` (a Responses flag) and the Responses `session-id` pair are the
+ * caller's business. Shared by the Responses request below and the Codex images
+ * endpoints, which authenticate identically.
+ */
+export function buildCodexOAuthHeaders(token: string): Record<string, string> {
+  const accountId = extractChatgptAccountId(token);
+  const codex = CodexVersionService.getInstance();
+  return {
+    Authorization: `Bearer ${token}`,
+    ...(accountId ? { 'chatgpt-account-id': accountId } : {}),
+    originator: 'codex_cli_rs',
+    Version: codex.getVersion(),
+    'User-Agent': codex.getUserAgent(),
+  };
+}
+
+/**
  * Prepare a native Codex OAuth request. `passthrough` sends the body verbatim
  * (CLI-shaped); otherwise the body is adorned for the backend.
  */
@@ -323,12 +562,14 @@ function prepareCodexOAuthRequest(
   const body = stripCodexUnsupportedTokenCaps(
     stripUnsupportedGpt5Options(passthrough ? nativeBody : adornCodexResponsesBody(nativeBody))
   );
+  // The Codex backend rejects `service_tier: 'flex'` (`priority` is
+  // supported), so strip flex here as the final gate covering passthrough,
+  // adorned, extraBody, and auto-compat paths.
+  if (body.service_tier === 'flex') delete body.service_tier;
 
   const baseUrl = resolveOAuthBaseUrl('openai-codex' as OAuthProvider, modelId);
   const url = `${baseUrl}/codex/responses`;
 
-  const accountId = extractChatgptAccountId(token);
-  const codex = CodexVersionService.getInstance();
   const sessionId =
     typeof body?.prompt_cache_key === 'string' && body.prompt_cache_key.length > 0
       ? body.prompt_cache_key
@@ -337,14 +578,9 @@ function prepareCodexOAuthRequest(
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     accept: streaming ? 'text/event-stream' : 'application/json',
-    Authorization: `Bearer ${token}`,
-    ...(accountId ? { 'chatgpt-account-id': accountId } : {}),
-    // Authentic Codex fingerprint (the native path can finally send the real UA
-    // + originator; pi-ai clobbered the UA to "pi (...)").
-    originator: 'codex_cli_rs',
+    ...buildCodexOAuthHeaders(token),
+    // Responses-only extras on top of the shared Codex identity.
     'OpenAI-Beta': 'responses=experimental',
-    Version: codex.getVersion(),
-    'User-Agent': codex.getUserAgent(),
     ...(sessionId ? { 'session-id': sessionId, 'x-client-request-id': sessionId } : {}),
   };
 
@@ -355,6 +591,56 @@ function prepareCodexOAuthRequest(
     // Codex applies no request-side tool renames, so nothing to reverse.
     reverseResponseFrame: (frame) => frame,
   };
+}
+
+/**
+ * Resolve the auth seam for a Codex images call (`<baseUrl>/images/generations`
+ * or `/images/edits`). The ChatGPT backend serves the Codex image endpoints
+ * under the same `/codex` prefix as `/codex/responses` and authenticates them
+ * with the same OAuth identity, so this is the Responses preparation minus the
+ * body: token resolution (auto-refreshed by `OAuthAuthManager.getApiKey`) plus
+ * the shared Codex headers.
+ *
+ * No `OpenAI-Beta` — that flag is Responses-specific; the Codex image client
+ * sends only auth, the account id and the CLI fingerprint. No bespoke
+ * 401 → refresh → retry either: `getApiKey` already refreshes proactively, and
+ * the chat path has no such retry (parity beats a one-off).
+ */
+export async function prepareCodexImagesDispatch(params: {
+  modelId: string;
+  oauthAccountId?: string | null;
+}): Promise<{ baseUrl: string; headers: Record<string, string> }> {
+  const { modelId, oauthAccountId } = params;
+  const token = await OAuthAuthManager.getInstance().getApiKey('openai-codex', oauthAccountId);
+  const baseUrl = `${resolveOAuthBaseUrl('openai-codex', modelId)}/codex`;
+  return {
+    baseUrl,
+    headers: {
+      Accept: 'application/json',
+      ...buildCodexOAuthHeaders(token),
+    },
+  };
+}
+
+/**
+ * The model id used only to resolve the Codex upstream base URL for the
+ * account-scoped model list. `/codex/models` is not model-scoped, but base-URL
+ * resolution is (registry entry first, provider default second), so we resolve
+ * through a representative Codex model instead of duplicating the fallback
+ * table at the call site.
+ */
+const CODEX_BASE_URL_REFERENCE_MODEL = 'gpt-5-codex';
+
+/**
+ * URL of the account-scoped Codex model list — the same ChatGPT backend that
+ * serves `/codex/responses`, carrying the CLI version the rest of the Codex
+ * identity already advertises (`client_version`, which the backend uses to
+ * decide which models a given CLI build may see).
+ */
+export function buildCodexModelsUrl(): string {
+  const baseUrl = resolveOAuthBaseUrl('openai-codex', CODEX_BASE_URL_REFERENCE_MODEL);
+  const clientVersion = CodexVersionService.getInstance().getVersion();
+  return `${baseUrl}/codex/models?client_version=${encodeURIComponent(clientVersion)}`;
 }
 
 // ─── GitHub Copilot (multi-API: chat / responses / messages) ───────────────
@@ -377,7 +663,7 @@ const COPILOT_STATIC_HEADERS: Record<string, string> = {
 };
 
 /** Endpoint path for a Copilot wire API type. */
-function copilotEndpoint(apiType: string): string {
+export function copilotEndpoint(apiType: string): string {
   switch (apiType) {
     case 'messages':
       return '/v1/messages';
@@ -395,7 +681,7 @@ function copilotEndpoint(apiType: string): string {
  * must use the standard `api.githubcopilot.com` endpoint (the same fix the old
  * pi-ai executor path applied). Falls back to the individual endpoint.
  */
-function resolveCopilotBaseUrl(token: string): string {
+export function resolveCopilotBaseUrl(token: string): string {
   const match = token.match(/proxy-ep=([^;]+)/);
   if (match) {
     const proxyHost = match[1]!;
@@ -505,9 +791,37 @@ function prepareCopilotOAuthRequest(
 }
 
 /**
+ * Prepare a native Meta (Muse subscription) request. The standard-path
+ * transformer has already built the correct Responses body; this only
+ * targets Meta's Model API with the subscription-minted key (resolved from
+ * pi-ai's OAuth credential) plus the required `x-api-version` header. No
+ * masking, no tool renames — the wire contract matches direct Meta API keys
+ * (pi-ai seeds `meta` as `openai-responses` on this same base URL).
+ */
+function prepareMetaOAuthRequest(
+  token: string,
+  nativeBody: any,
+  streaming: boolean
+): PreparedOAuthRequest {
+  const baseUrl = resolveOAuthBaseUrl('meta', 'muse-spark').replace(/\/$/, '');
+  return {
+    url: `${baseUrl}/responses`,
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: streaming ? 'text/event-stream' : 'application/json',
+      Authorization: `Bearer ${token}`,
+      'x-api-version': '1.0.0',
+    },
+    body: nativeBody,
+    // Muse applies no request-side tool renames, so nothing to reverse.
+    reverseResponseFrame: (frame) => frame,
+  };
+}
+
+/**
  * Prepare a native OAuth request for the standard dispatch path.
  *
- * @param provider  OAuth provider id (`anthropic`, `openai-codex`, or `github-copilot`).
+ * @param provider  OAuth provider id (`anthropic`, `openai-codex`, `github-copilot`, or `meta`).
  * @param modelId   Upstream model id.
  * @param auth      Resolved OAuth access token / masking API key.
  * @param nativeBody The provider-native wire body from the entry transformer.
@@ -521,10 +835,10 @@ export function prepareOAuthNativeRequest(
   auth: NativeAnthropicAuth,
   nativeBody: any,
   streaming: boolean,
-  options?: { codexPassthrough?: boolean; apiType?: string }
+  options?: { codexPassthrough?: boolean; apiType?: string } & AnthropicNativeOptions
 ): PreparedOAuthRequest {
   if (provider === 'anthropic') {
-    return prepareAnthropicOAuthRequest(modelId, auth, nativeBody, streaming);
+    return prepareAnthropicOAuthRequest(modelId, auth, nativeBody, streaming, options);
   }
   if (provider === 'openai-codex') {
     if (auth.mode !== 'oauth') {
@@ -549,6 +863,12 @@ export function prepareOAuthNativeRequest(
       options?.apiType ?? 'chat'
     );
   }
+  if (provider === 'meta') {
+    if (auth.mode !== 'oauth') {
+      throw new Error('Meta OAuth requires an OAuth token (apiKey mode unsupported).');
+    }
+    return prepareMetaOAuthRequest(auth.token, nativeBody, streaming);
+  }
   // The caller gates on isNativeOAuthProvider; reaching here is a programming error.
   logger.error(`OAuth native path not implemented for provider '${provider}'`);
   throw new Error(`OAuth native request preparation not implemented for provider '${provider}'`);
@@ -556,10 +876,17 @@ export function prepareOAuthNativeRequest(
 
 /**
  * Whether an OAuth provider is served by the native (non-pi-ai-executor) path.
- * All ported providers: Anthropic (M1), Codex (M2), and GitHub Copilot (M3).
+ * All ported providers: Anthropic (M1), Codex (M2), GitHub Copilot (M3), and
+ * Meta Muse subscriptions (subscription key transport over pi-ai's registry
+ * entry, with OAUTH_PROVIDER_BASE_URLS as fallback).
  */
 export function isNativeOAuthProvider(provider: string | undefined): boolean {
-  return provider === 'anthropic' || provider === 'openai-codex' || provider === 'github-copilot';
+  return (
+    provider === 'anthropic' ||
+    provider === 'openai-codex' ||
+    provider === 'github-copilot' ||
+    provider === 'meta'
+  );
 }
 
 /**
@@ -576,6 +903,9 @@ export function isNativeOAuthProvider(provider: string | undefined): boolean {
 const NATIVE_OAUTH_API_TYPES: Record<string, string> = {
   anthropic: 'messages',
   'openai-codex': 'responses',
+  // Meta's Model API speaks the Responses API on /v1 (pi-ai seeds `meta`
+  // as `openai-responses`); same fixed mapping as Codex.
+  meta: 'responses',
 };
 
 /** Map a pi-ai model `api` field to the plexus transformer/api-type name. */
@@ -608,25 +938,168 @@ export function copilotWireApiType(modelId: string | undefined): string {
   return 'chat';
 }
 
+// ─── Generic OAuth (any pi-ai OAuth provider that isn't native) ────────────
+//
+// Anthropic/Codex/Copilot get hand-ported paths above because they need
+// something beyond "Bearer token + standard wire body": Claude Code masking,
+// ChatGPT-backend body adornment, or per-model wire-API selection against a
+// proxy base URL. Every OTHER pi-ai OAuth provider (xai, kimi-coding,
+// openrouter, and whatever pi-ai adds next — see isNativeOAuthProvider and
+// services/oauth/oauth-providers.ts) is a plain Bearer-token OAuth provider
+// speaking one of the standard wire APIs pi-ai's registry already declares
+// per model. The standard-path transformer has already built the correct
+// wire body by the time this runs — only auth and the upstream URL need to
+// be swapped from the `oauth://` placeholder for the real ones, so there is
+// no per-provider work to do here, now or for future providers.
+
+/** Endpoint path suffix per plexus wire api type — mirrors each standard
+ * transformer's `defaultEndpoint` (see transformers/openai.ts, responses.ts,
+ * anthropic/index.ts) so a generic OAuth request hits the exact same path a
+ * plain API-key provider speaking the same wire API would. */
+const GENERIC_OAUTH_ENDPOINTS: Record<string, string> = {
+  chat: '/chat/completions',
+  responses: '/responses',
+  messages: '/messages',
+};
+
+function genericOAuthProviderProfile(provider: string): {
+  apiType?: string;
+  baseUrl?: string;
+} {
+  const models = getCatalogModels(provider);
+  if (models.length === 0) return {};
+
+  const apiTypes = new Set<string>();
+  const baseUrls = new Set<string>();
+  let hasUnsupportedApi = false;
+
+  for (const model of models) {
+    const apiType = PIAI_API_TO_PLEXUS[model.api];
+    if (apiType) {
+      apiTypes.add(apiType);
+    } else {
+      hasUnsupportedApi = true;
+    }
+
+    if (model.baseUrl) {
+      baseUrls.add(String(model.baseUrl).replace(/\/+$/, ''));
+    }
+  }
+
+  return {
+    ...(!hasUnsupportedApi && apiTypes.size === 1 ? { apiType: [...apiTypes][0] } : {}),
+    ...(baseUrls.size === 1 ? { baseUrl: [...baseUrls][0] } : {}),
+  };
+}
+
+/**
+ * Resolve the Plexus wire API type for a generic OAuth model. When the model
+ * is absent from the catalog, infer it from the provider's catalog only when
+ * every model agrees on one supported API.
+ */
+export function genericOAuthApiType(provider: string, modelId: string): string | undefined {
+  const model = getCatalogModel(provider, modelId);
+  if (model) return PIAI_API_TO_PLEXUS[model.api];
+  return genericOAuthProviderProfile(provider).apiType;
+}
+
+function resolveGenericOAuthBaseUrl(provider: string, modelId: string): string {
+  const model = getCatalogModel(provider, modelId);
+  const baseUrl =
+    model?.baseUrl ||
+    OAUTH_PROVIDER_BASE_URLS[provider] ||
+    genericOAuthProviderProfile(provider).baseUrl;
+  if (!baseUrl) {
+    throw new Error(
+      `OAuth: no baseUrl for provider '${provider}' model '${modelId}'. ` +
+        `Cannot resolve upstream endpoint.`
+    );
+  }
+  return String(baseUrl).replace(/\/+$/, '');
+}
+
+/**
+ * Prepare a request for any OAuth provider pi-ai supports that isn't one of
+ * the native providers above. No masking, no tool-name games, no body
+ * adornment — `body` is already the correct standard-path wire body; this
+ * only resolves the real Bearer token and upstream URL.
+ */
+export async function prepareGenericOAuthDispatch(params: {
+  provider: string;
+  modelId: string;
+  body: any;
+  streaming: boolean;
+  /** Resolved wire api type from genericOAuthApiType (chat/responses/messages). */
+  apiType: string;
+  oauthAccountId?: string | null;
+  extraHeaders?: Record<string, string>;
+  forceRefresh?: boolean;
+  signal?: AbortSignal;
+}): Promise<PreparedOAuthRequest> {
+  const {
+    provider,
+    modelId,
+    body,
+    streaming,
+    apiType,
+    oauthAccountId,
+    extraHeaders,
+    forceRefresh,
+    signal,
+  } = params;
+  const endpoint = GENERIC_OAUTH_ENDPOINTS[apiType];
+  if (!endpoint) {
+    throw new Error(
+      `OAuth: provider '${provider}' model '${modelId}' resolved to unsupported wire API ` +
+        `'${apiType}' for generic OAuth dispatch.`
+    );
+  }
+  const token =
+    forceRefresh || signal
+      ? await OAuthAuthManager.getInstance().getApiKey(provider, oauthAccountId, {
+          forceRefresh,
+          signal,
+        })
+      : await OAuthAuthManager.getInstance().getApiKey(provider, oauthAccountId);
+  const baseUrl = resolveGenericOAuthBaseUrl(provider, modelId);
+  const url = `${baseUrl}${endpoint}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: streaming ? 'text/event-stream' : 'application/json',
+    Authorization: `Bearer ${token}`,
+    ...extraHeaders,
+  };
+  return {
+    url,
+    headers,
+    body,
+    reverseResponseFrame: (frame: string) => frame,
+  };
+}
+
 /**
  * Full async preparation for the native Anthropic dispatch. For OAuth routes,
  * resolves the token (with auto-refresh + DB write-back via OAuthAuthManager);
  * for the masking-API-key route, uses the configured key directly. Masks the
  * native body and builds the wire request for the standard dispatch seams.
  */
-export async function prepareNativeOAuthDispatch(params: {
-  provider: OAuthProvider;
-  modelId: string;
-  nativeBody: any;
-  streaming: boolean;
-  oauthAccountId?: string | null;
-  /** When set, use the Claude-masking API-key mode instead of OAuth. */
-  maskingApiKey?: string | null;
-  /** Codex only: send the body verbatim (CLI-shaped request). */
-  codexPassthrough?: boolean;
-  /** Copilot only: the resolved wire API type (chat/messages/responses). */
-  apiType?: string;
-}): Promise<PreparedOAuthRequest> {
+export async function prepareNativeOAuthDispatch(
+  params: {
+    provider: OAuthProvider;
+    modelId: string;
+    nativeBody: any;
+    streaming: boolean;
+    oauthAccountId?: string | null;
+    /** When set, use the Claude-masking API-key mode instead of OAuth. */
+    maskingApiKey?: string | null;
+    /** Codex only: send the body verbatim (CLI-shaped request). */
+    codexPassthrough?: boolean;
+    /** Copilot only: the resolved wire API type (chat/messages/responses). */
+    apiType?: string;
+    // Anthropic-only fields (caller betas, genuine-client passthrough, caller
+    // identity) come from `AnthropicNativeOptions` — documented there.
+  } & AnthropicNativeOptions
+): Promise<PreparedOAuthRequest> {
   const { provider, modelId, nativeBody, streaming, oauthAccountId, maskingApiKey } = params;
 
   let auth: NativeAnthropicAuth;
@@ -644,8 +1117,8 @@ export async function prepareNativeOAuthDispatch(params: {
     auth = { mode: 'oauth', token };
   }
 
-  return prepareOAuthNativeRequest(provider, modelId, auth, nativeBody, streaming, {
-    codexPassthrough: params.codexPassthrough === true,
-    apiType: params.apiType,
-  });
+  // `params` carries exactly the native-request options plus dispatch-only
+  // fields (provider/modelId/..., which the callee ignores) — passed straight
+  // through. The codex boolean coercion happens at its use site.
+  return prepareOAuthNativeRequest(provider, modelId, auth, nativeBody, streaming, params);
 }

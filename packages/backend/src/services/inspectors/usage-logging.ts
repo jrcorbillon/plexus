@@ -1,9 +1,8 @@
-import type { ModelParams, GpuParams } from '@plexus/shared';
 import { logger } from '../../utils/logger';
 import { PassThrough } from 'stream';
 import { UsageStorageService } from '../observability/usage-storage';
 import { UsageRecord } from '../../types/usage';
-import { calculateCosts } from '../../utils/calculate-costs';
+import { calculateCosts, type CostAttribution } from '../../utils/calculate-costs';
 import { DebugManager } from '../observability/debug-manager';
 import { estimateTokensFromReconstructed, estimateInputTokens } from '../../utils/estimate-tokens';
 import {
@@ -13,10 +12,9 @@ import {
   normalizeOpenAIResponsesUsage,
   extractUsageCostDetails,
 } from '../../utils/usage-normalizer';
-import { estimateKwhUsed } from '../observability/inference-energy';
 import { applyProviderReportedCost, applyUsageCostDetails } from '../../utils/provider-cost';
-import { DEFAULT_MODEL, DEFAULT_GPU_PARAMS } from '@plexus/shared';
 import { recordQuotaUsage } from '../quota/quota-middleware';
+import type { DebugLoggingInspector } from './debug-logging';
 
 export interface ExtractedObservedUsage {
   inputTokens: number;
@@ -110,10 +108,10 @@ export class UsageInspector extends PassThrough {
   private firstChunk = true;
   private quotaEnforcer?: any;
   private keyName?: string;
+  private rawDebugCapture?: DebugLoggingInspector;
+  private transformedDebugCapture?: DebugLoggingInspector;
+  private costAttribution?: CostAttribution;
   private _flushed = false;
-
-  private modelParams: ModelParams;
-  private gpuParams: GpuParams;
 
   constructor(
     requestId: string,
@@ -126,10 +124,11 @@ export class UsageInspector extends PassThrough {
     providerApiType: string = 'chat',
     incomingApiType?: string,
     originalRequest?: any,
-    gpuParams: GpuParams = DEFAULT_GPU_PARAMS,
-    modelParams: ModelParams = DEFAULT_MODEL,
     quotaEnforcer?: any,
-    keyName?: string
+    keyName?: string,
+    rawDebugCapture?: DebugLoggingInspector,
+    transformedDebugCapture?: DebugLoggingInspector,
+    costAttribution?: CostAttribution
   ) {
     super();
     this.usageStorage = usageStorage;
@@ -141,10 +140,11 @@ export class UsageInspector extends PassThrough {
     this.providerApiType = providerApiType;
     this.incomingApiType = incomingApiType || providerApiType;
     this.originalRequest = originalRequest;
-    this.gpuParams = gpuParams;
-    this.modelParams = modelParams;
     this.quotaEnforcer = quotaEnforcer;
     this.keyName = keyName;
+    this.rawDebugCapture = rawDebugCapture;
+    this.transformedDebugCapture = transformedDebugCapture;
+    this.costAttribution = costAttribution;
   }
 
   override _transform(chunk: any, encoding: BufferEncoding, callback: Function) {
@@ -157,6 +157,12 @@ export class UsageInspector extends PassThrough {
   }
 
   override _flush(callback: Function) {
+    this.finalize();
+    callback();
+  }
+
+  finalize(): void {
+    if (this._flushed) return;
     this._flushed = true;
     const stats = {
       inputTokens: 0,
@@ -239,7 +245,7 @@ export class UsageInspector extends PassThrough {
           timeToTokensMs > 0 ? (totalOutputTokens / timeToTokensMs) * 1000 : 0;
       }
 
-      calculateCosts(this.usageRecord, this.pricing, this.providerDiscount);
+      calculateCosts(this.usageRecord, this.pricing, this.providerDiscount, this.costAttribution);
 
       // Override with provider-reported cost if available
       // Some providers emit `: cost {"request_cost_usd": ...}` as SSE comments
@@ -265,21 +271,12 @@ export class UsageInspector extends PassThrough {
         }
       }
 
-      // Use provider-reported energy if available, otherwise estimate
-      // Some providers emit `: energy {"energy_kwh": ...}` as SSE comments
+      // Use provider-reported energy if available (e.g. Neuralwatt SSE comments)
       if (reconstructed?.providerReportedEnergy?.energy_kwh != null) {
         const energyKwh = Number(reconstructed.providerReportedEnergy.energy_kwh);
         if (!isNaN(energyKwh) && energyKwh >= 0) {
           this.usageRecord.kwhUsed = Number(energyKwh.toFixed(10));
         }
-      } else {
-        // Estimate energy consumption using resolved GPU and model params
-        this.usageRecord.kwhUsed = estimateKwhUsed(
-          stats.inputTokens,
-          stats.outputTokens,
-          this.modelParams,
-          this.gpuParams
-        );
       }
 
       // Fire-and-forget: saveRequest is async but _flush is synchronous
@@ -338,10 +335,8 @@ export class UsageInspector extends PassThrough {
 
       logger.debug(`Request ${this.usageRecord.requestId} usage analysis complete.`);
       DebugManager.getInstance().flush(this.usageRecord.requestId!);
-      callback();
     } catch (err) {
       logger.error(`Error analyzing usage for ${this.usageRecord.requestId}:`, err);
-      callback();
     }
   }
 
@@ -350,6 +345,15 @@ export class UsageInspector extends PassThrough {
       callback(err);
       return;
     }
+
+    // The HTTP layer can tear the response pipeline down as soon as the
+    // client disconnects — before the 250ms socket-close poll runs
+    // onDisconnect(), which is what normally finalizes the debug taps. The
+    // taps capture synchronously at write() time, so reconstruct them here
+    // first; otherwise teardown reads no snapshot and the record is saved
+    // with no tokens and a trace with no response body.
+    this.rawDebugCapture?.finalize();
+    this.transformedDebugCapture?.finalize();
 
     const isTimeout = err?.name === 'TimeoutError' || err?.message?.includes('timeout');
     const isStall = err?.message?.includes('stalled');
@@ -388,7 +392,7 @@ export class UsageInspector extends PassThrough {
         this.usageRecord.tokensReasoning = usage.reasoningTokens || null;
       }
       if (reconstructed || usage) {
-        calculateCosts(this.usageRecord, this.pricing, this.providerDiscount);
+        calculateCosts(this.usageRecord, this.pricing, this.providerDiscount, this.costAttribution);
       }
 
       this.usageStorage.saveRequest(this.usageRecord as UsageRecord).catch((saveErr) => {
@@ -491,11 +495,11 @@ export class UsageInspector extends PassThrough {
         return { toolCallsCount: toolCallsCount > 0 ? toolCallsCount : null, finishReason };
       }
       case 'responses': {
-        // Responses API format: function_call items in output array
+        // Responses API format: function_call/custom_tool_call items in output array
         let toolCallsCount = 0;
         if (reconstructed.output && Array.isArray(reconstructed.output)) {
           toolCallsCount = reconstructed.output.filter(
-            (item: any) => item.type === 'function_call'
+            (item: any) => item.type === 'function_call' || item.type === 'custom_tool_call'
           ).length;
         }
         // Responses API doesn't have a direct finish_reason, use status instead.
@@ -507,7 +511,9 @@ export class UsageInspector extends PassThrough {
         // 'length', matching the OpenAI-compatible finish reason vocabulary.
         const finishReason =
           reconstructed.status === 'completed'
-            ? 'stop'
+            ? toolCallsCount > 0
+              ? 'tool_calls'
+              : 'stop'
             : reconstructed.status === 'failed'
               ? 'error'
               : reconstructed.status === 'incomplete'

@@ -2,6 +2,8 @@ import { createParser } from 'eventsource-parser';
 import {
   UnifiedChatRequest,
   UnifiedChatResponse,
+  UnifiedDecisionsRequest,
+  UnifiedDecisionsResponse,
   UnifiedTranscriptionRequest,
   UnifiedTranscriptionResponse,
   UnifiedSpeechRequest,
@@ -14,7 +16,7 @@ import {
 import { QuotaEnforcer } from '../quota/quota-enforcer';
 import { buildQuotaExceededError } from '../quota/quota-middleware';
 import { logger } from '../../utils/logger';
-import { QUOTA_ERROR_PATTERNS } from '../../utils/constants';
+import { QUOTA_ERROR_PATTERNS, DEADLINE_EXPIRED_PATTERNS } from '../../utils/constants';
 import { CooldownManager } from '../runtime/cooldown-manager';
 import { StickySessionManager } from '../routing/sticky-session-manager';
 import { RouteResult } from '../routing/router';
@@ -26,6 +28,7 @@ import type { StallConfig } from '../inspectors/stall-inspector';
 import { sanitizeHeaders } from '../../utils/sanitize-headers';
 import type { RetryAttemptRecord } from './dispatcher-types';
 import { MediaDispatcher } from './media-dispatcher';
+import { editRequestToGenerationRequest } from '../../transformers/image';
 import { RequestManager, type RequestManagerHost } from './request-manager';
 import {
   appendFailureAttempt,
@@ -43,6 +46,7 @@ import {
 } from './upstream-execution';
 import { isPiAiRoute } from '../oauth/oauth-dispatcher';
 import { setupProviderHeaders } from '../providers/provider-request-headers';
+import { applyHeaderCacheKeyInjection } from './cache-key-injection';
 import {
   applyGeminiThinkingConfig,
   getApiMetadata,
@@ -84,6 +88,7 @@ export class Dispatcher {
         buildRequestUrl: this.buildRequestUrl.bind(this),
         buildTimeoutError: this.buildTimeoutError.bind(this),
         createAttemptTimeout: this.createAttemptTimeout.bind(this),
+        dispatchImageGenerations: this.dispatchImageGenerations.bind(this),
         emitRoutingUpdate: this.emitRoutingUpdate.bind(this),
         executeProviderRequest: this.executeProviderRequest.bind(this),
         formatFailureReason: this.formatFailureReason.bind(this),
@@ -111,6 +116,8 @@ export class Dispatcher {
   private getMediaDispatcher(): MediaDispatcher {
     if (!this.mediaDispatcher) {
       this.mediaDispatcher = new MediaDispatcher({
+        buildCancelledError: this.buildCancelledError.bind(this),
+        buildTimeoutError: this.buildTimeoutError.bind(this),
         resolveBaseUrl: this.resolveBaseUrl.bind(this),
         executeProviderRequest: this.executeProviderRequest.bind(this),
         handleProviderError: this.handleProviderError.bind(this),
@@ -365,9 +372,17 @@ export class Dispatcher {
     attemptedProviders: string[],
     retryHistory: RetryAttemptRecord[],
     finalRoute: RouteResult,
-    apiType: string
+    apiType: string,
+    upstreamModel?: string
   ): void {
-    attachAttemptMetadata(response, attemptedProviders, retryHistory, finalRoute, apiType);
+    attachAttemptMetadata(
+      response,
+      attemptedProviders,
+      retryHistory,
+      finalRoute,
+      apiType,
+      upstreamModel
+    );
   }
 
   private appendSkippedAttempt(
@@ -431,9 +446,10 @@ export class Dispatcher {
   private appendSuccessAttempt(
     retryHistory: RetryAttemptRecord[],
     route: RouteResult,
-    apiType?: string
+    apiType?: string,
+    upstreamModel?: string
   ): void {
-    appendSuccessAttempt(retryHistory, route, apiType);
+    appendSuccessAttempt(retryHistory, route, apiType, upstreamModel);
   }
 
   private appendFailureAttempt(
@@ -441,7 +457,8 @@ export class Dispatcher {
     route: RouteResult,
     error: any,
     apiType?: string,
-    retryable?: boolean
+    retryable?: boolean,
+    upstreamModel?: string
   ): void {
     appendFailureAttempt(
       retryHistory,
@@ -449,7 +466,8 @@ export class Dispatcher {
       error,
       this.formatFailureReason.bind(this),
       apiType,
-      retryable
+      retryable,
+      upstreamModel
     );
   }
 
@@ -557,10 +575,13 @@ export class Dispatcher {
     // Native OAuth routes carry fully-built wire headers (Bearer token + CC
     // fingerprint headers) stashed during payload preparation.
     const nativeOAuth = (route as any)[NATIVE_OAUTH_STASH];
-    if (nativeOAuth?.headers) {
-      return { ...nativeOAuth.headers };
-    }
-    return setupProviderHeaders(route, apiType, request);
+    const headers = nativeOAuth?.headers
+      ? { ...nativeOAuth.headers }
+      : setupProviderHeaders(route, apiType, request);
+    // Inject the provider's configured cache/session key header, if any. Runs
+    // after both paths so it also covers native OAuth (e.g. Meta), which builds
+    // its headers from scratch and never calls setupProviderHeaders.
+    return applyHeaderCacheKeyInjection(headers, route, request);
   }
 
   private getApiMetadata(metadata: Record<string, any>): Record<string, any> {
@@ -717,25 +738,52 @@ export class Dispatcher {
       );
     }
 
+    const isDeadlineExpired = DEADLINE_EXPIRED_PATTERNS.some((p) =>
+      errorText.toLowerCase().includes(p.toLowerCase())
+    );
+
+    if (isDeadlineExpired) {
+      logger.warn(
+        `Detected deadline expired error in response from ${route.provider}/${route.model} — skipping cooldown`
+      );
+    }
+
     // Trigger cooldown for all provider errors except:
     // - 413 (payload too large) and 422 (unprocessable entity): caller errors, not provider failures
     // - 400 without a quota pattern: likely a request validation error, not a provider failure
+    // - Deadline expired errors: transient request deadline expiration, not a provider failure
     const isCallerError =
       response.status === 413 ||
       response.status === 422 ||
-      (response.status === 400 && !isQuota400);
+      (response.status === 400 && !isQuota400) ||
+      isDeadlineExpired;
 
     if (!isCallerError) {
       let cooldownDuration: number | undefined;
 
-      // For 429 errors, try to parse provider-specific cooldown duration
-      if (response.status === 429) {
-        // Get provider type for parser lookup
-        cooldownDuration = parseCooldownDurationForProvider(
-          resolveCooldownProviderType(route),
-          errorText,
-          'HTTP'
-        );
+      // For 429/503 errors, check Retry-After header first, then try to parse provider-specific cooldown duration
+      if (response.status === 429 || response.status === 503) {
+        const retryAfterHeader = response.headers.get('retry-after');
+        if (retryAfterHeader) {
+          const seconds = parseFloat(retryAfterHeader);
+          if (Number.isFinite(seconds) && seconds > 0) {
+            cooldownDuration = Math.ceil(seconds * 1000);
+          } else {
+            const dateParsed = Date.parse(retryAfterHeader);
+            if (Number.isFinite(dateParsed) && dateParsed > Date.now()) {
+              cooldownDuration = dateParsed - Date.now();
+            }
+          }
+        }
+
+        if (!cooldownDuration) {
+          // Get provider type for parser lookup
+          cooldownDuration = parseCooldownDurationForProvider(
+            resolveCooldownProviderType(route),
+            errorText,
+            'HTTP'
+          );
+        }
       }
 
       // Mark provider+model as failed with optional duration
@@ -1029,12 +1077,35 @@ export class Dispatcher {
   }
 
   async dispatchImageGenerations(
-    request: UnifiedImageGenerationRequest
+    request: UnifiedImageGenerationRequest,
+    signal?: AbortSignal,
+    resolveTimeoutMs?: ResolveTimeoutMs
   ): Promise<UnifiedImageGenerationResponse> {
-    return this.getMediaDispatcher().dispatchImageGenerations(request);
+    return this.getMediaDispatcher().dispatchImageGenerations(request, signal, resolveTimeoutMs);
   }
 
-  async dispatchImageEdits(request: UnifiedImageEditRequest): Promise<UnifiedImageEditResponse> {
-    return this.getMediaDispatcher().dispatchImageEdits(request);
+  async dispatchDecisions(
+    request: UnifiedDecisionsRequest,
+    signal?: AbortSignal,
+    resolveTimeoutMs?: ResolveTimeoutMs
+  ): Promise<UnifiedDecisionsResponse> {
+    return this.getMediaDispatcher().dispatchDecisions(request, signal, resolveTimeoutMs);
+  }
+
+  /**
+   * @deprecated Image edits share the generation dispatch loop. Build a
+   * `UnifiedImageGenerationRequest` (upload as `input_references[0]`, optional
+   * inpainting mask as `mask`) and call `dispatchImageGenerations` instead.
+   */
+  async dispatchImageEdits(
+    request: UnifiedImageEditRequest,
+    signal?: AbortSignal,
+    resolveTimeoutMs?: ResolveTimeoutMs
+  ): Promise<UnifiedImageEditResponse> {
+    return this.getMediaDispatcher().dispatchImageGenerations(
+      editRequestToGenerationRequest(request),
+      signal,
+      resolveTimeoutMs
+    );
   }
 }

@@ -1,0 +1,44 @@
+profile: clean-code
+
+llm:
+  temperature: 1
+  max_tokens: 32768
+  timeout: 300
+  cache_ttl: 1440
+
+review:
+  sanitize_comments: true
+  context_chain:
+    enabled: true
+    max_context_tokens: 5000
+    follow_depth: 1
+    include_tests: true
+    include_callers: true
+    use_brain: true
+    impact_depth: 2
+    prefer_index: true
+
+focus:
+  - security
+  - bugs
+  - maintainability
+
+hook:
+  min_severity: major
+
+ignore:
+  files:
+    - "**/__tests__/**"
+    - "**/*.test.ts"
+    - "**/*.spec.ts"
+  # Suppress noisy hardcoded-secret/key false positives (LLM gets these wrong a lot).
+  # Matches substrings against issue title / issue_type (case-insensitive).
+  # Mirrors global ~/.codecora/cora-code/config.yaml so CI and local agree.
+  # Keeps hardcoded URL / port / role warnings intact.
+  rules:
+    - "sec-hardcoded-secret"
+    - "hardcoded secret"
+    - "hardcoded password"
+    - "hardcoded api key"
+    - "hardcoded key"
+    - "hardcoded credential"

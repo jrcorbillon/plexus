@@ -1,51 +1,42 @@
-// Types
-export type {
-  GpuParams,
-  ModelParams,
-  InferenceFootprint,
-  GpuProfileOption,
-} from './types';
-
-// ModelArchitecture is exported from model-params.ts
-
-// GPU presets, profile options, and GPU resolution
-export {
-  GPU_PRESETS,
-  VALID_GPU_PROFILES,
-  GPU_PROFILE_OPTIONS,
-  DEFAULT_GPU_PARAMS,
-  resolveGpuParams,
-} from './gpu-profiles';
-
-export type { GpuProfileName, GpuProfileType } from './gpu-profiles';
-
-// Model params, dtype utilities, heuristics, and resolution helpers
-export {
-  DTYPE_SIZES,
-  resolveDtypeSize,
-  normalizeDtypeName,
-  inferDataType,
-  DEFAULT_MODEL,
-  resolveModelParams,
-  PROPRIETARY_MODEL_HEURISTICS,
-  estimateTotalParamsFromConfig,
-  estimateActiveParams,
-} from './model-params';
-
-export type {
-  InferDtypeOptions,
-  EstimateTotalParamsOptions,
-  EstimateActiveParamsOptions,
-  ModelParamsWithDtype,
-  ModelArchitecture,
-} from './model-params';
-
 // Cooldown time formatting utilities
-export { formatMinutesToMinSec, formatMsToMinSec } from './format-time';
+export {
+  formatMinutesToMinSec,
+  formatMsToMinSec,
+  INDEFINITE_COOLDOWN_MS,
+  INDEFINITE_COOLDOWN_THRESHOLD_MS,
+} from './format-time';
 
 // Quota ranking (most-constrained selection) shared by backend and frontend
 export { constrainedRatio, mostConstrained, sortMostConstrainedFirst } from './quota-ranking';
 export type { QuotaRatioFields } from './quota-ranking';
+
+export {
+  isOAuthPlaceholderUrl,
+  isBodyCacheKeyInjectionField,
+  getDefaultCacheKeyInjection,
+  PROVIDER_CACHE_KEY_INJECTION_OPTIONS,
+  PROVIDER_CACHE_KEY_INJECTION_VALUES,
+  ProviderCacheKeyInjectionSchema,
+} from './provider';
+export type {
+  ProviderCacheKeyInjection,
+  ProviderCacheKeyInjectionOption,
+} from './provider';
+
+export {
+  ProviderPresetSchema,
+  PiAiQuirksSchema,
+  applyProviderPreset,
+  findProviderPreset,
+  findUnresolvedPresetVars,
+  substitutePresetVars,
+} from './provider-presets';
+export type {
+  PiAiQuirks,
+  ProviderPreset,
+  ProviderPresetDraft,
+  ProviderPresetTemplateVar,
+} from './provider-presets';
 
 export {
   LocalHttpMcpServerConfigSchema,

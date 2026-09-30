@@ -90,9 +90,6 @@ export function providerInsightsPath(providerId: string): string {
   return `/providers/${encodeURIComponent(providerId)}/insights`;
 }
 
-export function modelDisplayName(
-  canonical: string | null,
-  selected: string | null
-): string {
+export function modelDisplayName(canonical: string | null, selected: string | null): string {
   return canonical ?? selected ?? 'Unknown';
 }

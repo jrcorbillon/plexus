@@ -16,6 +16,7 @@ import { wireStallDetection, getGlobalStallConfig } from '../../utils/stall';
 import { sanitizeHeaders } from '../../utils/sanitize-headers';
 import { CLIENT_REQUEST_ID_HEADER, getClientRequestId } from '../../utils/client-request-id';
 import { getCacheRoutingHeaders, getHeaderValue } from '../../utils/cache-routing-headers';
+import { getReasoningLogValue } from '../../services/pi-ai/reasoning';
 
 export async function registerMessagesRoute(
   fastify: FastifyInstance,
@@ -42,6 +43,7 @@ export async function registerMessagesRoute(
       startTime,
       isStreamed: false,
       responseStatus: 'pending',
+      reasoningEffort: getReasoningLogValue(undefined, request.body) ?? null,
     };
 
     // Emit 'started' event immediately - this allows frontend to show in-flight requests
@@ -65,13 +67,21 @@ export async function registerMessagesRoute(
       });
 
       logger.silly('Incoming Anthropic Request', body);
+      // Start debug capture before parsing so malformed payloads are still traced.
+      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
       const transformer = new AnthropicTransformer();
       let unifiedRequest = await transformer.parseRequest(body);
       unifiedRequest.incomingApiType = 'messages';
       unifiedRequest.originalBody = body;
       unifiedRequest.requestId = requestId;
+      usageRecord.reasoningEffort = getReasoningLogValue(unifiedRequest, body) ?? null;
       unifiedRequest.cacheRoutingHeaders = getCacheRoutingHeaders(request.headers);
       unifiedRequest.anthropicBeta = getHeaderValue(request.headers, 'anthropic-beta');
+      unifiedRequest.userAgent = getHeaderValue(request.headers, 'user-agent');
+      unifiedRequest.claudeCodeSessionId = getHeaderValue(
+        request.headers,
+        'x-claude-code-session-id'
+      );
       unifiedRequest = attachKeyAccessPolicy(request, unifiedRequest);
       const xAppHeader = Array.isArray(request.headers['x-app'])
         ? request.headers['x-app'][0]
@@ -88,8 +98,6 @@ export async function registerMessagesRoute(
         };
       }
 
-      DebugManager.getInstance().startLog(requestId, body, sanitizeHeaders(request.headers as any));
-
       // Check quota before processing
       if (quotaEnforcer) {
         const quotaCheck = await checkQuotaMiddleware(request, reply, quotaEnforcer);
@@ -102,7 +110,7 @@ export async function registerMessagesRoute(
 
       const abortController = new AbortController();
       const { signal: dispatchSignal, resolveTimeoutMs } = wireUpstreamTimeout(abortController);
-      earlyDisconnect = wireEarlyDisconnectDetection(request, abortController);
+      earlyDisconnect = wireEarlyDisconnectDetection(request, abortController, requestId);
       const stallDetectionResult = wireStallDetection(abortController, getGlobalStallConfig());
       const unifiedResponse = await dispatcher.dispatch(
         unifiedRequest,
@@ -117,6 +125,7 @@ export async function registerMessagesRoute(
         provider: unifiedResponse.plexus?.provider,
         selectedModelName: unifiedResponse.plexus?.model,
         canonicalModelName: unifiedResponse.plexus?.canonicalModel,
+        reasoningEffort: usageRecord.reasoningEffort,
       });
 
       // Determine if token estimation is needed

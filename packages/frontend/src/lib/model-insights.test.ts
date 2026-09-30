@@ -36,14 +36,12 @@ describe('model-insights helpers', () => {
 
     it('encodes special characters in model ids', () => {
       expect(modelInsightsPath('special/alias: v1 + spaces')).toBe(
-        '/models/special%2Falias%3A%20v1%20%2B%20spaces/insights',
+        '/models/special%2Falias%3A%20v1%20%2B%20spaces/insights'
       );
     });
 
     it('encodes slashes to prevent route splitting', () => {
-      expect(modelInsightsPath('org/model-name')).toBe(
-        '/models/org%2Fmodel-name/insights',
-      );
+      expect(modelInsightsPath('org/model-name')).toBe('/models/org%2Fmodel-name/insights');
     });
 
     it('encodes colons', () => {

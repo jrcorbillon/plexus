@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   ResponsesTransformer,
   normalizeCompositeResponsesCallIds,
+  normalizeResponsesFunctionCallItemIds,
   normalizeResponsesReasoningContent,
+  normalizeResponsesNullEntries,
 } from '../responses';
 import { OpenAITransformer } from '../openai';
+import { parseAnthropicRequest } from '../anthropic/request-parser';
 
 /**
  * Round-trip tests for the Responses API transformer.
@@ -136,6 +139,103 @@ describe('Responses responses -> responses round-trip preserves native fields', 
     ).toEqual(['call_enS4L7YycCRyOiWOg31Xpvwm', 'call_enS4L7YycCRyOiWOg31Xpvwm']);
   });
 
+  it('strips call-ID-shaped item ids from function_call items (strict providers demand fc_...)', () => {
+    const badItem: Record<string, unknown> = {
+      type: 'function_call',
+      id: 'call_913ea4b95c694f4598cdc490',
+      name: 'exec_command',
+      call_id: 'call_913ea4b95c694f4598cdc490',
+      arguments: '{}',
+    };
+    const goodItem: Record<string, unknown> = {
+      type: 'function_call',
+      id: 'fc_0281edd961557cf2016a4b062d87948195968b8fa6c46b8c7a',
+      name: 'exec_command',
+      call_id: 'call_enS4L7YycCRyOiWOg31Xpvwm',
+      arguments: '{}',
+    };
+    const noIdItem: Record<string, unknown> = {
+      type: 'function_call',
+      name: 'exec_command',
+      call_id: 'call_no_item_id',
+      arguments: '{}',
+    };
+    const outputItem: Record<string, unknown> = {
+      type: 'function_call_output',
+      id: 'fco_019fcb3b-b025-7fc3-830a-f61ed2f8142b',
+      call_id: 'call_913ea4b95c694f4598cdc490',
+      output: 'ok',
+    };
+    const body = { input: [badItem, goodItem, noIdItem, outputItem] };
+
+    expect(normalizeResponsesFunctionCallItemIds(body)).toBe(1);
+    expect('id' in badItem).toBe(false);
+    expect(badItem.call_id).toBe('call_913ea4b95c694f4598cdc490');
+    expect(goodItem.id).toBe('fc_0281edd961557cf2016a4b062d87948195968b8fa6c46b8c7a');
+    expect('id' in noIdItem).toBe(false);
+    expect(outputItem.id).toBe('fco_019fcb3b-b025-7fc3-830a-f61ed2f8142b');
+  });
+
+  it('only touches the exact observed bad shape (function_call + call_-prefixed id)', () => {
+    const messageItem: Record<string, unknown> = {
+      type: 'message',
+      id: 'call_not_our_problem',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'hi' }],
+    };
+    // Caller-provided id with another prefix: not rewritten.
+    const customIdItem: Record<string, unknown> = {
+      type: 'function_call',
+      id: 'custom_item_id',
+      name: 'exec_command',
+      call_id: 'call_plain',
+      arguments: '{}',
+    };
+    const body = { input: [messageItem, customIdItem] };
+
+    expect(normalizeResponsesFunctionCallItemIds(body)).toBe(0);
+    expect(messageItem.id).toBe('call_not_our_problem');
+    expect(customIdItem.id).toBe('custom_item_id');
+
+    expect(normalizeResponsesFunctionCallItemIds(null)).toBe(0);
+    expect(normalizeResponsesFunctionCallItemIds({})).toBe(0);
+    expect(normalizeResponsesFunctionCallItemIds({ input: 'not-an-array' })).toBe(0);
+  });
+
+  it('rebuilds a clean request after stripping replayed item ids', async () => {
+    const transformer = new ResponsesTransformer();
+    const body = {
+      model: 'gpt-4o',
+      input: [
+        {
+          type: 'function_call',
+          id: 'call_913ea4b95c694f4598cdc490',
+          name: 'exec_command',
+          call_id: 'call_913ea4b95c694f4598cdc490',
+          arguments: '{}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_913ea4b95c694f4598cdc490',
+          output: 'ok',
+        },
+      ],
+    };
+
+    normalizeResponsesFunctionCallItemIds(body);
+    const unified = await transformer.parseRequest(body);
+    const built = await transformer.transformRequest(unified);
+
+    expect(
+      built.input
+        .filter(
+          (item: any) => item.type === 'function_call' || item.type === 'function_call_output'
+        )
+        .map((item: any) => item.call_id)
+    ).toEqual(['call_913ea4b95c694f4598cdc490', 'call_913ea4b95c694f4598cdc490']);
+    expect(built.input.every((item: any) => !String(item.id ?? '').startsWith('call_'))).toBe(true);
+  });
+
   it('removes replayed plaintext reasoning content while preserving reasoning metadata', () => {
     const body = {
       input: [
@@ -190,7 +290,7 @@ describe('Responses responses -> responses round-trip preserves native fields', 
     expect(built.truncation).toBe('auto');
   });
 
-  it('preserves metadata, previous_response_id, conversation, stream_options', async () => {
+  it('preserves metadata and stream_options without forwarding local state references', async () => {
     const transformer = new ResponsesTransformer();
     const unified = await transformer.parseRequest(RESPONSES_REQUEST);
     const built = await transformer.transformRequest({
@@ -200,8 +300,8 @@ describe('Responses responses -> responses round-trip preserves native fields', 
     });
 
     expect(built.metadata).toEqual({ session: 's1' });
-    expect(built.previous_response_id).toBe('resp_prev_1');
-    expect(built.conversation).toBe('conv_1');
+    expect(built.previous_response_id).toBeUndefined();
+    expect(built.conversation).toBeUndefined();
     expect(built.stream_options).toEqual({ include_obfuscation: true });
     expect(built.prompt_cache_retention).toBe('24h');
     expect(built.safety_identifier).toBe('si-1');
@@ -286,6 +386,47 @@ describe('Responses responses -> responses round-trip preserves native fields', 
     expect(built.store).toBeUndefined();
     expect(built.service_tier).toBeUndefined();
     expect(built.stream_options).toBeUndefined();
+  });
+});
+
+describe('Anthropic -> Responses reasoning projection', () => {
+  it('omits unified-only reasoning fields from the Responses payload', async () => {
+    const unified = await parseAnthropicRequest({
+      model: 'claude-opus-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    });
+
+    const built = await new ResponsesTransformer().transformRequest(unified);
+
+    expect(built.reasoning).toEqual({ effort: 'high' });
+    expect(built.reasoning).not.toHaveProperty('enabled');
+    expect(built.reasoning).not.toHaveProperty('max_tokens');
+  });
+
+  it('uses the Responses off effort for explicitly disabled thinking', async () => {
+    const unified = await parseAnthropicRequest({
+      model: 'claude-opus-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+      thinking: { type: 'disabled' },
+    });
+
+    const built = await new ResponsesTransformer().transformRequest(unified);
+
+    expect(built.reasoning).toEqual({ effort: 'none' });
+  });
+
+  it('leaves adaptive magnitude selection to registry auto-compat', async () => {
+    const unified = await parseAnthropicRequest({
+      model: 'claude-opus-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+      thinking: { type: 'adaptive' },
+    });
+
+    const built = await new ResponsesTransformer().transformRequest(unified);
+
+    expect(built.reasoning).toBeUndefined();
   });
 });
 
@@ -513,5 +654,112 @@ describe('transformRequest stream-field hygiene (no phantom `stream: undefined`)
     const built = await transformer.transformRequest(unified);
     expect('stream' in built).toBe(true);
     expect(built.stream).toBe(false);
+  });
+});
+
+describe('transformRequest tool strict-field hygiene', () => {
+  const MINIMAL_REQUEST = {
+    model: 'gpt-4o',
+    input: [
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Hello' }],
+      },
+    ],
+  };
+
+  const functionTool = (strict?: boolean) => ({
+    type: 'function',
+    name: 'get_weather',
+    description: 'Get the weather',
+    parameters: { type: 'object', properties: { city: { type: 'string' } } },
+    ...(strict !== undefined ? { strict } : {}),
+  });
+
+  it('preserves an explicit strict:false in Responses and Chat payloads', async () => {
+    const unified = await new ResponsesTransformer().parseRequest({
+      ...MINIMAL_REQUEST,
+      tools: [functionTool(false)],
+    });
+
+    const responsesPayload = await new ResponsesTransformer().transformRequest(unified);
+    const chatPayload = await new OpenAITransformer().transformRequest(unified);
+
+    expect(responsesPayload.tools[0].strict).toBe(false);
+    expect(chatPayload.tools[0].function.strict).toBe(false);
+  });
+
+  it('does not add strict when the client omits it', async () => {
+    const unified = await new ResponsesTransformer().parseRequest({
+      ...MINIMAL_REQUEST,
+      tools: [functionTool()],
+    });
+
+    const responsesPayload = await new ResponsesTransformer().transformRequest(unified);
+    const chatPayload = await new OpenAITransformer().transformRequest(unified);
+
+    expect(Object.hasOwn(responsesPayload.tools[0], 'strict')).toBe(false);
+    expect(Object.hasOwn(chatPayload.tools[0].function, 'strict')).toBe(false);
+  });
+});
+
+describe('Responses request parsing tolerates null entries', () => {
+  it('drops null content parts, input items, and reasoning summary parts', async () => {
+    const transformer = new ResponsesTransformer();
+    const unified = await transformer.parseRequest({
+      model: 'gpt-4o',
+      input: [
+        null,
+        { type: 'message', role: 'user', content: [null, { type: 'input_text', text: 'Hi' }] },
+        { type: 'reasoning', summary: [null, { type: 'summary_text', text: 'thinking' }] },
+        {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'a' }, null, { type: 'output_text', text: 'b' }],
+        },
+      ],
+    });
+
+    expect(unified.messages).toEqual([
+      { role: 'user', content: 'Hi' },
+      { role: 'assistant', content: 'thinking' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'a' },
+          { type: 'text', text: 'b' },
+        ],
+      },
+    ]);
+  });
+});
+
+describe('normalizeResponsesNullEntries', () => {
+  it('removes null input items, content parts, and summary parts from the dispatch body', () => {
+    const body = {
+      model: 'gpt-4o',
+      input: [
+        null,
+        { type: 'message', role: 'user', content: [null, { type: 'input_text', text: 'hi' }] },
+        { type: 'reasoning', summary: [null, { type: 'summary_text', text: 't' }] },
+      ],
+    };
+
+    expect(normalizeResponsesNullEntries(body)).toBe(3);
+    expect(body.input).toEqual([
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 't' }] },
+    ]);
+  });
+
+  it('leaves string input and clean bodies untouched', () => {
+    const stringBody = { model: 'gpt-4o', input: 'hi' };
+    expect(normalizeResponsesNullEntries(stringBody)).toBe(0);
+    expect(stringBody.input).toBe('hi');
+
+    const clean = { input: [{ type: 'message', role: 'user', content: 'hi' }] };
+    expect(normalizeResponsesNullEntries(clean)).toBe(0);
+    expect(clean.input).toEqual([{ type: 'message', role: 'user', content: 'hi' }]);
   });
 });

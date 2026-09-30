@@ -1,3 +1,4 @@
+import { sanitizeHeaders } from '../../utils/sanitize-headers';
 import { UsageStorageService } from './usage-storage';
 import { logger } from '../../utils/logger';
 import { createParser, EventSourceMessage } from 'eventsource-parser';
@@ -204,7 +205,7 @@ export class DebugManager {
       if (log.deferPayloadCapture && this.isAliasDimensionEnabled(modelAlias)) {
         log.deferPayloadCapture = false;
         log.rawRequest = rawRequest;
-        log.requestHeaders = requestHeaders;
+        log.requestHeaders = requestHeaders ? sanitizeHeaders(requestHeaders) : undefined;
       }
     }
   }
@@ -226,7 +227,8 @@ export class DebugManager {
       apiKey: getCurrentKeyName() ?? null,
       modelAlias,
       rawRequest: shouldCapturePayload ? rawRequest : undefined,
-      requestHeaders: shouldCapturePayload ? requestHeaders : undefined,
+      requestHeaders:
+        shouldCapturePayload && requestHeaders ? sanitizeHeaders(requestHeaders) : undefined,
       createdAt: Date.now(),
       deferPayloadCapture: shouldDeferAliasCapture,
     });

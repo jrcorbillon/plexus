@@ -127,7 +127,7 @@ describe('resolveCustomRange', () => {
     expect(result.label).toBe('Custom');
     expect(result.startTimeMs).toBe(startMs);
     expect(result.endTimeMs).toBe(endMs);
-    expect(result.bucketSizeMs).toBe(6 * 60 * 60 * 1000);
+    expect(result.bucketSizeMs).toBe(2 * 60 * 60 * 1000);
   });
 
   it('rejects start >= end', () => {

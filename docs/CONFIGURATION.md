@@ -17,8 +17,13 @@ Plexus stores all configuration in the database and manages it via the **Admin U
 | `ENCRYPTION_KEY` | 32-byte key for encrypting sensitive data at rest. Generated via: `openssl rand -hex 32` | No |
 | `DATA_DIR` | Directory for SQLite database. | No |
 | `LOG_LEVEL` | Verbosity: `error`, `warn`, `info`, `debug`, `silly` | No |
+| `PLEXUS_USAGE_RETENTION_DAYS` | Retention for request usage, debug, error, MCP, and quota meter-snapshot logs in days (default 365). Older rows are pruned daily. | No |
 | `PORT` | HTTP server port (defaults to 4000; auto-derived from git worktree name when running `bun run dev`). | No |
 | `HOST` | Address to bind to. | No |
+| `FRPC_SERVER_ADDR` | Development-only LAN address of the frps server. | No |
+| `FRPC_AUTH_TOKEN` | Development-only token shared with frps. | No |
+| `FRPC_SERVER_PORT` | Development-only frps control port (defaults to 7000). | No |
+| `FRPC_SUBDOMAIN_HOST` | Optional development-only host suffix used to print the full HTTPS tunnel URL. | No |
 
 ### Quick Start
 
@@ -37,12 +42,15 @@ docker run -e ADMIN_KEY="my-secret" -v ./data:/app/data -p 4000:4000 plexus:late
 
 ## Configuration via Admin UI
 
-The **Admin UI** (accessible at `http://localhost:4000` after starting) is the easiest way to configure Plexus. It provides forms for all configuration options with real-time validation.
+The **Admin UI** is accessible at the port printed by `bun run dev` after
+starting. It provides forms for all configuration options with real-time
+validation.
 
 - **Providers**: Add/edit upstream AI providers (API keys, base URLs, model lists)
 - **Models**: Create model aliases with routing logic and pricing
 - **Keys**: Manage client API keys with optional quota assignment
 - **Quotas**: Define usage limits (tokens, requests, or spending) per time window
+- **Custom Quota Checkers**: Write JavaScript integrations for provider quota APIs
 - **MCP Servers**: Configure MCP proxy endpoints
 - **OAuth**: Login to OAuth-backed providers (Anthropic, GitHub Copilot, Codex, etc.)
 - **Settings**: Vision fallthrough, global defaults, cooldown configuration
@@ -67,10 +75,17 @@ For programmatic configuration, use the Management API (`/v0/management/*`). All
 | `GET /v0/management/user-quotas` | List quota definitions |
 | `PUT /v0/management/user-quotas/{name}` | Create/update quota |
 | `DELETE /v0/management/user-quotas/{name}` | Remove quota |
+| `GET /v0/management/custom-checkers` | List custom provider quota checkers |
+| `PUT /v0/management/custom-checkers/{id}` | Create/update a custom quota checker |
+| `POST /v0/management/custom-checkers/{id}/test` | Test custom checker code without persisting a snapshot |
+| `DELETE /v0/management/custom-checkers/{id}` | Remove a custom quota checker |
 | `GET /v0/management/config/export` | Export full config as JSON |
 | `PUT /v0/management/config` | Import config (replace all) |
 
 See the [API Reference](openapi/openapi.yaml) for complete endpoint documentation.
+
+For the complete custom checker workflow, context API, authentication/header
+configuration, and examples, see [Custom Quota Checkers](CUSTOM_QUOTA_CHECKERS.md).
 
 ### Debug Trace Capture
 
@@ -115,9 +130,11 @@ A **provider** represents an upstream AI service that Plexus routes requests to.
 | **Extra Body** | Additional fields merged into every request | No |
 | **Upstream Timeout** | Per-provider request timeout override in milliseconds. If unset, the global timeout is used. | No |
 | **Disable Cooldown** | Exclude from automatic cooldown on errors | No |
+| **Allow 100% Utilization** | Allow quota usage to reach 100% instead of cooling down at 99% | No (default: false) |
 | **Stall Detection Overrides** | Optional per-provider overrides for TTFB/throughput stall detection. Empty = inherit global setting for that field. | No |
 | **pi-ai Provider** | Builtin pi-ai provider ID used for registry model lookup (for example, `anthropic`, `openai`, `google`) | No |
-| **Auto Compat** | Use pi-ai registry metadata to automatically map reasoning/thinking and generation options for models with a `pi_ai_model_id` | No (default: false) |
+| **pi-ai Quirks** | Inline compatibility traits by API and model, an alternative to pi-ai Provider. | No |
+| **Auto Compat** | Opt-in reasoning and generation mapping from either a pi-ai model link or inline quirks. With neither, no registry-driven quirk handling occurs. | No (default: false) |
 | **Adapters** | Request/response rewrite hooks applied to every model under this provider (see [Provider Adapters](#provider-adapters)) | No |
 
 ### Multi-Protocol Providers
@@ -129,44 +146,130 @@ Some providers support multiple API formats (OpenAI chat, Anthropic messages, em
 | `chat` | OpenAI-compatible chat completions |
 | `messages` | Anthropic Claude Messages API |
 | `embeddings` | OpenAI-compatible embeddings (Gemini providers auto-transformed) |
-| `image` | Image generation (DALL-E, etc.) |
+| `openai-images` | OpenAI-compatible image generation and edits (`/images/generations`, `/images/edits`) |
+| `openrouter-images` | Dedicated OpenRouter image endpoint (`/images`) |
+| `codex-images` | ChatGPT-subscription Codex Images backend; only valid on an `openai-codex` OAuth provider |
 | `transcriptions` | Speech-to-text (Whisper) |
 | `speech` | Text-to-speech |
 
 When combined with `priority: api_match` on a model alias, Plexus prefers providers that natively support the incoming API format.
 
+An incoming `/v1/images` request can also be served by a `chat` or `gemini` target when the provider
+model declares it through `access_via` — Plexus picks the image transformer from the resolved target
+API type, not from the incoming request shape. The `api_base_url` map form must hold real URLs; an
+OAuth provider declares `oauth://` through the string form instead.
+
 ### OAuth Providers
 
-Plexus supports OAuth-backed providers via the [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) library. These require authentication through the Admin UI.
+Plexus supports OAuth-backed providers via the [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) library. Every OAuth-capable provider pi-ai ships is supported — new flows pi-ai adds become available without a Plexus update. These require authentication through the Admin UI.
 
-**Supported OAuth providers:**
+**Supported OAuth providers (as of the current pi-ai dependency):**
 - Anthropic Claude
 - GitHub Copilot
 - OpenAI Codex
 - OpenAI o1-pro
+- xAI (Grok / X Premium+ subscription)
+- Kimi Code (Moonshot subscription)
+- OpenRouter
+
+`radius` is the one pi-ai OAuth flow Plexus excludes — it's a configurable gateway factory rather than a fixed identity provider, so it doesn't fit this list. The current set is always available from the Admin UI's OAuth provider dropdown, or via `GET /v0/management/oauth/providers`.
 
 **Configuration:**
 - Set API Base URL to `oauth://`
 - Set API Key to `oauth`
-- Set OAuth Account (e.g., `work`, `personal`)
 - Set OAuth Provider if the provider key differs from pi-ai's expected ID
+
+The OAuth account is the provider ID itself (one login per provider) — there is
+no separate account field. Existing logins created under older account names
+keep working.
 
 Once configured, log in via the Admin UI to authorize Plexus. Tokens are stored encrypted (when `ENCRYPTION_KEY` is set) and auto-refreshed.
 
+#### Codex Image Models
+
+An `openai-codex` OAuth provider can also serve image generation through the ChatGPT Images backend.
+Mark the provider model `type: image` and give it `access_via: ["codex-images"]`. That is the only
+image protocol an OAuth route accepts; any other image target on an OAuth provider is rejected with a
+400.
+
+```yaml
+providers:
+  codex:
+    api_base_url: "oauth://"
+    api_key: "oauth"
+    oauth_provider: "openai-codex"
+    models:
+      gpt-5.5: {}
+      gpt-image-2:
+        type: image
+        access_via: ["codex-images"]
+        pricing: { source: per_request, amount: 0 }
+        extraBody: { quality: low }
+      gpt-image-2.5-flare:
+        type: image
+        access_via: ["codex-images"]
+models:
+  codex-image:
+    type: image
+    targets: [{ provider: codex, model: gpt-image-2 }]
+```
+
+Image generation on a ChatGPT subscription is not billed per token, so give these models
+`pricing` with `source: per_request` and `amount: 0`. Usage records then carry a real cost of zero
+instead of a token-rate estimate.
+
+`extraBody` is merged **over** the built image payload — provider first, then provider model, then
+alias, with later entries winning — so its values override any matching field the client sent, they
+do not merely fill in unset ones. The `extraBody: { quality: low }` above pins every request on this
+model to `quality: low`, including one that asked for `quality: high`. Use it to enforce a setting,
+and leave it out when clients should be able to choose.
+
+The Codex target accepts `size`, `n`, `quality`, and `background`, and returns base64 image data. It
+rejects `response_format: "url"`, `output_format`, `output_compression`, `seed`, `style`, `user`, and
+`mask` with a 400, and `stream: true` with a 501. Requests carrying reference images become Codex
+edits, with at most five references per request.
+
+#### Reaching an Image Model from a Chat Client
+
+An alias with `type: image` also answers chat-shaped requests. A request on `/v1/chat/completions`,
+`/v1/responses`, `/v1/messages`, the Gemini surface, or `/v1/completions` whose model resolves to an
+image model is turned into an image generation: the last user message becomes the prompt, that
+message's attached images become edit references, and `n` is `1`. Size, quality, background, and
+output format stay unset, so provider/model/alias `extraBody` still decides them.
+
+Responses-format clients receive native `image_generation_call` output items; chat, Anthropic
+Messages, Gemini, Ollama, and legacy Completions clients receive a markdown data URI. Routing, key
+access policy, quota, cooldown, failover, and usage recording are the same as for
+`/v1/images/generations`.
+
+Set `type: image` on the **alias** when its targets are not uniformly image models: an alias that
+fans out across image and non-image targets with no alias-level type is left as an ordinary chat
+request, and Plexus logs a warning naming the alias. An explicit `image_generation` tool on an
+ordinary chat model is unaffected — detection never reads the request's tools.
+
 ### Registry-Aware Compatibility
 
-Plexus can use pi-ai's builtin model registry as compatibility metadata while still
-preserving v1 pass-through request fidelity. This is separate from OAuth execution and
-does not re-enable the removed `inference-v2` path.
+Plexus maps client reasoning and generation options using either a builtin pi-ai
+model link or explicit inline quirks. This preserves the v1 pass-through path
+and does not re-enable the removed `inference-v2` path.
 
-Enable it with `auto_compat: true` at the provider level or on an individual provider
-model. A model must also have `pi_ai_model_id` set to a builtin pi-ai model ID. When the
-provider has `pi_ai_provider`, Plexus validates that the pair resolves in the builtin
-registry and warns rather than failing if it does not.
+With a builtin link, set `pi_ai_provider` on the provider and `pi_ai_model_id` on
+each configured provider model. Enable `auto_compat: true` on the provider or
+model. If the pair is missing or unresolved, the registry rewrite does nothing;
+unresolved configured pairs produce a startup warning.
 
-When enabled, Plexus extracts the client's reasoning/thinking intent from the incoming
-request and maps it to the provider fields supported by the resolved registry model. If
-the model has no resolvable `pi_ai_model_id`, the compatibility step is skipped.
+For providers without pi-ai definitions, use `pi_ai_quirks` instead of
+`pi_ai_provider`. Keys are configured target APIs (`chat`, `completions`,
+`messages`, `responses`, `gemini`). Each entry specifies its pi-ai API dialect
+and only known traits: `reasoning`, `thinkingLevelMap`, `maxTokens`, and a
+bounded `compat` object. Optional `models` entries use exact upstream model IDs
+and override the common traits. Model-specific maps replace the common
+thinking-level map; individual `compat` flags merge. No `pi_ai_model_id` is
+needed. Unknown traits remain unknown and are not advertised or rewritten.
+
+With neither source, requests use ordinary routing. Existing provider configs
+with `auto_compat: true` but no source remain valid and inert; new presets
+cannot enable auto-compat without a quirk source.
 
 ```json
 PUT /v0/management/providers/anthropic_oauth
@@ -174,7 +277,6 @@ PUT /v0/management/providers/anthropic_oauth
   "api_base_url": "oauth://",
   "api_key": "oauth",
   "oauth_provider": "anthropic",
-  "oauth_account": "work",
   "pi_ai_provider": "anthropic",
   "auto_compat": true,
   "models": {
@@ -201,9 +303,32 @@ You can also enable compatibility only for selected models:
 }
 ```
 
-`reasoning_rewrite` remains available as a manual escape hatch, but it overlaps with
-`auto_compat`. Prefer `auto_compat` for registry-backed models, and revisit existing
-custom rewrites before running both surfaces in parallel.
+For example, an OpenAI-compatible chat API that requires
+`max_completion_tokens` instead of `max_tokens` can declare just that quirk:
+
+```json
+{
+  "api_base_url": { "chat": "https://example.test/v1" },
+  "api_key": "sk-example",
+  "auto_compat": true,
+  "pi_ai_quirks": {
+    "chat": {
+      "api": "openai-completions",
+      "compat": { "maxTokensField": "max_completion_tokens" }
+    }
+  },
+  "models": { "upstream/model-id": {} }
+}
+```
+
+The preset catalog at [`provider-presets.json`](../packages/backend/data/provider-presets.json)
+uses camelCase (`piAiProvider` or `piAiQuirks`) and publishes an
+[editor JSON Schema](../packages/backend/data/provider-presets.schema.json). An inline
+profile is saved into the provider config, so later remote catalog edits do not
+change configured behavior. Model discovery and model-listing URLs are separate work.
+
+`reasoning_rewrite` remains a manual escape hatch but overlaps with auto-compat.
+Avoid enabling both for the same model and field.
 
 ### Raw Provider Passthrough
 
@@ -511,6 +636,7 @@ This is separate from per-target failover within a single round (controlled by t
 | `performance` | Routes to highest post-TTFT throughput (output tokens / streaming time) |
 | `latency` | Routes to lowest time-to-first-token |
 | `usage` | Routes to provider with least recent usage (last 24 hours) |
+| `quota` | Favors tracked targets with the most quota headroom to consume before reset; utilization is scored continuously, while non-expiring balances rank after resettable quotas |
 | `e2e_performance` | Routes to highest end-to-end throughput (output tokens / total request time) |
 
 #### Inline Exploration (default)
@@ -977,9 +1103,19 @@ All MCP endpoints require a Plexus API key. Client auth headers are NOT forwarde
 
 Plexus exposes standard OAuth 2.0 endpoints for MCP clients:
 - `GET /.well-known/oauth-authorization-server`
-- `GET /.well-known/oauth-protected-resource`
-- `GET /.well-known/openid-configuration`
-- `POST /register`
+- `GET /.well-known/oauth-protected-resource/mcp/:name`
+- `GET /oauth/authorize` and `POST /oauth/authorize`
+- `POST /oauth/token`
+- `POST /oauth/register`
+
+The authorization server is shared by all configured MCP servers, while each
+`/mcp/:name` endpoint has its own protected-resource metadata and RFC 8707
+resource identifier (`<issuer>/mcp/:name`).
+
+The browser consent step uses the existing Plexus session. A limited API-key
+session is always bound to that key and cannot select another key. An
+administrator session must explicitly choose the API-key identity to which the
+MCP grant will be bound, even when only one active key exists.
 
 ---
 

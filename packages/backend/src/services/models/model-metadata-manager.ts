@@ -469,6 +469,11 @@ export class ModelMetadataManager {
     }
   }
 
+  /** Current auto-refresh cadence in minutes (default 60). */
+  public getAutoRefreshIntervalMinutes(): number {
+    return this.autoRefreshIntervalMinutes;
+  }
+
   // ─── Loaders ────────────────────────────────────
 
   private async loadOpenRouter(source: string): Promise<MetadataSourceRefreshSummary> {
@@ -1003,12 +1008,13 @@ export function resolveAutomaticModelIdentity(
 
   const targets = (modelConfig.target_groups ?? [])
     .flatMap((group) => group.targets)
-    .filter((target) => target.enabled !== false);
+    .filter((target) => target.enabled !== false && !target.alias);
   const identities = targets.map((target) => {
-    const provider = providers[target.provider];
-    const providerModel = getProviderModelConfig(provider, target.model);
-    const model = providerModel?.pi_ai_model_id ?? target.model;
-    const providerId = provider?.pi_ai_provider ?? inferProviderFromModel(model) ?? target.provider;
+    const provider = providers[target.provider!];
+    const providerModel = getProviderModelConfig(provider, target.model!);
+    const model = providerModel?.pi_ai_model_id ?? target.model!;
+    const providerId =
+      provider?.pi_ai_provider ?? inferProviderFromModel(model) ?? target.provider!;
     return { provider: normalizeCatalogProvider(providerId, model), model };
   });
 

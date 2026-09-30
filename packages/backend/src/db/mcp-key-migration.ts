@@ -1,7 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { getCurrentDialect, getDatabase, getSchema } from './client';
 import { decryptJson, encrypt } from '../utils/encryption';
-import { toDbTimestampMs } from '../utils/normalize';
 import { logger } from '../utils/logger';
 
 const AUTH_HEADERS = new Map([
@@ -87,7 +86,7 @@ export async function runMcpKeyMigration(): Promise<number> {
   const db = getDatabase();
   const schema = getSchema();
   const dialect = getCurrentDialect();
-  const timestamp = toDbTimestampMs(Date.now(), dialect);
+  const timestamp = new Date();
   let migratedCount = 0;
 
   const servers = await db.select().from(schema.mcpServers);

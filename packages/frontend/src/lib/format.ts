@@ -1,7 +1,5 @@
 import humanFormat from 'human-format';
 
-export const KWH_PER_SLICE = 0.01;
-
 /**
  * Format a duration in seconds to human-readable format (e.g., "2h 30m", "45m", "30s", "3mo 2w", "1y 2mo")
  */
@@ -60,6 +58,67 @@ export function formatResetsIn(iso: string | null): string {
   if (days > 0) return `in ${days}d ${hours}h`;
   if (hours > 0) return `in ${hours}h ${minutes}m`;
   return minutes > 0 ? `in ${minutes}m` : 'in <1m';
+}
+
+export interface ResetCountdown {
+  /** Compact form for tight layouts: "3h 12m", "45s", "now", "Dec 25" */
+  short: string;
+  /** Sentence form: "resets in 3h 12m", "resetting now", "resets Dec 25" */
+  long: string;
+  /** Absolute local timestamp, for tooltips */
+  absolute: string;
+  /** Milliseconds until the reset; <= 0 once due */
+  remainingMs: number;
+}
+
+/**
+ * Build the display forms of a quota reset countdown. Returns null when the
+ * meter reports no reset time (many providers only expose a balance).
+ */
+export function formatResetCountdown(
+  iso: string | null | undefined,
+  nowMs: number = Date.now()
+): ResetCountdown | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  const resetsAtMs = date.getTime();
+  if (!Number.isFinite(resetsAtMs)) return null;
+
+  const absolute = date.toLocaleString();
+  const remainingMs = resetsAtMs - nowMs;
+  if (remainingMs <= 0) {
+    return { short: 'now', long: 'resetting now', absolute, remainingMs };
+  }
+
+  const totalSeconds = Math.floor(remainingMs / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 7) {
+    const short = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return { short, long: `resets ${short}`, absolute, remainingMs };
+  }
+
+  const short =
+    days > 0
+      ? `${days}d ${hours}h`
+      : hours > 0
+        ? `${hours}h ${minutes}m`
+        : minutes > 0
+          ? `${minutes}m`
+          : `${seconds}s`;
+
+  return { short, long: `resets in ${short}`, absolute, remainingMs };
+}
+
+/**
+ * How often a countdown for `remainingMs` needs to re-render to stay accurate:
+ * every second in the final minute (seconds are shown), otherwise every 30s.
+ */
+export function countdownTickMs(remainingMs: number): number {
+  return remainingMs > 0 && remainingMs < 60_000 ? 1_000 : 30_000;
 }
 
 /**
@@ -146,6 +205,45 @@ export function formatCost(cost: number, decimals: number = 4): string {
   return `$${cost.toFixed(decimals)}`;
 }
 
+export type FormatCostInOptions = {
+  currency: string;
+  rate: number;
+  symbol?: string;
+  decimals?: number;
+};
+
+export function formatCostIn(costUsd: number, options: FormatCostInOptions): string {
+  const decimals = options.decimals ?? 4;
+  const cost = costUsd * options.rate;
+  const formatter = new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: options.currency,
+    currencyDisplay: 'symbol',
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+
+  const formatValue = (value: number, marker?: string): string => {
+    let integerPartSeen = false;
+    return formatter
+      .formatToParts(value)
+      .map((part) => {
+        if (part.type === 'currency' && options.symbol) return options.symbol;
+        if (marker && !integerPartSeen && part.type === 'integer') {
+          integerPartSeen = true;
+          return `${marker}${part.value}`;
+        }
+        return part.value;
+      })
+      .join('');
+  };
+
+  if (cost === 0) return formatValue(cost);
+  const threshold = Math.pow(10, -decimals);
+  if (cost > 0 && cost < threshold) return formatValue(threshold, '<');
+  return formatValue(cost);
+}
+
 /**
  * Format large point balances with k, M, B suffixes (e.g., 4948499 -> "4.9M", 1500 -> "1k")
  */
@@ -193,30 +291,6 @@ export function formatBytes(bytes: number): string {
 export function formatTPS(tps: number): string {
   if (tps === 0) return '0';
   return tps.toFixed(1);
-}
-
-/**
- * Format energy in kWh with human-readable sub-units.
- */
-export function formatEnergy(kwh: number): string {
-  if (kwh >= 1) return `${kwh.toFixed(3)} kWh`;
-
-  const wh = kwh * 1000;
-  if (wh >= 1) return `${wh.toFixed(3)} Wh`;
-
-  const mwh = wh * 1000;
-  if (mwh >= 0.01) return `${mwh.toFixed(3)} mWh`;
-
-  return `${(mwh * 1000).toFixed(3)} µWh`;
-}
-
-/**
- * Format a number of toast-slices with appropriate precision.
- */
-export function formatSlices(slices: number): string {
-  if (slices < 1) return slices.toFixed(2);
-  if (slices < 10) return slices.toFixed(1);
-  return Math.round(slices).toLocaleString();
 }
 
 /**
@@ -296,8 +370,13 @@ export function getEstimatedBytesPerToken(options: {
   const apiType = (options.incomingApiType || options.outgoingApiType || '').toLowerCase();
 
   if (apiType.includes('anthropic') || apiType.includes('messages') || apiType === 'oauth') {
-    // Anthropic SSE: `event: content_block_delta\ndata: {"type":...}\n\n` (~115 B/token)
-    return 115;
+    // Anthropic Messages streams average about 140 wire bytes per output token.
+    return 140;
+  }
+
+  if (apiType.includes('responses')) {
+    // Responses estimates use only `.delta` events, excluding lifecycle/tool metadata frames.
+    return 200;
   }
 
   if (
@@ -306,8 +385,8 @@ export function getEstimatedBytesPerToken(options: {
     apiType.includes('responses') ||
     apiType.includes('antigravity')
   ) {
-    // OpenAI SSE: `data: {"id":...,"object":"chat.completion.chunk",...}\n\n` (~160 B/token)
-    return 160;
+    // OpenAI Chat streams average about 215 wire bytes per output token.
+    return 215;
   }
 
   if (apiType.includes('gemini') || apiType.includes('google')) {

@@ -41,8 +41,7 @@ export function useInsightsPage<TData>({
   const entityIdRef = useRef(entityId);
   const selectionKeyRef = useRef(selectionKey(activeSelection));
 
-  const activeRange =
-    activeSelection.kind === 'preset' ? activeSelection.key : null;
+  const activeRange = activeSelection.kind === 'preset' ? activeSelection.key : null;
 
   useEffect(() => {
     selectionKeyRef.current = selectionKey(activeSelection);
@@ -108,16 +107,12 @@ export function useInsightsPage<TData>({
     [entityId, fetchInsights]
   );
 
-  const isConfiguredForCurrentEntity =
-    configEntityId === entityId ? isEntityConfigured : null;
+  const isConfiguredForCurrentEntity = configEntityId === entityId ? isEntityConfigured : null;
   const isLoadingCurrentEntity = loadingEntityId === entityId;
   const errorForCurrentEntity = errorEntityId === entityId ? error : null;
   const dataForCurrentEntity = dataEntityId === entityId ? data : null;
 
-  const serializedSelection = useMemo(
-    () => selectionKey(activeSelection),
-    [activeSelection]
-  );
+  const serializedSelection = useMemo(() => selectionKey(activeSelection), [activeSelection]);
 
   useEffect(() => {
     if (entityIdRef.current !== entityId) return;
@@ -140,11 +135,7 @@ export function useInsightsPage<TData>({
 
   const handleCustomRangeSelect = useCallback((startMs: number, endMs: number) => {
     setActiveSelection((prev) => {
-      if (
-        prev.kind === 'custom' &&
-        prev.startMs === startMs &&
-        prev.endMs === endMs
-      ) {
+      if (prev.kind === 'custom' && prev.startMs === startMs && prev.endMs === endMs) {
         return prev;
       }
       return { kind: 'custom', startMs, endMs };

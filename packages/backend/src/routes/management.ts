@@ -13,6 +13,7 @@ import { registerQuotaEnforcementRoutes } from './management/quota-enforcement';
 import { registerUserQuotaRoutes } from './management/user-quotas';
 import { registerOAuthRoutes } from './management/oauth';
 import { registerMcpLogRoutes } from './management/mcp-logs';
+import { registerMcpOAuthManagementRoutes } from './management/mcp-oauth';
 import { registerLoggingRoutes } from './management/logging';
 import { registerRestartRoutes } from './management/restart';
 import { registerProviderRoutes } from './management/providers';
@@ -24,6 +25,7 @@ import { registerBackupRoutes } from './management/backup';
 import { registerConcurrencyRoutes } from './management/concurrency';
 import { registerModelInsightsRoutes } from './management/model-insights';
 import { registerProviderInsightsRoutes } from './management/provider-insights';
+import { registerCustomCheckerRoutes } from './management/custom-checkers';
 import { Dispatcher } from '../services/dispatch/dispatcher';
 import { ProbeService } from '../services/probes/probe-service';
 import { QuotaScheduler } from '../services/quota/quota-scheduler';
@@ -113,6 +115,7 @@ export async function registerManagementRoutes(
       if (mcpUsageStorage) {
         await registerMcpLogRoutes(adminOnly, mcpUsageStorage);
       }
+      await registerMcpOAuthManagementRoutes(adminOnly);
       if (quotaEnforcer) {
         await registerQuotaEnforcementRoutes(adminOnly, quotaEnforcer);
       }
@@ -127,6 +130,7 @@ export async function registerManagementRoutes(
       await registerModelInsightsRoutes(adminOnly, usageStorage);
       // Provider insights (per-provider aggregate endpoint)
       await registerProviderInsightsRoutes(adminOnly, usageStorage);
+      await registerCustomCheckerRoutes(adminOnly, quotaScheduler ?? QuotaScheduler.getInstance());
     });
   });
 }

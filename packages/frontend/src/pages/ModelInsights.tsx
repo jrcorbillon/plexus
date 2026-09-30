@@ -1,12 +1,6 @@
 import React, { useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import {
-  ArrowLeft,
-  BarChart3,
-  RefreshCw,
-  Activity,
-  AlertTriangle,
-} from 'lucide-react';
+import { ArrowLeft, BarChart3, RefreshCw, Activity, AlertTriangle } from 'lucide-react';
 import { PageHeader } from '../components/layout/PageHeader';
 import { PageContainer } from '../components/layout/PageContainer';
 import { Card } from '../components/ui/Card';
@@ -17,7 +11,11 @@ import {
   formatBucketLabel,
   InsightsTimeSeriesCharts,
 } from '../components/insights/insights-charts';
-import { HeroMetric, SectionMetric, LoadingSkeleton } from '../components/insights/insights-metrics';
+import {
+  HeroMetric,
+  SectionMetric,
+  LoadingSkeleton,
+} from '../components/insights/insights-metrics';
 import { useInsightsPage } from '../hooks/useInsightsPage';
 import { InsightsRangeControls } from '../components/insights/InsightsRangeControls';
 import {
@@ -235,31 +233,76 @@ export const ModelInsights: React.FC = () => {
 
               <Card title="Performance" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Success Rate" value={formatPercent(dataForCurrentAlias.metrics.successRate * 100)} />
-                  <SectionMetric label="Avg TTFT" value={formatMs(dataForCurrentAlias.metrics.avgTtftMs)} />
-                  <SectionMetric label="Throughput" value={`${formatTPS(dataForCurrentAlias.metrics.avgThroughputTps)} tok/s`} />
-                  <SectionMetric label="E2E TPS" value={`${formatTPS(dataForCurrentAlias.metrics.avgE2eTps)} tok/s`} />
-                  <SectionMetric label="Cache Hit Rate" value={formatPercent(dataForCurrentAlias.metrics.cacheHitRate * 100)} />
+                  <SectionMetric
+                    label="Success Rate"
+                    value={formatPercent(dataForCurrentAlias.metrics.successRate * 100)}
+                  />
+                  <SectionMetric
+                    label="Avg TTFT"
+                    value={formatMs(dataForCurrentAlias.metrics.avgTtftMs)}
+                  />
+                  <SectionMetric
+                    label="Throughput"
+                    value={`${formatTPS(dataForCurrentAlias.metrics.avgThroughputTps)} tok/s`}
+                  />
+                  <SectionMetric
+                    label="E2E TPS"
+                    value={`${formatTPS(dataForCurrentAlias.metrics.avgE2eTps)} tok/s`}
+                  />
+                  <SectionMetric
+                    label="Cache Hit Rate"
+                    value={formatPercent(dataForCurrentAlias.metrics.cacheHitRate * 100)}
+                  />
                 </div>
               </Card>
 
               <Card title="Tokens" className="mb-4" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Total" value={formatInteger(dataForCurrentAlias.metrics.totalTokens)} />
-                  <SectionMetric label="Input" value={formatInteger(dataForCurrentAlias.metrics.inputTokens)} />
-                  <SectionMetric label="Output" value={formatInteger(dataForCurrentAlias.metrics.outputTokens)} />
-                  <SectionMetric label="Reasoning" value={formatInteger(dataForCurrentAlias.metrics.reasoningTokens)} />
-                  <SectionMetric label="Cached" value={formatInteger(dataForCurrentAlias.metrics.cachedTokens)} />
-                  <SectionMetric label="Cache Write" value={formatInteger(dataForCurrentAlias.metrics.cacheWriteTokens)} />
+                  <SectionMetric
+                    label="Total"
+                    value={formatInteger(dataForCurrentAlias.metrics.totalTokens)}
+                  />
+                  <SectionMetric
+                    label="Input"
+                    value={formatInteger(dataForCurrentAlias.metrics.inputTokens)}
+                  />
+                  <SectionMetric
+                    label="Output"
+                    value={formatInteger(dataForCurrentAlias.metrics.outputTokens)}
+                  />
+                  <SectionMetric
+                    label="Reasoning"
+                    value={formatInteger(dataForCurrentAlias.metrics.reasoningTokens)}
+                  />
+                  <SectionMetric
+                    label="Cached"
+                    value={formatInteger(dataForCurrentAlias.metrics.cachedTokens)}
+                  />
+                  <SectionMetric
+                    label="Cache Write"
+                    value={formatInteger(dataForCurrentAlias.metrics.cacheWriteTokens)}
+                  />
                 </div>
               </Card>
 
               <Card title="Cost Details" className="mb-6" dense>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
-                  <SectionMetric label="Cost per Request" value={formatCost(dataForCurrentAlias.metrics.costPerRequest)} />
-                  <SectionMetric label="Cost per 1M Tokens" value={formatCost(dataForCurrentAlias.metrics.costPerMillionTokens)} />
-                  <SectionMetric label="Streamed Requests" value={formatNumber(dataForCurrentAlias.metrics.streamedRequests, 0)} />
-                  <SectionMetric label="Non-Streamed" value={formatNumber(dataForCurrentAlias.metrics.nonStreamedRequests, 0)} />
+                  <SectionMetric
+                    label="Cost per Request"
+                    value={formatCost(dataForCurrentAlias.metrics.costPerRequest)}
+                  />
+                  <SectionMetric
+                    label="Cost per 1M Tokens"
+                    value={formatCost(dataForCurrentAlias.metrics.costPerMillionTokens)}
+                  />
+                  <SectionMetric
+                    label="Streamed Requests"
+                    value={formatNumber(dataForCurrentAlias.metrics.streamedRequests, 0)}
+                  />
+                  <SectionMetric
+                    label="Non-Streamed"
+                    value={formatNumber(dataForCurrentAlias.metrics.nonStreamedRequests, 0)}
+                  />
                 </div>
               </Card>
 
@@ -275,10 +318,7 @@ export const ModelInsights: React.FC = () => {
                 <div className="space-y-3 mb-6">
                   <h3 className="font-heading text-sm font-semibold text-text px-1">Providers</h3>
                   {dataForCurrentAlias.providers.map((provider, pIdx) => (
-                    <ProviderSection
-                      key={`${provider.provider}:${pIdx}`}
-                      provider={provider}
-                    />
+                    <ProviderSection key={`${provider.provider}:${pIdx}`} provider={provider} />
                   ))}
                 </div>
               )}
@@ -322,10 +362,7 @@ const ProviderSection: React.FC<{
     >
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
         <ProviderMetric label="Requests" value={formatInteger(provider.metrics.requests)} />
-        <ProviderMetric
-          label="Total Tokens"
-          value={formatInteger(provider.metrics.totalTokens)}
-        />
+        <ProviderMetric label="Total Tokens" value={formatInteger(provider.metrics.totalTokens)} />
         <ProviderMetric label="Cost" value={formatCost(provider.metrics.totalCost)} />
         <ProviderMetric label="Avg TTFT" value={formatMs(provider.metrics.avgTtftMs)} />
         <ProviderMetric

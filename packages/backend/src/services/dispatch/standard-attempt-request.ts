@@ -6,14 +6,25 @@ import type { RetryAttemptRecord } from './dispatcher-types';
 import type { StallConfig } from '../inspectors/stall-inspector';
 import { CooldownManager } from '../runtime/cooldown-manager';
 import type { RequestManagerHost } from './request-manager';
+import { refreshOAuthRoute } from './request-payload-builder';
+import { isOAuthRoute } from '../oauth/oauth-dispatcher';
 import {
+  createAdvisorResultStripState,
+  createLiteToolStripState,
   createThinkingSignatureStripState,
   createUnsupportedParamStripState,
   deleteDottedPath,
+  planAdvisorResultStrip,
+  planLiteToolStrip,
   planThinkingSignatureStrip,
   planUnsupportedParamStrip,
+  refundAdvisorResultStrip,
   refundThinkingSignatureStrip,
+  stripAdvisorResultBlocks,
+  stripLiteUnsupportedTools,
   stripThinkingSignatureBlocks,
+  MAX_ADVISOR_RESULT_STRIP_RETRIES,
+  MAX_LITE_TOOL_STRIP_RETRIES,
   MAX_THINKING_SIGNATURE_STRIP_RETRIES,
   MAX_UNSUPPORTED_PARAM_STRIP_RETRIES,
 } from './dispatcher-auto-compat';
@@ -53,6 +64,8 @@ export function deriveProbeStallConfig(
 export interface StandardAttemptContext {
   host: RequestManagerHost;
   providerPayload: any;
+  /** Post-adapter model actually being dispatched; derived from providerPayload.model when present. */
+  upstreamModel?: string;
   request: UnifiedChatRequest;
   requestWithTargetModel: UnifiedChatRequest;
   route: RouteResult;
@@ -102,6 +115,12 @@ export async function executeStandardAttempt(
   // rebuilds this via copy-on-write (deleteDottedPath) rather than mutating
   // in place, so a successful strip must reassign this binding.
   let providerPayload = context.providerPayload;
+  const upstreamModel =
+    typeof context.upstreamModel === 'string' && context.upstreamModel.length > 0
+      ? context.upstreamModel
+      : typeof providerPayload?.model === 'string' && providerPayload.model.length > 0
+        ? providerPayload.model
+        : route.model;
   // Pristine snapshot taken once, outside the loop. Every retry iteration
   // below resets `effectiveStallConfig` from THIS rather than carrying
   // forward whatever the previous iteration's post-fetch adjustment left it
@@ -112,8 +131,8 @@ export async function executeStandardAttempt(
   let effectiveStallConfig = pristineStallConfig;
 
   const incomingApi = currentRequest.incomingApiType || 'unknown';
-  const url = host.buildRequestUrl(route, transformer, requestWithTargetModel, targetApiType);
-  const headers = host.setupHeaders(route, targetApiType, requestWithTargetModel);
+  let url = host.buildRequestUrl(route, transformer, requestWithTargetModel, targetApiType);
+  let headers = host.setupHeaders(route, targetApiType, requestWithTargetModel);
 
   logger.info(
     `Dispatching ${currentRequest.model} to ${route.provider}:${route.model} ${incomingApi} <-> ${transformer.name}`
@@ -121,14 +140,18 @@ export async function executeStandardAttempt(
 
   // Reactive auto-compat: bounded per-target state so a strip-and-retry
   // cycle (see the 400 handling below) can't loop forever (see
-  // dispatcher-auto-compat.ts for the matching/bound logic). Two independent
-  // mechanisms, two independent budgets — neither resets the other's
+  // dispatcher-auto-compat.ts for the matching/bound logic). Four
+  // independent mechanisms, four independent budgets — none resets another's
   // counter, so the combined worst case for this target is bounded at
   // exactly 1 (initial attempt) + MAX_THINKING_SIGNATURE_STRIP_RETRIES +
-  // MAX_UNSUPPORTED_PARAM_STRIP_RETRIES fetches, however the two mechanisms
-  // interleave — they can't ping-pong into an unbounded loop.
+  // MAX_ADVISOR_RESULT_STRIP_RETRIES + MAX_UNSUPPORTED_PARAM_STRIP_RETRIES +
+  // MAX_LITE_TOOL_STRIP_RETRIES fetches, however the mechanisms interleave —
+  // they can't ping-pong into an unbounded loop.
   const paramStripState = createUnsupportedParamStripState();
   const thinkingStripState = createThinkingSignatureStripState();
+  const advisorStripState = createAdvisorResultStripState();
+  const liteToolStripState = createLiteToolStripState();
+  let oauthRefreshAttempted = false;
 
   // Looped so a strip-and-retry can redo the fetch against the SAME target
   // without returning to the caller's failover loop — failing over would
@@ -203,7 +226,14 @@ export async function executeStandardAttempt(
               isDescriptorRequest: (currentRequest as any)._isVisionDescriptorRequest,
               visionFallthroughModel: (currentRequest as any)._visionFallthroughModel,
             });
-            host.appendFailureAttempt(retryHistory, route, stallError, targetApiType, true);
+            host.appendFailureAttempt(
+              retryHistory,
+              route,
+              stallError,
+              targetApiType,
+              true,
+              upstreamModel
+            );
             CooldownManager.getInstance().markProviderStallFailure(
               route.provider,
               route.model,
@@ -250,9 +280,37 @@ export async function executeStandardAttempt(
     if (!response.ok) {
       const errorText = await response.text();
 
+      // Reactive OAuth refresh: an upstream 401 from an OAuth provider indicates
+      // that the access token was revoked or expired upstream before our local
+      // timestamp. Force a fresh token exchange and retry the same target once.
+      if (response.status === 401 && !oauthRefreshAttempted && isOAuthRoute(route, targetApiType)) {
+        oauthRefreshAttempted = true;
+        logger.warn(
+          `OAuth: Upstream 401 from ${route.provider}/${route.model} — attempting reactive token refresh and retry`
+        );
+        try {
+          const refreshed = await refreshOAuthRoute(route, targetApiType, attemptTimeout.signal);
+          if (refreshed) {
+            url = host.buildRequestUrl(route, transformer, requestWithTargetModel, targetApiType);
+            headers = host.setupHeaders(route, targetApiType, requestWithTargetModel);
+            logger.info(
+              `OAuth: Successfully refreshed credentials for ${route.provider}/${route.model} after 401 — retrying attempt`
+            );
+            continue;
+          }
+        } catch (refreshErr: any) {
+          if (attemptTimeout.signal.aborted || signal?.aborted) {
+            throw refreshErr;
+          }
+          logger.error(
+            `OAuth: Failed to refresh credentials for ${route.provider}/${route.model} after 401: ${refreshErr?.message ?? refreshErr}`
+          );
+        }
+      }
+
       // Reactive auto-compat: a 400 can name a problem that failing over
       // won't fix — every remaining target would reject the same request
-      // the same way — so both mechanisms below strip the offending content
+      // the same way — so the mechanisms below strip the offending content
       // and retry the SAME target instead. Checked in order:
       //
       //   1. Stale thinking-block signatures: alias-level failover can
@@ -260,9 +318,20 @@ export async function executeStandardAttempt(
       //      blocks were signed by a DIFFERENT Claude model/session than
       //      the one we're now targeting, and Anthropic 400s naming the
       //      stale signature specifically.
-      //   2. Unsupported parameters: some upstreams 400 naming one specific
+      //   2. Account-bound advisor results: failover can replay a
+      //      conversation whose `advisor_tool_result` was sealed (encrypted)
+      //      by a DIFFERENT Claude account than the one we're now targeting,
+      //      and Anthropic 400s "Advisor tool result content could not be
+      //      processed." — same failure class as (1).
+      //   3. Unsupported/unknown parameters: some upstreams 400 naming one specific
       //      client-sent field (e.g. LobeHub's gpt-5.5 traffic sending
       //      safety_identifier / prompt_cache_key that a provider rejects).
+      //   4. Unsupported responses:lite tools: real Codex CLI traffic
+      //      declares a `web_search` tool by default, but the
+      //      responses:lite wire contract only allows function/custom/
+      //      tool_search tools — the 400 names the restriction generically,
+      //      not the specific tool(s), so every disallowed tool is stripped
+      //      at once.
       if (response.status === 400) {
         if (planThinkingSignatureStrip(errorText, providerPayload, thinkingStripState)) {
           const stripResult = stripThinkingSignatureBlocks(providerPayload);
@@ -291,6 +360,32 @@ export async function executeStandardAttempt(
           refundThinkingSignatureStrip(thinkingStripState);
         }
 
+        if (planAdvisorResultStrip(errorText, providerPayload, advisorStripState)) {
+          const stripResult = stripAdvisorResultBlocks(providerPayload);
+          if (stripResult.strippedCount > 0) {
+            // Copy-on-write, like the thinking-signature strip above: a NEW
+            // payload is returned and the original (whose `messages` can be
+            // shared by reference with the long-lived request) is never
+            // mutated, so a successful strip reassigns the binding.
+            providerPayload = stripResult.payload;
+            logger.warn(
+              `Auto-compat: ${route.provider}/${route.model} rejected an account-bound advisor ` +
+                `result — stripped ${stripResult.strippedCount} advisor exchange(s) and retrying the ` +
+                `same target (attempt ${advisorStripState.attempts}/${MAX_ADVISOR_RESULT_STRIP_RETRIES})`
+            );
+            continue;
+          }
+          // Zero blocks stripped — planAdvisorResultStrip's structural
+          // `messages`-array check also matches OpenAI-format payloads, which
+          // never carry advisor blocks. Retrying would resend a byte-identical
+          // request, so fall through to the unsupported-param check / normal
+          // failover handling below instead of retrying this target — and
+          // refund the planned attempt so a later genuine advisor 400 still
+          // gets its one strip-and-retry. Loop-safe: this branch never
+          // `continue`s.
+          refundAdvisorResultStrip(advisorStripState);
+        }
+
         const paramToStrip = planUnsupportedParamStrip(errorText, paramStripState);
         if (paramToStrip) {
           const stripResult = deleteDottedPath(providerPayload, paramToStrip);
@@ -308,6 +403,30 @@ export async function executeStandardAttempt(
           // resending the SAME payload would just repeat the identical
           // upstream rejection, so fall through to normal failover/error
           // handling below instead of retrying this target again.
+        }
+
+        // Gated on targetApiType so an unrelated 400 that happens to match
+        // the (fairly specific) error pattern can never trigger a strip on a
+        // non-lite target — the pattern match alone was already unlikely to
+        // misfire, but this removes the class of risk entirely for free.
+        if (
+          targetApiType.toLowerCase() === 'responses:lite' &&
+          planLiteToolStrip(errorText, liteToolStripState)
+        ) {
+          const stripResult = stripLiteUnsupportedTools(providerPayload);
+          if (stripResult.strippedCount > 0) {
+            providerPayload = stripResult.payload;
+            logger.warn(
+              `Auto-compat: ${route.provider}/${route.model} rejected tool(s) unsupported by ` +
+                `responses:lite — stripped ${stripResult.strippedCount} tool(s) and retrying the ` +
+                `same target (attempt ${liteToolStripState.attempts}/${MAX_LITE_TOOL_STRIP_RETRIES})`
+            );
+            continue;
+          }
+          // Nothing was actually removed (no `tools` array, or every
+          // declared tool was already an allowed type) — resending the SAME
+          // payload would just repeat the identical upstream rejection, so
+          // fall through to normal failover/error handling below.
         }
       }
 
@@ -328,7 +447,7 @@ export async function executeStandardAttempt(
         );
       } catch (e: any) {
         if (signal?.aborted) throw host.buildCancelledError(signal);
-        host.appendFailureAttempt(retryHistory, route, e, targetApiType, canRetry);
+        host.appendFailureAttempt(retryHistory, route, e, targetApiType, canRetry, upstreamModel);
 
         if (canRetry) {
           attemptTimeout.cleanup();
@@ -378,7 +497,9 @@ export async function executeStandardAttempt(
         hasNextTarget &&
         !streamProbe.streamStarted &&
         (host.isRetryableNetworkError(error, retryableErrors) ||
-          error.message?.includes('stalled'));
+          error.message?.includes('stalled') ||
+          (error as any).isStreamError === true ||
+          (error as any).routingContext?.statusCode !== undefined);
 
       if (canRetry) {
         attemptTimeout.cleanup();
@@ -387,7 +508,7 @@ export async function executeStandardAttempt(
           isDescriptorRequest: (currentRequest as any)._isVisionDescriptorRequest,
           visionFallthroughModel: (currentRequest as any)._visionFallthroughModel,
         });
-        host.appendFailureAttempt(retryHistory, route, error, targetApiType, true);
+        host.appendFailureAttempt(retryHistory, route, error, targetApiType, true, upstreamModel);
         if (error.message?.includes('stalled')) {
           CooldownManager.getInstance().markProviderStallFailure(
             route.provider,
@@ -398,7 +519,7 @@ export async function executeStandardAttempt(
           CooldownManager.getInstance().markProviderFailure(
             route.provider,
             route.model,
-            undefined,
+            (error as any).cooldownDuration,
             host.formatFailureReason(error)
           );
         }
@@ -408,6 +529,15 @@ export async function executeStandardAttempt(
         );
         doRelease();
         return { outcome: 'retry', error };
+      }
+
+      if ((error as any).isStreamError || (error as any).routingContext?.cooldownTriggered) {
+        CooldownManager.getInstance().markProviderFailure(
+          route.provider,
+          route.model,
+          (error as any).cooldownDuration,
+          host.formatFailureReason(error)
+        );
       }
 
       doRelease();
@@ -466,13 +596,14 @@ export async function executeStandardAttempt(
     });
     CooldownManager.getInstance().markProviderSuccess(route.provider, route.model);
     host.recordStickySession(sessionKey, route, currentRequest);
-    host.appendSuccessAttempt(retryHistory, route, targetApiType);
+    host.appendSuccessAttempt(retryHistory, route, targetApiType, upstreamModel);
     host.attachAttemptMetadata(
       streamResponse,
       attemptedProviders,
       retryHistory,
       route,
-      targetApiType
+      targetApiType,
+      upstreamModel
     );
     attemptTimeout.cleanup();
     return { outcome: 'success', response: streamResponse };
@@ -532,7 +663,14 @@ export async function executeStandardAttempt(
       // CooldownManager.markProviderFailure above.
       cooldownTriggered: false,
     };
-    host.appendFailureAttempt(retryHistory, route, emptyCompletionError, targetApiType, true);
+    host.appendFailureAttempt(
+      retryHistory,
+      route,
+      emptyCompletionError,
+      targetApiType,
+      true,
+      upstreamModel
+    );
     host.saveIntermediateError(
       currentRequest.requestId,
       targetApiType || 'chat',
@@ -556,13 +694,14 @@ export async function executeStandardAttempt(
 
   CooldownManager.getInstance().markProviderSuccess(route.provider, route.model);
   host.recordStickySession(sessionKey, route, currentRequest);
-  host.appendSuccessAttempt(retryHistory, route, targetApiType);
+  host.appendSuccessAttempt(retryHistory, route, targetApiType, upstreamModel);
   host.attachAttemptMetadata(
     nonStreamingResponse,
     attemptedProviders,
     retryHistory,
     route,
-    targetApiType
+    targetApiType,
+    upstreamModel
   );
   doRelease();
   attemptTimeout.cleanup();

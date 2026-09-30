@@ -10,10 +10,14 @@ export type ProviderAdmission =
  * Checks whether a provider can accept a request and reserves its concurrency
  * slot. Call `release` exactly once after an admitted attempt completes.
  */
-export async function admitProvider(route: RouteResult): Promise<ProviderAdmission> {
+export async function admitProvider(
+  route: RouteResult,
+  options?: { bypassKeys?: ReadonlySet<string> }
+): Promise<ProviderAdmission> {
   const healthy = await CooldownManager.getInstance().isProviderHealthy(
     route.provider,
-    route.model
+    route.model,
+    options
   );
   if (!healthy) {
     return {

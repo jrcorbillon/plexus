@@ -21,6 +21,7 @@ export type ProbeApiType =
   | 'responses'
   | 'embeddings'
   | 'images'
+  | 'decisions'
   | 'speech'
   | 'oauth';
 
@@ -75,11 +76,27 @@ function buildSecondaryRequest(apiType: ProbeApiType, modelPath: string): any {
     case 'embeddings':
       return { model: modelPath, input: ['Hello world'] };
     case 'images':
+      // Deliberately minimal: `response_format` and `size` are not universally
+      // supported (Codex Images rejects `url` and does not render 256x256), so
+      // the probe sends only what every image target accepts.
+      return { model: modelPath, prompt: 'A tiny red square', n: 1 };
+    case 'decisions':
       return {
         model: modelPath,
-        prompt: 'A tiny 256x256 red square',
-        n: 1,
-        size: '256x256',
+        state: 'My checkout page shows a blank screen after I click Pay.',
+        questions: {
+          is_bug: { type: 'noul', instructions: 'Is the customer reporting a software defect?' },
+          team: {
+            type: 'choice',
+            instructions: 'Which team should own this ticket?',
+            criteria: { payments: 'Checkout and billing', frontend: 'Rendering issues' },
+          },
+          urgency: {
+            type: 'score',
+            instructions: 'How urgent is this ticket?',
+            criteria: ['Can wait', 'This week', 'Blocking revenue'],
+          },
+        },
       };
     case 'speech':
       return { model: modelPath, input: 'Hello world' };
@@ -179,28 +196,22 @@ export class ProbeService {
           incomingApiType: 'embeddings',
         });
       } else if (apiType === 'images') {
-        const imgReq = testRequest as {
-          model: string;
-          prompt: string;
-          n?: number;
-          size?: string;
-          quality?: string;
-          style?: string;
-          user?: string;
-        };
+        const imgReq = testRequest as { model: string; prompt: string; n?: number };
         response = await this.dispatcher.dispatchImageGenerations({
           model: imgReq.model,
           prompt: imgReq.prompt,
           n: imgReq.n,
-          size: imgReq.size,
-          response_format: 'url' as const,
-          quality: imgReq.quality,
-          style: imgReq.style,
-          user: imgReq.user,
           originalBody: testRequest,
           requestId,
           incomingApiType: 'images',
-        } as any);
+        });
+      } else if (apiType === 'decisions') {
+        response = await this.dispatcher.dispatchDecisions({
+          ...testRequest,
+          originalBody: testRequest,
+          requestId,
+          incomingApiType: 'decisions',
+        });
       } else if (apiType === 'speech') {
         const { SpeechTransformer } = await import('../../transformers/speech');
         const transformer = new SpeechTransformer();
@@ -231,6 +242,9 @@ export class ProbeService {
         unifiedRequest.incomingApiType = apiType;
         unifiedRequest.originalBody = testRequest;
         unifiedRequest.requestId = requestId;
+        // Probes skip the inference routes that derive session headers, so give
+        // each probe its own OpenCode Go session (sent only to opencode-go).
+        unifiedRequest.cacheRoutingHeaders = { 'x-opencode-session': requestId };
         response = await this.dispatcher.dispatch(unifiedRequest);
       }
 
@@ -260,13 +274,16 @@ export class ProbeService {
         apiType !== 'chat' &&
         apiType !== 'messages' &&
         apiType !== 'gemini' &&
-        apiType !== 'responses';
+        apiType !== 'responses' &&
+        apiType !== 'decisions';
       usageRecord.attemptCount = response.plexus?.attemptCount || 1;
       usageRecord.retryHistory = response.plexus?.retryHistory || null;
       usageRecord.finalAttemptProvider =
         response.plexus?.finalAttemptProvider || usageRecord.provider || null;
       usageRecord.finalAttemptModel =
         response.plexus?.finalAttemptModel || usageRecord.selectedModelName || null;
+      usageRecord.upstreamModel =
+        response.plexus?.upstreamModel || usageRecord.finalAttemptModel || null;
       usageRecord.allAttemptedProviders = response.plexus?.allAttemptedProviders || null;
 
       if (response.usage) {
@@ -279,7 +296,11 @@ export class ProbeService {
 
       const pricing = response.plexus?.pricing;
       const providerDiscount = response.plexus?.providerDiscount;
-      calculateCosts(usageRecord, pricing, providerDiscount);
+      calculateCosts(usageRecord, pricing, providerDiscount, {
+        upstreamModel: response.plexus?.upstreamModel,
+        pricingModel: response.plexus?.pricingModel,
+        pricingFallback: response.plexus?.pricingFallback,
+      });
 
       this.usageStorage.emitUpdatedAsync({
         requestId,
@@ -291,7 +312,9 @@ export class ProbeService {
       await this.usageStorage.saveRequest(usageRecord as UsageRecord);
 
       let responseText: string;
-      if (apiType === 'images') {
+      if (apiType === 'decisions') {
+        responseText = JSON.stringify(response.answers);
+      } else if (apiType === 'images') {
         responseText =
           response.data && Array.isArray(response.data)
             ? `Success (${response.data.length} image${response.data.length > 1 ? 's' : ''} created)`

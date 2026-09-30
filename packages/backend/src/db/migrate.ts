@@ -76,14 +76,6 @@ async function buildMigrations(journal: Journal, devDir: string): Promise<Migrat
   return results.map((r) => r.migration);
 }
 
-function normalizeSqlStatement(statement: string): string {
-  return statement.replace(/\s+/g, ' ').trim().replace(/;$/, '').toLowerCase();
-}
-
-function isDuplicateColumnError(error: any): boolean {
-  return error?.cause?.code === '42701' || error?.code === '42701';
-}
-
 function toIdempotentStatement(statement: string): string {
   if (
     /ALTER\s+TABLE[\s\S]+ADD\s+COLUMN/i.test(statement) &&
@@ -183,68 +175,79 @@ function runSqliteMigrationsIdempotently(
   }
 }
 
-async function attemptPostgresDuplicateColumnRepair(
+function isIgnorablePostgresDdlError(statement: string, error: any): boolean {
+  const code = error?.cause?.code ?? error?.code;
+  if (code === '42701') return /ALTER\s+TABLE[\s\S]+ADD\s+COLUMN/i.test(statement);
+  if (code === '42P07') return /^CREATE\s+(?:(?:UNIQUE\s+)?INDEX|TABLE)\b/i.test(statement);
+  if (code === '42710') {
+    return (
+      /^CREATE\s+TYPE\b/i.test(statement) ||
+      /ALTER\s+TABLE[\s\S]+ADD\s+CONSTRAINT/i.test(statement) ||
+      /ALTER\s+TYPE[\s\S]+ADD\s+VALUE/i.test(statement)
+    );
+  }
+  return false;
+}
+
+/** Track hashes rather than a timestamp watermark so fork histories cannot skip migrations. */
+async function runPostgresMigrationsIdempotently(
   db: any,
   migrations: MigrationMeta[],
-  journal: Journal,
-  migrationError: any
-): Promise<boolean> {
-  const failedQuery = typeof migrationError?.query === 'string' ? migrationError.query : '';
-  if (!failedQuery) return false;
+  journal: Journal
+): Promise<void> {
+  await db.execute(sql.raw(`CREATE SCHEMA IF NOT EXISTS "${DRIZZLE_MIGRATIONS_SCHEMA}"`));
+  await db.execute(
+    sql.raw(`
+    CREATE TABLE IF NOT EXISTS "${DRIZZLE_MIGRATIONS_SCHEMA}"."${DRIZZLE_MIGRATIONS_TABLE}" (
+      id SERIAL PRIMARY KEY,
+      hash text NOT NULL,
+      created_at bigint
+    )
+  `)
+  );
 
-  const normalizedFailedQuery = normalizeSqlStatement(failedQuery);
+  const tracked = await db.execute(sql`SELECT hash FROM "drizzle"."__drizzle_migrations"`);
+  const appliedHashes = new Set<string>(
+    (Array.isArray(tracked) ? tracked : tracked.rows).map((row: { hash: string }) => row.hash)
+  );
 
   for (let i = 0; i < migrations.length; i++) {
     const migration = migrations[i]!;
     const entry = journal.entries[i]!;
-    const statements = migration.sql.map((s) => s.trim()).filter((s) => s.length > 0);
+    if (appliedHashes.has(migration.hash)) continue;
+    // Commit each migration together with its hash. A later duplicate must never
+    // roll back earlier DDL and then advance a timestamp past that missing DDL.
+    await db.transaction(async (tx: any) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(1347175768)`);
+      const applied = await tx.execute(sql`
+        SELECT 1 FROM "drizzle"."__drizzle_migrations" WHERE hash = ${migration.hash} LIMIT 1
+      `);
+      if ((Array.isArray(applied) ? applied : applied.rows).length > 0) return;
 
-    if (!statements.some((s) => normalizeSqlStatement(s) === normalizedFailedQuery)) continue;
-
-    logger.warn(
-      `Detected duplicate-column migration drift in ${entry.tag}; applying idempotent repair`
-    );
-
-    await db.execute(sql.raw(`CREATE SCHEMA IF NOT EXISTS "${DRIZZLE_MIGRATIONS_SCHEMA}"`));
-    await db.execute(
-      sql.raw(`
-        CREATE TABLE IF NOT EXISTS "${DRIZZLE_MIGRATIONS_SCHEMA}"."${DRIZZLE_MIGRATIONS_TABLE}" (
-          id SERIAL PRIMARY KEY,
-          hash text NOT NULL,
-          created_at bigint
-        )
-      `)
-    );
-
-    for (const statement of statements) {
-      const repairedStatement = toIdempotentStatement(statement);
-      try {
-        await db.execute(sql.raw(repairedStatement));
-      } catch (statementError: any) {
-        if (
-          /ALTER\s+TABLE[\s\S]+ADD\s+COLUMN/i.test(repairedStatement) &&
-          isDuplicateColumnError(statementError)
-        )
-          continue;
-        throw statementError;
+      logger.info(`Applying PostgreSQL migration ${entry.tag}`);
+      for (const statement of migration.sql) {
+        const trimmed = statement.trim();
+        if (!trimmed) continue;
+        await tx.execute(sql.raw('SAVEPOINT plexus_migration_statement'));
+        try {
+          await tx.execute(sql.raw(toIdempotentStatement(trimmed)));
+        } catch (error: any) {
+          if (!isIgnorablePostgresDdlError(trimmed, error)) throw error;
+          // PostgreSQL aborts the transaction even for harmless duplicate DDL.
+          await tx.execute(sql.raw('ROLLBACK TO SAVEPOINT plexus_migration_statement'));
+          logger.warn(
+            `Ignoring idempotent DDL conflict in ${entry.tag}: ${error?.cause?.message ?? error?.message}`
+          );
+        }
+        await tx.execute(sql.raw('RELEASE SAVEPOINT plexus_migration_statement'));
       }
-    }
-
-    await db.execute(
-      sql.raw(`
-        INSERT INTO "${DRIZZLE_MIGRATIONS_SCHEMA}"."${DRIZZLE_MIGRATIONS_TABLE}" ("hash", "created_at")
-        SELECT '${migration.hash}', ${migration.folderMillis}
-        WHERE NOT EXISTS (
-          SELECT 1 FROM "${DRIZZLE_MIGRATIONS_SCHEMA}"."${DRIZZLE_MIGRATIONS_TABLE}"
-          WHERE "created_at" = ${migration.folderMillis}
-        )
-      `)
-    );
-
-    return true;
+      await tx.execute(sql`
+        INSERT INTO "drizzle"."__drizzle_migrations" (hash, created_at)
+        VALUES (${migration.hash}, ${migration.folderMillis})
+      `);
+    });
+    appliedHashes.add(migration.hash);
   }
-
-  return false;
 }
 
 export async function runMigrations() {
@@ -274,34 +277,7 @@ export async function runMigrations() {
               await Bun.file(path.join(DEV_MIGRATIONS_DIR.postgres, 'meta', '_journal.json')).text()
             ) as Journal);
       const migrations = await buildMigrations(journal, DEV_MIGRATIONS_DIR.postgres);
-      try {
-        await (db as any).dialect.migrate(migrations, (db as any).session, {
-          migrationsFolder: '',
-          migrationsSchema: DRIZZLE_MIGRATIONS_SCHEMA,
-          migrationsTable: DRIZZLE_MIGRATIONS_TABLE,
-        });
-      } catch (error: any) {
-        if (isDuplicateColumnError(error)) {
-          const repaired = await attemptPostgresDuplicateColumnRepair(
-            db,
-            migrations,
-            journal,
-            error
-          );
-          if (repaired) {
-            logger.warn('Retrying PostgreSQL migrations after duplicate-column repair');
-            await (db as any).dialect.migrate(migrations, (db as any).session, {
-              migrationsFolder: '',
-              migrationsSchema: DRIZZLE_MIGRATIONS_SCHEMA,
-              migrationsTable: DRIZZLE_MIGRATIONS_TABLE,
-            });
-          } else {
-            throw error;
-          }
-        } else {
-          throw error;
-        }
-      }
+      await runPostgresMigrationsIdempotently(db, migrations, journal);
     }
 
     logger.debug('Migrations completed successfully');
